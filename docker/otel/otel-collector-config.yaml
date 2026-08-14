@@ -1,0 +1,98 @@
+# OpenTelemetry Collector — single ingest point for the whole stack.
+#
+# Point your application at http://localhost:4318 (HTTP) or localhost:4317
+# (gRPC) and traces, metrics, and logs all land here, then fan out to
+# Tempo, Prometheus, and Loki respectively.
+
+receivers:
+  otlp:
+    protocols:
+      grpc:
+        endpoint: 0.0.0.0:4317
+      http:
+        endpoint: 0.0.0.0:4318
+        # Allow browser-based SDKs to post telemetry directly.
+        cors:
+          allowed_origins:
+            - "http://localhost:*"
+            - "http://127.0.0.1:*"
+
+processors:
+  # Guard rail: the collector drops data rather than OOM-killing itself and
+  # taking the rest of your telemetry with it.
+  memory_limiter:
+    check_interval: 1s
+    limit_mib: 512
+    spike_limit_mib: 128
+
+  batch:
+    timeout: 5s
+    send_batch_size: 1024
+
+  # Tag everything so you can tell local telemetry apart in a shared Grafana.
+  resource:
+    attributes:
+      - key: deployment.environment
+        value: local
+        action: upsert
+
+exporters:
+  # Traces -> Tempo over OTLP gRPC.
+  otlp/tempo:
+    endpoint: tempo:4317
+    tls:
+      insecure: true
+
+  # Metrics -> scraped by Prometheus from this endpoint (see prometheus.yml).
+  prometheus:
+    endpoint: 0.0.0.0:8889
+    resource_to_telemetry_conversion:
+      enabled: true
+
+  # Logs -> Loki's native OTLP endpoint (Loki 3.x accepts OTLP directly; the
+  # old dedicated `loki` exporter is deprecated).
+  otlphttp/loki:
+    endpoint: http://loki:3100/otlp
+    tls:
+      insecure: true
+
+  # Uncomment `debug` in a pipeline when telemetry is not showing up in Grafana
+  # and you need to confirm it is reaching the collector at all.
+  debug:
+    verbosity: normal
+
+extensions:
+  health_check:
+    endpoint: 0.0.0.0:13133
+
+service:
+  extensions: [health_check]
+
+  pipelines:
+    traces:
+      receivers: [otlp]
+      processors: [memory_limiter, resource, batch]
+      exporters: [otlp/tempo]
+
+    metrics:
+      receivers: [otlp]
+      processors: [memory_limiter, resource, batch]
+      exporters: [prometheus]
+
+    logs:
+      receivers: [otlp]
+      processors: [memory_limiter, resource, batch]
+      exporters: [otlphttp/loki]
+
+  telemetry:
+    logs:
+      level: info
+    metrics:
+      # Bind to 0.0.0.0 so Prometheus can scrape the collector's own metrics
+      # from another container; the default localhost bind is unreachable.
+      readers:
+        - pull:
+            exporter:
+              prometheus:
+                host: 0.0.0.0
+                port: 8888

@@ -1,0 +1,67 @@
+# Loki 3.x single-binary configuration, filesystem-backed.
+# Sized for local development: no clustering, no object store, no retention
+# enforcement beyond the compactor's default.
+
+auth_enabled: false
+
+server:
+  http_listen_port: 3100
+  grpc_listen_port: 9096
+  log_level: warn
+
+common:
+  instance_addr: 127.0.0.1
+  path_prefix: /loki
+  storage:
+    filesystem:
+      chunks_directory: /loki/chunks
+      rules_directory: /loki/rules
+  replication_factor: 1
+  ring:
+    kvstore:
+      store: inmemory
+
+schema_config:
+  configs:
+    - from: 2024-01-01
+      store: tsdb
+      object_store: filesystem
+      schema: v13
+      index:
+        prefix: index_
+        period: 24h
+
+storage_config:
+  tsdb_shipper:
+    active_index_directory: /loki/tsdb-index
+    cache_location: /loki/tsdb-cache
+
+limits_config:
+  # Required for OTLP ingestion: OpenTelemetry resource/log attributes arrive as
+  # structured metadata, and Loki rejects them outright when this is false.
+  allow_structured_metadata: true
+  volume_enabled: true
+  # Local clocks drift and replayed test fixtures carry old timestamps; a wide
+  # window keeps Loki from rejecting them as too-old.
+  reject_old_samples: false
+  max_query_lookback: 0s
+  ingestion_rate_mb: 32
+  ingestion_burst_size_mb: 64
+
+compactor:
+  working_directory: /loki/compactor
+  delete_request_store: filesystem
+  retention_enabled: true
+
+table_manager:
+  retention_deletes_enabled: false
+  retention_period: 0s
+
+ruler:
+  storage:
+    type: local
+    local:
+      directory: /loki/rules
+
+analytics:
+  reporting_enabled: false

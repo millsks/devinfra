@@ -1,0 +1,68 @@
+# Prometheus scrape configuration for the devinfra stack.
+#
+# Targets use compose service names, resolved on the devinfra network.
+# Services that do not expose /metrics natively are commented out with the
+# exporter you would add to enable them.
+
+global:
+  scrape_interval: 15s
+  evaluation_interval: 15s
+  external_labels:
+    environment: local
+    stack: devinfra
+
+scrape_configs:
+  - job_name: prometheus
+    static_configs:
+      - targets: ["localhost:9090"]
+
+  # The collector's own health/telemetry, plus everything your apps push to it
+  # via OTLP and it re-exposes in Prometheus format.
+  - job_name: otel-collector
+    static_configs:
+      - targets: ["otel-collector:8888"] # collector self-telemetry
+        labels:
+          component: collector
+
+  - job_name: otel-collector-apps
+    static_configs:
+      - targets: ["otel-collector:8889"] # metrics forwarded from instrumented apps
+        labels:
+          component: application
+
+  # Keycloak exposes Micrometer metrics on the management port when
+  # KC_METRICS_ENABLED=true (set in compose).
+  - job_name: keycloak
+    metrics_path: /metrics
+    static_configs:
+      - targets: ["keycloak:9000"]
+
+  - job_name: loki
+    static_configs:
+      - targets: ["loki:3100"]
+
+  - job_name: tempo
+    static_configs:
+      - targets: ["tempo:3200"]
+
+  - job_name: grafana
+    static_configs:
+      - targets: ["grafana:3000"]
+
+  - job_name: minio
+    metrics_path: /minio/v2/metrics/cluster
+    static_configs:
+      - targets: ["minio:9000"]
+
+  # Postgres and Redis have no built-in /metrics endpoint. Add the exporters to
+  # compose.yaml and uncomment to enable:
+  #   prometheuscommunity/postgres-exporter
+  #   oliver006/redis_exporter
+  #
+  # - job_name: postgres
+  #   static_configs:
+  #     - targets: ["postgres-exporter:9187"]
+  #
+  # - job_name: redis
+  #   static_configs:
+  #     - targets: ["redis-exporter:9121"]
