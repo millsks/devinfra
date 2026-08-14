@@ -1,0 +1,16 @@
+# Dashboard provider. Drop any dashboard JSON into docker/grafana/dashboards/
+# and it is picked up within 30s without restarting Grafana.
+
+apiVersion: 1
+
+providers:
+  - name: devinfra
+    orgId: 1
+    folder: devinfra
+    type: file
+    disableDeletion: false
+    updateIntervalSeconds: 30
+    allowUiUpdates: true
+    options:
+      path: /var/lib/grafana/dashboards
+      foldersFromFilesStructure: true

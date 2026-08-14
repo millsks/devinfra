@@ -1,0 +1,24 @@
+{
+  "Servers": {
+    "1": {
+      "Name": "devinfra (application)",
+      "Group": "devinfra",
+      "Host": "postgres",
+      "Port": 5432,
+      "MaintenanceDB": "devinfra",
+      "Username": "devinfra",
+      "SSLMode": "prefer",
+      "Comment": "Primary application database. Password is in .env (POSTGRES_PASSWORD)."
+    },
+    "2": {
+      "Name": "keycloak",
+      "Group": "devinfra",
+      "Host": "postgres",
+      "Port": 5432,
+      "MaintenanceDB": "keycloak",
+      "Username": "devinfra",
+      "SSLMode": "prefer",
+      "Comment": "Keycloak's own schema. Read-only curiosity; do not hand-edit."
+    }
+  }
+}

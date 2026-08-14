@@ -1,0 +1,424 @@
+# devinfra — local development infrastructure stack
+#
+# Every stateful service writes to a named volume, so `docker compose down`
+# followed by `docker compose up` preserves data. Only `down -v` destroys it.
+#
+# Profiles:
+#   (none)         postgres, redis, keycloak, minio, mailpit  — always started
+#   admin          pgadmin, redisinsight, flower
+#   observability  otel-collector, prometheus, loki, tempo, grafana
+#
+# Select profiles with COMPOSE_PROFILES in .env, or `--profile <name>` per run.
+
+name: ${COMPOSE_PROJECT_NAME:-devinfra}
+
+# ---------------------------------------------------------------------------
+# Reusable fragments
+# ---------------------------------------------------------------------------
+x-restart: &restart
+  restart: unless-stopped
+
+x-logging: &logging
+  logging:
+    driver: json-file
+    options:
+      max-size: "10m"
+      max-file: "3"
+
+x-defaults: &defaults
+  <<: [*restart, *logging]
+  networks: [devinfra]
+
+services:
+  # =========================================================================
+  # PostgreSQL 17 — primary datastore, Celery result backend option,
+  # and Keycloak's persistence layer
+  # =========================================================================
+  postgres:
+    <<: *defaults
+    image: pgvector/pgvector:${POSTGRES_VERSION:-0.8.1-pg17}
+    container_name: devinfra-postgres
+    ports:
+      - "${BIND_ADDRESS:-127.0.0.1}:${POSTGRES_PORT:-5432}:5432"
+    environment:
+      POSTGRES_USER: ${POSTGRES_USER:-devinfra}
+      POSTGRES_PASSWORD: ${POSTGRES_PASSWORD:-devinfra}
+      POSTGRES_DB: ${POSTGRES_DB:-devinfra}
+      POSTGRES_EXTRA_DATABASES: ${POSTGRES_EXTRA_DATABASES:-}
+      # scram-sha-256 for anything reaching the container over TCP.
+      POSTGRES_HOST_AUTH_METHOD: scram-sha-256
+      POSTGRES_INITDB_ARGS: "--auth-host=scram-sha-256 --data-checksums"
+    volumes:
+      # The mount path is version-specific. PostgreSQL 17 keeps PGDATA at
+      # /var/lib/postgresql/data; 18 moved it to /var/lib/postgresql/18/docker
+      # and declares the volume one level up at /var/lib/postgresql. If you ever
+      # move to 18, this path must change too or the database stops persisting
+      # without any error.
+      - postgres-data:/var/lib/postgresql/data
+      - ./docker/postgres/postgresql.conf:/etc/postgresql/postgresql.conf:ro
+      - ./docker/postgres/initdb:/docker-entrypoint-initdb.d:ro
+    command: ["postgres", "-c", "config_file=/etc/postgresql/postgresql.conf"]
+    healthcheck:
+      # -h forces a TCP connection so the check also proves the listener is up,
+      # not just the local socket.
+      test: ["CMD-SHELL", "pg_isready -h 127.0.0.1 -U ${POSTGRES_USER:-devinfra} -d ${POSTGRES_DB:-devinfra}"]
+      interval: 10s
+      timeout: 5s
+      retries: 10
+      start_period: 30s
+    shm_size: 256mb
+
+  # =========================================================================
+  # Redis 8 — cache (db 0), Celery broker (db 1), Celery backend (db 2)
+  # =========================================================================
+  redis:
+    <<: *defaults
+    image: redis:${REDIS_VERSION:-8-alpine}
+    container_name: devinfra-redis
+    ports:
+      - "${BIND_ADDRESS:-127.0.0.1}:${REDIS_PORT:-6379}:6379"
+    volumes:
+      - redis-data:/data
+      - ./docker/redis/redis.conf:/usr/local/etc/redis/redis.conf:ro
+    command:
+      - redis-server
+      - /usr/local/etc/redis/redis.conf
+      - --requirepass
+      - ${REDIS_PASSWORD:-devinfra}
+    healthcheck:
+      test: ["CMD-SHELL", "redis-cli -a ${REDIS_PASSWORD:-devinfra} --no-auth-warning ping | grep -q PONG"]
+      interval: 10s
+      timeout: 5s
+      retries: 10
+      start_period: 10s
+
+  # =========================================================================
+  # Keycloak 26 — OpenID Connect provider
+  # =========================================================================
+  keycloak:
+    <<: *defaults
+    image: quay.io/keycloak/keycloak:${KEYCLOAK_VERSION:-26.4.0}
+    container_name: devinfra-keycloak
+    depends_on:
+      postgres:
+        condition: service_healthy
+      mailpit:
+        condition: service_started
+    ports:
+      - "${BIND_ADDRESS:-127.0.0.1}:${KEYCLOAK_PORT:-8080}:8080"
+      - "${BIND_ADDRESS:-127.0.0.1}:${KEYCLOAK_MGMT_PORT:-9000}:9000"
+    environment:
+      # --- Bootstrap admin (console at /admin) ---
+      KC_BOOTSTRAP_ADMIN_USERNAME: ${KEYCLOAK_ADMIN:-admin}
+      KC_BOOTSTRAP_ADMIN_PASSWORD: ${KEYCLOAK_ADMIN_PASSWORD:-admin}
+
+      # --- Persistence: Postgres, not the default in-memory H2 ---
+      KC_DB: postgres
+      KC_DB_URL: jdbc:postgresql://postgres:5432/keycloak
+      KC_DB_USERNAME: ${POSTGRES_USER:-devinfra}
+      KC_DB_PASSWORD: ${POSTGRES_PASSWORD:-devinfra}
+
+      # --- HTTP / hostname ---
+      # Fixing the hostname keeps the OIDC issuer stable at
+      # http://localhost:8080/realms/<realm>, which matters because clients
+      # reject tokens whose issuer does not match their discovery document.
+      KC_HOSTNAME: http://localhost:${KEYCLOAK_PORT:-8080}
+      KC_HOSTNAME_STRICT: "false"
+      KC_HTTP_ENABLED: "true"
+      KC_PROXY_HEADERS: xforwarded
+
+      # --- Observability endpoints on the management port (9000) ---
+      KC_HEALTH_ENABLED: "true"
+      KC_METRICS_ENABLED: "true"
+
+      # Substituted into docker/keycloak/realms/devinfra-realm.json at import.
+      KEYCLOAK_CLIENT_SECRET: ${KEYCLOAK_CLIENT_SECRET:-devinfra-local-secret}
+    volumes:
+      - keycloak-data:/opt/keycloak/data
+      - ./docker/keycloak/realms:/opt/keycloak/data/import:ro
+    # start-dev: no TLS, no hostname strictness, caching disabled. Never use in
+    # production. --import-realm only creates realms that do not already exist,
+    # so edits to the JSON need `make keycloak-reimport`.
+    command: ["start-dev", "--import-realm"]
+    healthcheck:
+      # The Keycloak image has bash but no curl/wget/nc, so this drives a raw
+      # HTTP request over bash's /dev/tcp.
+      test:
+        - CMD-SHELL
+        - >-
+          exec 3<>/dev/tcp/127.0.0.1/9000 &&
+          printf 'GET /health/ready HTTP/1.1\r\nHost: localhost\r\nConnection: close\r\n\r\n' >&3 &&
+          grep -q '"status": "UP"' <&3
+      interval: 15s
+      timeout: 10s
+      retries: 15
+      start_period: 90s
+
+  # =========================================================================
+  # MinIO — S3-compatible object storage
+  # =========================================================================
+  minio:
+    <<: *defaults
+    image: minio/minio:${MINIO_VERSION:-RELEASE.2025-09-07T16-13-09Z}
+    container_name: devinfra-minio
+    ports:
+      - "${BIND_ADDRESS:-127.0.0.1}:${MINIO_API_PORT:-9100}:9000"
+      - "${BIND_ADDRESS:-127.0.0.1}:${MINIO_CONSOLE_PORT:-9101}:9001"
+    environment:
+      MINIO_ROOT_USER: ${MINIO_ROOT_USER:-devinfra}
+      MINIO_ROOT_PASSWORD: ${MINIO_ROOT_PASSWORD:-devinfra123}
+      MINIO_BROWSER_REDIRECT_URL: http://localhost:${MINIO_CONSOLE_PORT:-9101}
+      MINIO_PROMETHEUS_AUTH_TYPE: public
+    volumes:
+      - minio-data:/data
+    command: ["server", "/data", "--console-address", ":9001"]
+    healthcheck:
+      test: ["CMD", "mc", "ready", "local"]
+      interval: 10s
+      timeout: 5s
+      retries: 10
+      start_period: 15s
+
+  # One-shot bucket provisioning. Exits 0 once buckets exist; `docker compose ps`
+  # will show it as Exited, which is expected.
+  minio-init:
+    <<: *logging
+    image: minio/mc:${MINIO_MC_VERSION:-RELEASE.2025-08-13T08-35-41Z}
+    container_name: devinfra-minio-init
+    networks: [devinfra]
+    depends_on:
+      minio:
+        condition: service_healthy
+    environment:
+      MINIO_ROOT_USER: ${MINIO_ROOT_USER:-devinfra}
+      MINIO_ROOT_PASSWORD: ${MINIO_ROOT_PASSWORD:-devinfra123}
+      MINIO_BUCKETS: ${MINIO_BUCKETS:-uploads,artifacts,backups}
+    entrypoint: ["/bin/sh", "-c"]
+    command:
+      - |
+        set -eu
+        mc alias set local http://minio:9000 "$$MINIO_ROOT_USER" "$$MINIO_ROOT_PASSWORD"
+        echo "$$MINIO_BUCKETS" | tr ',' '\n' | while read -r bucket; do
+          [ -z "$$bucket" ] && continue
+          mc mb --ignore-existing "local/$$bucket"
+          mc version enable "local/$$bucket"
+          echo "minio-init: bucket '$$bucket' ready (versioning on)"
+        done
+    restart: "no"
+
+  # =========================================================================
+  # Mailpit — catches every outbound email, including Keycloak's
+  # =========================================================================
+  mailpit:
+    <<: *defaults
+    image: axllent/mailpit:${MAILPIT_VERSION:-v1.28}
+    container_name: devinfra-mailpit
+    ports:
+      - "${BIND_ADDRESS:-127.0.0.1}:${MAILPIT_SMTP_PORT:-1025}:1025"
+      - "${BIND_ADDRESS:-127.0.0.1}:${MAILPIT_UI_PORT:-8025}:8025"
+    environment:
+      MP_MAX_MESSAGES: 5000
+      MP_DATABASE: /data/mailpit.db
+      MP_SMTP_AUTH_ACCEPT_ANY: 1
+      MP_SMTP_AUTH_ALLOW_INSECURE: 1
+    volumes:
+      - mailpit-data:/data
+    healthcheck:
+      test: ["CMD", "wget", "-q", "-O", "-", "http://127.0.0.1:8025/readyz"]
+      interval: 15s
+      timeout: 5s
+      retries: 5
+      start_period: 10s
+
+  # =========================================================================
+  # Admin UIs — profile: admin
+  # =========================================================================
+  pgadmin:
+    <<: *defaults
+    image: dpage/pgadmin4:${PGADMIN_VERSION:-9.9}
+    container_name: devinfra-pgadmin
+    profiles: [admin]
+    depends_on:
+      postgres:
+        condition: service_healthy
+    ports:
+      - "${BIND_ADDRESS:-127.0.0.1}:${PGADMIN_PORT:-5050}:80"
+    environment:
+      # pgAdmin validates this address and exits if it fails; bare "@localhost"
+      # and special-use TLDs (.local, .test) are both rejected.
+      PGADMIN_DEFAULT_EMAIL: ${PGADMIN_EMAIL:-dev@example.com}
+      PGADMIN_DEFAULT_PASSWORD: ${PGADMIN_PASSWORD:-devinfra}
+      PGADMIN_CONFIG_SERVER_MODE: "False"
+      PGADMIN_CONFIG_MASTER_PASSWORD_REQUIRED: "False"
+      PGADMIN_DISABLE_POSTFIX: "True"
+    volumes:
+      - pgadmin-data:/var/lib/pgadmin
+      - ./docker/pgadmin/servers.json:/pgadmin4/servers.json:ro
+    user: "5050:5050"
+
+  redisinsight:
+    <<: *defaults
+    image: redis/redisinsight:${REDISINSIGHT_VERSION:-2.70}
+    container_name: devinfra-redisinsight
+    profiles: [admin]
+    depends_on:
+      redis:
+        condition: service_healthy
+    ports:
+      - "${BIND_ADDRESS:-127.0.0.1}:${REDISINSIGHT_PORT:-5540}:5540"
+    environment:
+      RI_APP_HOST: 0.0.0.0
+      RI_APP_PORT: 5540
+      # Auto-adds the local Redis on first start; no manual "add database" step.
+      RI_REDIS_HOST: redis
+      RI_REDIS_PORT: 6379
+      RI_REDIS_PASSWORD: ${REDIS_PASSWORD:-devinfra}
+      RI_REDIS_ALIAS: devinfra
+    volumes:
+      - redisinsight-data:/data
+
+  # Celery monitoring. Runs without any worker present — it will simply show an
+  # empty cluster until a worker on your host connects to the same broker.
+  flower:
+    <<: *defaults
+    image: mher/flower:${FLOWER_VERSION:-2.0}
+    container_name: devinfra-flower
+    profiles: [admin]
+    depends_on:
+      redis:
+        condition: service_healthy
+    ports:
+      - "${BIND_ADDRESS:-127.0.0.1}:${FLOWER_PORT:-5555}:5555"
+    environment:
+      CELERY_BROKER_URL: redis://:${REDIS_PASSWORD:-devinfra}@redis:6379/${REDIS_BROKER_DB:-1}
+      CELERY_RESULT_BACKEND: redis://:${REDIS_PASSWORD:-devinfra}@redis:6379/${REDIS_BACKEND_DB:-2}
+      FLOWER_UNAUTHENTICATED_API: "true"
+      FLOWER_PURGE_OFFLINE_WORKERS: "60"
+    volumes:
+      - flower-data:/data
+    command: ["celery", "flower", "--persistent=True", "--db=/data/flower.db", "--state_save_interval=10000"]
+
+  # =========================================================================
+  # Observability — profile: observability
+  # =========================================================================
+  otel-collector:
+    <<: *defaults
+    image: otel/opentelemetry-collector-contrib:${OTEL_COLLECTOR_VERSION:-0.140.0}
+    container_name: devinfra-otel-collector
+    profiles: [observability]
+    depends_on:
+      - loki
+      - tempo
+    ports:
+      - "${BIND_ADDRESS:-127.0.0.1}:${OTEL_GRPC_PORT:-4317}:4317" # OTLP gRPC
+      - "${BIND_ADDRESS:-127.0.0.1}:${OTEL_HTTP_PORT:-4318}:4318" # OTLP HTTP
+    volumes:
+      - ./docker/otel/otel-collector-config.yaml:/etc/otelcol-contrib/config.yaml:ro
+    command: ["--config=/etc/otelcol-contrib/config.yaml"]
+
+  prometheus:
+    <<: *defaults
+    image: prom/prometheus:${PROMETHEUS_VERSION:-v3.7.3}
+    container_name: devinfra-prometheus
+    profiles: [observability]
+    ports:
+      - "${BIND_ADDRESS:-127.0.0.1}:${PROMETHEUS_PORT:-9090}:9090"
+    volumes:
+      - prometheus-data:/prometheus
+      - ./docker/prometheus/prometheus.yml:/etc/prometheus/prometheus.yml:ro
+    command:
+      - --config.file=/etc/prometheus/prometheus.yml
+      - --storage.tsdb.path=/prometheus
+      - --storage.tsdb.retention.time=15d
+      # Tempo's metrics_generator remote-writes span metrics here; without this
+      # flag those writes are refused and the Grafana service map stays empty.
+      - --web.enable-remote-write-receiver
+      - --enable-feature=exemplar-storage
+      - --web.enable-lifecycle
+
+  loki:
+    <<: *defaults
+    image: grafana/loki:${LOKI_VERSION:-3.5.7}
+    container_name: devinfra-loki
+    profiles: [observability]
+    ports:
+      - "${BIND_ADDRESS:-127.0.0.1}:${LOKI_PORT:-3100}:3100"
+    volumes:
+      - loki-data:/loki
+      - ./docker/loki/loki-config.yaml:/etc/loki/local-config.yaml:ro
+    command: ["-config.file=/etc/loki/local-config.yaml"]
+    healthcheck:
+      test: ["CMD", "wget", "-q", "-O", "-", "http://127.0.0.1:3100/ready"]
+      interval: 15s
+      timeout: 5s
+      retries: 10
+      start_period: 30s
+
+  tempo:
+    <<: *defaults
+    image: grafana/tempo:${TEMPO_VERSION:-2.9.0}
+    container_name: devinfra-tempo
+    profiles: [observability]
+    ports:
+      - "${BIND_ADDRESS:-127.0.0.1}:${TEMPO_PORT:-3200}:3200"
+    volumes:
+      - tempo-data:/var/tempo
+      - ./docker/tempo/tempo.yaml:/etc/tempo/tempo.yaml:ro
+    command: ["-config.file=/etc/tempo/tempo.yaml"]
+    healthcheck:
+      test: ["CMD", "wget", "-q", "-O", "-", "http://127.0.0.1:3200/ready"]
+      interval: 15s
+      timeout: 5s
+      retries: 10
+      start_period: 30s
+
+  grafana:
+    <<: *defaults
+    image: grafana/grafana:${GRAFANA_VERSION:-12.2.0}
+    container_name: devinfra-grafana
+    profiles: [observability]
+    depends_on:
+      - prometheus
+      - loki
+      - tempo
+    ports:
+      - "${BIND_ADDRESS:-127.0.0.1}:${GRAFANA_PORT:-3000}:3000"
+    environment:
+      GF_SECURITY_ADMIN_USER: ${GRAFANA_ADMIN_USER:-admin}
+      GF_SECURITY_ADMIN_PASSWORD: ${GRAFANA_ADMIN_PASSWORD:-admin}
+      GF_USERS_ALLOW_SIGN_UP: "false"
+      # Local convenience only: skips the login screen entirely.
+      GF_AUTH_ANONYMOUS_ENABLED: "true"
+      GF_AUTH_ANONYMOUS_ORG_ROLE: Admin
+      GF_FEATURE_TOGGLES_ENABLE: traceqlEditor,traceQLStreaming,metricsSummary
+      GF_LOG_LEVEL: warn
+      # Referenced by provisioning/datasources/datasources.yaml.
+      POSTGRES_USER: ${POSTGRES_USER:-devinfra}
+      POSTGRES_PASSWORD: ${POSTGRES_PASSWORD:-devinfra}
+      POSTGRES_DB: ${POSTGRES_DB:-devinfra}
+    volumes:
+      - grafana-data:/var/lib/grafana
+      - ./docker/grafana/provisioning:/etc/grafana/provisioning:ro
+      - ./docker/grafana/dashboards:/var/lib/grafana/dashboards:ro
+
+# ---------------------------------------------------------------------------
+# Named volumes — everything stateful lands here and survives `down`
+# ---------------------------------------------------------------------------
+volumes:
+  postgres-data:
+  redis-data:
+  keycloak-data:
+  minio-data:
+  mailpit-data:
+  pgadmin-data:
+  redisinsight-data:
+  flower-data:
+  prometheus-data:
+  loki-data:
+  tempo-data:
+  grafana-data:
+
+networks:
+  devinfra:
+    name: devinfra
+    driver: bridge

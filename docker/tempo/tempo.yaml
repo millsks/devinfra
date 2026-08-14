@@ -1,0 +1,66 @@
+# Tempo 2.x single-binary trace store, filesystem-backed.
+#
+# Receives traces only from the OTel Collector (otlp/tempo exporter), but the
+# OTLP receivers are open on the network so you can also point an SDK straight
+# at tempo:4317 while debugging the collector itself.
+
+server:
+  http_listen_port: 3200
+  grpc_listen_port: 9097
+  log_level: warn
+
+# Required for Grafana's live trace-tailing / search streaming.
+stream_over_http_enabled: true
+
+distributor:
+  receivers:
+    otlp:
+      protocols:
+        grpc:
+          endpoint: 0.0.0.0:4317
+        http:
+          endpoint: 0.0.0.0:4318
+
+ingester:
+  # Flush aggressively so a trace you just produced is searchable in seconds
+  # instead of minutes. Wasteful in production, essential for a dev loop.
+  max_block_duration: 5m
+  complete_block_timeout: 1m
+
+compactor:
+  compaction:
+    block_retention: 168h # 7 days
+
+storage:
+  trace:
+    backend: local
+    wal:
+      path: /var/tempo/wal
+    local:
+      path: /var/tempo/blocks
+
+# Derive RED metrics (rate, errors, duration) and a service graph from spans,
+# then push them to Prometheus. This is what makes Grafana's service map and
+# span-metrics panels work without instrumenting metrics separately.
+metrics_generator:
+  registry:
+    external_labels:
+      source: tempo
+  storage:
+    path: /var/tempo/generator/wal
+    remote_write:
+      - url: http://prometheus:9090/api/v1/write
+        send_exemplars: true
+  traces_storage:
+    path: /var/tempo/generator/traces
+
+overrides:
+  defaults:
+    metrics_generator:
+      processors:
+        - service-graphs
+        - span-metrics
+        - local-blocks
+
+usage_report:
+  reporting_enabled: false
