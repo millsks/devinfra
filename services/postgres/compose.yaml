@@ -9,10 +9,18 @@
 # directory, so `./conf` and `./seed` are the module's own. `project_directory`
 # is deliberately not used — it would re-base every relative path in the file.
 #
-# The `volumes:` and `networks:` stanzas below carry the identifier and nothing
-# else. Driver keys live in the root compose.yaml, which wins on every key it
-# sets explicitly; a module adding one would silently win instead. See
-# docs/adr/0004-volume-names-are-frozen.md.
+# The `volumes:` stanza below carries the identifier and nothing else. Driver keys
+# live in the root compose.yaml, which wins on every key it sets explicitly; a
+# module adding one would silently win instead.
+#
+# There is deliberately no `networks:` stanza here, and adding one back breaks CI.
+# Compose v2 refuses an `include` in which a module declares a top-level resource
+# the root declares *with keys* — `networks.devinfra conflicts with imported
+# resource`, exit 15. The root's `networks: devinfra:` carries `name:` and
+# `driver:`, so no module may name it; its `volumes: postgres-data:` is bare, so a
+# bare redeclaration here is accepted. The service still joins the network: it
+# inherits `networks: [devinfra]` from common/base.yaml through `extends`. See the
+# 2026-09-07 amendment in docs/adr/0004-volume-names-are-frozen.md.
 services:
   postgres:
     extends:
@@ -52,6 +60,3 @@ services:
 
 volumes:
   postgres-data:
-
-networks:
-  devinfra:
