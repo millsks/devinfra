@@ -241,27 +241,25 @@ So that I find out within minutes whether a change broke something. (FR-16, real
 **When** it completes
 **Then** it finishes within 15 minutes, or the matrix is tiered — never by dropping checks
 
-### Story 1.4: Image updates arrive as validated pull requests
+### Story 1.4: The stack runs under Podman
 
 As the maintainer,
-I want new image tags proposed automatically and checked by CI before I see them,
-So that upgrading stops being a manual chore I postpone. (FR-17)
+I want the stack verified under Podman, my preferred runtime,
+So that I am not tied to Docker Desktop's licensing. Sequenced straight after CI so anything Podman breaks surfaces before later stories assume Docker semantics. (FR-19)
 
 **Acceptance Criteria:**
 
-**Given** an image whose upstream publishes a newer tag
-**When** the update bot next runs
-**Then** it opens a pull request changing only that version variable in `.env.example`
-**And** that PR runs the full CI suite from Story 1.3
+**Given** a supported non-Docker-Desktop runtime
+**When** CI runs the stack against it
+**Then** the stack starts and the smoke suite passes — documentation alone does not satisfy this
 
-**Given** every `*_VERSION` variable
-**When** the configuration is reviewed
-**Then** each is immediately preceded by a `# renovate: datasource=docker depName=<repo>` annotation
-**And** no service resolves to a floating tag (NFR-4)
+**Given** a service that genuinely cannot work on that runtime
+**When** the selection is built
+**Then** it is excluded explicitly and the reason is documented, rather than failing at start
 
-**Given** the update bot is configured
-**When** a dry run is inspected
-**Then** it reports a non-zero count of detected dependencies — proving the regex matches rather than silently matching nothing
+**Given** the runtime requires deviations such as socket paths or flags
+**When** they are needed
+**Then** they are stated in the connection documentation
 
 ### Story 1.5: Every image brought current
 
@@ -288,25 +286,27 @@ So that the stack is not accumulating known-fixed bugs. (FR-20)
 **When** it is found
 **Then** that config change is a separate, explained commit rather than folded into the version bump
 
-### Story 1.6: The stack runs on a second container runtime
+### Story 1.6: Image updates arrive as validated pull requests
 
 As the maintainer,
-I want the stack verified on a runtime other than Docker Desktop,
-So that I am not locked to one vendor's tooling. (FR-19)
+I want new image tags proposed automatically and checked by CI before I see them,
+So that upgrading stops being a manual chore I postpone. (FR-17)
 
 **Acceptance Criteria:**
 
-**Given** a supported non-Docker-Desktop runtime
-**When** CI runs the stack against it
-**Then** the stack starts and the smoke suite passes — documentation alone does not satisfy this
+**Given** an image whose upstream publishes a newer tag
+**When** the update bot next runs
+**Then** it opens a pull request changing only that version variable in `.env.example`
+**And** that PR runs the full CI suite from Story 1.3
 
-**Given** a service that genuinely cannot work on that runtime
-**When** the selection is built
-**Then** it is excluded explicitly and the reason is documented, rather than failing at start
+**Given** every `*_VERSION` variable
+**When** the configuration is reviewed
+**Then** each is immediately preceded by a `# renovate: datasource=docker depName=<repo>` annotation
+**And** no service resolves to a floating tag (NFR-4)
 
-**Given** the runtime requires deviations such as socket paths or flags
-**When** they are needed
-**Then** they are stated in the connection documentation
+**Given** the update bot is configured
+**When** a dry run is inspected
+**Then** it reports a non-zero count of detected dependencies — proving the regex matches rather than silently matching nothing
 
 ---
 
