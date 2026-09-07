@@ -1,0 +1,970 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<meta name="description" content="Architecture spine walkthrough for the devinfra local development infrastructure stack.">
+<!-- Standalone copy for local viewing: open this file directly in a browser.
+     This is the canonical source. The Artifact runtime supplies the doctype/head
+     skeleton at publish time, so that wrapper is inline here instead.
+     Published copy: https://claude.ai/code/artifact/58df3178-a97a-4439-8827-71a91599bf57
+     To update it, republish THIS file with that URL passed explicitly — publishing
+     without it creates a second, unrelated artifact. -->
+<style>
+  :root { color-scheme: light dark; }
+  body { margin: 0; }
+  img { max-width: 100%; }
+  [hidden] { display: none !important; }
+</style>
+<title>devinfra Architecture</title>
+<link rel="preconnect" href="https://fonts.googleapis.com">
+<link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+<link rel="stylesheet" href="https://fonts.googleapis.com/css2?family=IBM+Plex+Mono:wght@400;500;600&family=IBM+Plex+Sans:wght@400;500;600&family=IBM+Plex+Serif:ital,wght@0,400;0,600;1,400&display=swap">
+<style>
+  :root {
+    --ground: #f6f8f9;
+    --surface: #ffffff;
+    --surface-sunk: #eceff1;
+    --ink: #15191d;
+    --ink-soft: #4a555f;
+    --ink-faint: #78848e;
+    --rule: #dbe1e5;
+    --rule-soft: #e8edef;
+    --core: #0d7d8c;
+    --core-wash: #e2f1f3;
+    --module: #4a7c3f;
+    --module-wash: #e8f0e4;
+    --warn: #a8630f;
+    --warn-wash: #f8efe0;
+    --crit: #ad3529;
+    --crit-wash: #f8e7e5;
+    --on-accent: #ffffff;
+    --serif: "IBM Plex Serif", Georgia, "Times New Roman", serif;
+    --sans: "IBM Plex Sans", system-ui, -apple-system, "Segoe UI", sans-serif;
+    --mono: "IBM Plex Mono", ui-monospace, "SF Mono", Menlo, monospace;
+    --measure: 66ch;
+  }
+  @media (prefers-color-scheme: dark) {
+    :root:not([data-theme="light"]) {
+      --ground: #101417;
+      --surface: #171c20;
+      --surface-sunk: #1e2429;
+      --ink: #e6ebee;
+      --ink-soft: #a6b2bb;
+      --ink-faint: #78858e;
+      --rule: #2b3339;
+      --rule-soft: #232a2f;
+      --core: #4fb9c8;
+      --core-wash: #123135;
+      --module: #8cc078;
+      --module-wash: #1c2b18;
+      --warn: #d99b46;
+      --warn-wash: #33260f;
+      --crit: #e07364;
+      --crit-wash: #351a17;
+      --on-accent: #0b1013;
+    }
+  }
+  :root[data-theme="dark"] {
+    --ground: #101417;
+    --surface: #171c20;
+    --surface-sunk: #1e2429;
+    --ink: #e6ebee;
+    --ink-soft: #a6b2bb;
+    --ink-faint: #78858e;
+    --rule: #2b3339;
+    --rule-soft: #232a2f;
+    --core: #4fb9c8;
+    --core-wash: #123135;
+    --module: #8cc078;
+    --module-wash: #1c2b18;
+    --warn: #d99b46;
+    --warn-wash: #33260f;
+    --crit: #e07364;
+    --crit-wash: #351a17;
+    --on-accent: #0b1013;
+  }
+
+  * { box-sizing: border-box; }
+  body {
+    margin: 0;
+    background: var(--ground);
+    color: var(--ink);
+    font-family: var(--sans);
+    font-size: 16px;
+    line-height: 1.6;
+    -webkit-font-smoothing: antialiased;
+  }
+  .wrap { max-width: 1180px; margin: 0 auto; padding: 0 28px 96px; }
+
+  /* ---------- masthead ---------- */
+  header.mast {
+    border-bottom: 1px solid var(--rule);
+    padding: 56px 0 34px;
+    margin-bottom: 8px;
+  }
+  .eyebrow {
+    font-family: var(--mono);
+    font-size: 11.5px;
+    letter-spacing: .13em;
+    text-transform: uppercase;
+    color: var(--core);
+    margin: 0 0 14px;
+    display: flex;
+    gap: 12px;
+    flex-wrap: wrap;
+    align-items: center;
+  }
+  .eyebrow .dot { color: var(--ink-faint); }
+  h1 {
+    font-family: var(--serif);
+    font-weight: 600;
+    font-size: clamp(2.1rem, 5vw, 3.05rem);
+    line-height: 1.1;
+    letter-spacing: -.018em;
+    margin: 0 0 18px;
+    text-wrap: balance;
+  }
+  .standfirst {
+    font-family: var(--serif);
+    font-size: 1.16rem;
+    line-height: 1.55;
+    color: var(--ink-soft);
+    max-width: 60ch;
+    margin: 0;
+  }
+  .standfirst em { color: var(--ink); font-style: italic; }
+
+  .facts {
+    display: flex;
+    flex-wrap: wrap;
+    gap: 0;
+    margin-top: 32px;
+    border: 1px solid var(--rule);
+    border-radius: 3px;
+    background: var(--surface);
+    overflow: hidden;
+  }
+  .fact {
+    flex: 1 1 130px;
+    padding: 14px 18px;
+    border-right: 1px solid var(--rule-soft);
+  }
+  .fact:last-child { border-right: 0; }
+  .fact dt {
+    font-family: var(--mono);
+    font-size: 10.5px;
+    letter-spacing: .1em;
+    text-transform: uppercase;
+    color: var(--ink-faint);
+    margin: 0 0 5px;
+  }
+  .fact dd {
+    margin: 0;
+    font-family: var(--mono);
+    font-size: 1.28rem;
+    font-weight: 500;
+    font-variant-numeric: tabular-nums;
+    color: var(--ink);
+    line-height: 1.15;
+  }
+  .fact dd small { font-size: .68em; color: var(--ink-faint); font-weight: 400; }
+
+  /* ---------- layout ---------- */
+  .cols { display: grid; grid-template-columns: 168px minmax(0, 1fr); gap: 44px; align-items: start; }
+  @media (max-width: 900px) { .cols { grid-template-columns: 1fr; gap: 0; } nav.rail { display: none; } }
+
+  nav.rail { position: sticky; top: 26px; padding-top: 46px; }
+  nav.rail ol { list-style: none; margin: 0; padding: 0; display: flex; flex-direction: column; gap: 2px; }
+  nav.rail a {
+    display: block;
+    font-family: var(--mono);
+    font-size: 11.5px;
+    letter-spacing: .04em;
+    color: var(--ink-faint);
+    text-decoration: none;
+    padding: 5px 0 5px 12px;
+    border-left: 2px solid var(--rule);
+    transition: color .12s, border-color .12s;
+  }
+  nav.rail a:hover, nav.rail a:focus-visible { color: var(--core); border-left-color: var(--core); }
+
+  section { padding-top: 46px; scroll-margin-top: 20px; }
+  h2 {
+    font-family: var(--serif);
+    font-weight: 600;
+    font-size: 1.62rem;
+    letter-spacing: -.012em;
+    margin: 0 0 6px;
+    text-wrap: balance;
+  }
+  .sec-note {
+    font-family: var(--mono);
+    font-size: 11px;
+    letter-spacing: .1em;
+    text-transform: uppercase;
+    color: var(--ink-faint);
+    margin: 0 0 20px;
+  }
+  h3 {
+    font-family: var(--sans);
+    font-weight: 600;
+    font-size: 1.02rem;
+    margin: 30px 0 8px;
+    letter-spacing: -.005em;
+  }
+  p { max-width: var(--measure); margin: 0 0 15px; }
+  p.wide { max-width: none; }
+  code {
+    font-family: var(--mono);
+    font-size: .875em;
+    background: var(--surface-sunk);
+    padding: .12em .38em;
+    border-radius: 2px;
+  }
+  strong { font-weight: 600; }
+  a { color: var(--core); }
+
+  pre {
+    font-family: var(--mono);
+    font-size: 12.5px;
+    line-height: 1.62;
+    background: var(--surface);
+    border: 1px solid var(--rule);
+    border-radius: 3px;
+    padding: 16px 18px;
+    overflow-x: auto;
+    margin: 0;
+  }
+  pre .c { color: var(--ink-faint); }
+  pre .bad { color: var(--crit); }
+  pre .good { color: var(--module); }
+  pre .k { color: var(--core); }
+
+  .split { display: grid; grid-template-columns: repeat(auto-fit, minmax(290px, 1fr)); gap: 16px; margin: 20px 0; }
+  .split figcaption {
+    font-family: var(--mono);
+    font-size: 10.5px;
+    letter-spacing: .1em;
+    text-transform: uppercase;
+    margin-bottom: 7px;
+  }
+  .split figure { margin: 0; }
+  .cap-bad { color: var(--crit); }
+  .cap-good { color: var(--module); }
+
+  /* ---------- boundary diagram ---------- */
+  .boundary { margin: 24px 0 8px; display: grid; gap: 12px; }
+  .band { border: 1px solid var(--rule); border-radius: 3px; padding: 15px 17px; background: var(--surface); }
+  .band.core { border-color: var(--core); background: var(--core-wash); }
+  .band.mods { border-color: var(--module); background: var(--module-wash); }
+  .band-label {
+    font-family: var(--mono);
+    font-size: 10.5px;
+    letter-spacing: .11em;
+    text-transform: uppercase;
+    margin-bottom: 11px;
+    display: flex;
+    justify-content: space-between;
+    gap: 12px;
+    flex-wrap: wrap;
+  }
+  .band.core .band-label { color: var(--core); }
+  .band.mods .band-label { color: var(--module); }
+  .band-label span:last-child { color: var(--ink-faint); letter-spacing: .04em; text-transform: none; }
+  .chips { display: flex; flex-wrap: wrap; gap: 6px; }
+  .chip {
+    font-family: var(--mono);
+    font-size: 11.5px;
+    padding: 4px 9px;
+    border-radius: 2px;
+    background: var(--surface);
+    border: 1px solid var(--rule);
+    color: var(--ink-soft);
+  }
+  .band.core .chip { border-color: color-mix(in srgb, var(--core) 32%, transparent); }
+  .band.mods .chip { border-color: color-mix(in srgb, var(--module) 32%, transparent); }
+  .arrow-note {
+    text-align: center;
+    font-family: var(--mono);
+    font-size: 11px;
+    color: var(--ink-faint);
+    letter-spacing: .04em;
+  }
+
+  /* ---------- AD cards ---------- */
+  .ad-group { margin-top: 26px; }
+  .ad-group > h3 { margin-top: 0; display: flex; align-items: baseline; gap: 10px; }
+  .ad-group > h3 .n { font-family: var(--mono); font-size: 11px; color: var(--ink-faint); font-weight: 400; letter-spacing: .06em; }
+  .ads { display: grid; grid-template-columns: repeat(auto-fill, minmax(268px, 1fr)); gap: 10px; margin-top: 12px; }
+  .ad {
+    background: var(--surface);
+    border: 1px solid var(--rule);
+    border-left: 3px solid var(--core);
+    border-radius: 2px;
+    padding: 12px 14px;
+  }
+  .ad.data { border-left-color: var(--crit); }
+  .ad.proc { border-left-color: var(--warn); }
+  .ad.mod { border-left-color: var(--module); }
+  .ad .id {
+    font-family: var(--mono);
+    font-size: 10.5px;
+    letter-spacing: .08em;
+    color: var(--ink-faint);
+    display: block;
+    margin-bottom: 4px;
+  }
+  .ad .t { font-weight: 600; font-size: .935rem; line-height: 1.35; display: block; margin-bottom: 5px; }
+  .ad .p { font-size: .845rem; color: var(--ink-soft); line-height: 1.5; margin: 0; }
+
+  /* ---------- explorer ---------- */
+  .explorer {
+    border: 1px solid var(--rule);
+    border-radius: 3px;
+    background: var(--surface);
+    overflow: hidden;
+    margin: 20px 0 10px;
+  }
+  .exp-head {
+    padding: 13px 17px;
+    border-bottom: 1px solid var(--rule);
+    background: var(--surface-sunk);
+    display: flex;
+    justify-content: space-between;
+    align-items: baseline;
+    gap: 14px;
+    flex-wrap: wrap;
+  }
+  .exp-head h3 { margin: 0; font-size: .95rem; }
+  .exp-hint { font-family: var(--mono); font-size: 11px; color: var(--ink-faint); }
+  .exp-body { padding: 17px; display: grid; grid-template-columns: repeat(auto-fit, minmax(258px, 1fr)); gap: 22px; }
+  .exp-col > h4 {
+    font-family: var(--mono);
+    font-size: 10.5px;
+    letter-spacing: .1em;
+    text-transform: uppercase;
+    color: var(--ink-faint);
+    margin: 0 0 10px;
+    font-weight: 500;
+  }
+  .picks { display: flex; flex-wrap: wrap; gap: 6px; }
+  button.pick {
+    font-family: var(--mono);
+    font-size: 11.5px;
+    padding: 5px 10px;
+    border-radius: 2px;
+    border: 1px solid var(--rule);
+    background: var(--surface);
+    color: var(--ink-soft);
+    cursor: pointer;
+    transition: background .12s, border-color .12s, color .12s;
+  }
+  button.pick:hover { border-color: var(--core); color: var(--core); }
+  button.pick[aria-pressed="true"] {
+    background: var(--core);
+    border-color: var(--core);
+    color: var(--on-accent);
+    font-weight: 500;
+  }
+  button.pick:focus-visible { outline: 2px solid var(--core); outline-offset: 2px; }
+  .bundle-picks { margin-top: 14px; }
+
+  .result-line {
+    font-family: var(--mono);
+    font-size: 12px;
+    padding: 7px 0;
+    border-bottom: 1px dotted var(--rule);
+    display: flex;
+    gap: 9px;
+    align-items: baseline;
+  }
+  .result-line:last-child { border-bottom: 0; }
+  .result-line .why { color: var(--ink-faint); font-size: 10.5px; margin-left: auto; text-align: right; }
+  .result-line.added .name { color: var(--core); }
+  .result-line .name { color: var(--ink); }
+  .tally {
+    margin-top: 13px;
+    padding-top: 11px;
+    border-top: 1px solid var(--rule);
+    font-family: var(--mono);
+    font-size: 11.5px;
+    color: var(--ink-soft);
+    display: flex;
+    justify-content: space-between;
+    gap: 10px;
+    flex-wrap: wrap;
+  }
+  .tally b { color: var(--ink); font-weight: 600; }
+  .empty-warn { color: var(--crit); font-family: var(--mono); font-size: 11.5px; }
+  .cmd {
+    font-family: var(--mono);
+    font-size: 12px;
+    background: var(--surface-sunk);
+    border-radius: 2px;
+    padding: 9px 11px;
+    margin-top: 12px;
+    overflow-x: auto;
+    white-space: nowrap;
+    color: var(--ink-soft);
+  }
+  .cmd b { color: var(--core); font-weight: 500; }
+
+  /* ---------- tables ---------- */
+  .tw { overflow-x: auto; margin: 18px 0; border: 1px solid var(--rule); border-radius: 3px; }
+  table { border-collapse: collapse; width: 100%; background: var(--surface); font-size: .885rem; }
+  th, td { text-align: left; padding: 9px 14px; border-bottom: 1px solid var(--rule-soft); vertical-align: top; }
+  th {
+    font-family: var(--mono);
+    font-size: 10.5px;
+    letter-spacing: .09em;
+    text-transform: uppercase;
+    color: var(--ink-faint);
+    font-weight: 500;
+    background: var(--surface-sunk);
+    white-space: nowrap;
+  }
+  tr:last-child td { border-bottom: 0; }
+  td code { background: none; padding: 0; color: var(--ink-soft); }
+  td.n { font-family: var(--mono); font-variant-numeric: tabular-nums; white-space: nowrap; }
+
+  /* ---------- callouts ---------- */
+  .call {
+    border: 1px solid var(--rule);
+    border-left: 3px solid var(--warn);
+    background: var(--warn-wash);
+    border-radius: 2px;
+    padding: 14px 17px;
+    margin: 20px 0;
+  }
+  .call.crit { border-left-color: var(--crit); background: var(--crit-wash); }
+  .call h3 { margin: 0 0 6px; font-size: .96rem; }
+  .call p { margin: 0 0 9px; max-width: none; font-size: .91rem; }
+  .call p:last-child { margin-bottom: 0; }
+  .call .tag {
+    font-family: var(--mono);
+    font-size: 10px;
+    letter-spacing: .1em;
+    text-transform: uppercase;
+    color: var(--warn);
+    display: block;
+    margin-bottom: 5px;
+  }
+  .call.crit .tag { color: var(--crit); }
+
+  /* ---------- stages ---------- */
+  .stages { display: flex; flex-direction: column; gap: 0; margin: 20px 0; }
+  .stage {
+    display: grid;
+    grid-template-columns: 52px minmax(0, 1fr);
+    gap: 16px;
+    padding: 13px 0;
+    border-bottom: 1px solid var(--rule-soft);
+  }
+  .stage:last-child { border-bottom: 0; }
+  .stage .num {
+    font-family: var(--mono);
+    font-size: 11px;
+    color: var(--ink-faint);
+    letter-spacing: .06em;
+    padding-top: 2px;
+  }
+  .stage.risk .num { color: var(--crit); }
+  .stage h4 { margin: 0 0 3px; font-size: .95rem; font-weight: 600; }
+  .stage p { margin: 0; font-size: .885rem; color: var(--ink-soft); max-width: 62ch; }
+  .stage .flag {
+    font-family: var(--mono);
+    font-size: 9.5px;
+    letter-spacing: .1em;
+    text-transform: uppercase;
+    color: var(--crit);
+    border: 1px solid color-mix(in srgb, var(--crit) 40%, transparent);
+    border-radius: 2px;
+    padding: 1px 5px;
+    margin-left: 8px;
+    vertical-align: 2px;
+    white-space: nowrap;
+  }
+
+  footer {
+    margin-top: 66px;
+    padding-top: 22px;
+    border-top: 1px solid var(--rule);
+    font-family: var(--mono);
+    font-size: 11.5px;
+    color: var(--ink-faint);
+    display: flex;
+    justify-content: space-between;
+    gap: 16px;
+    flex-wrap: wrap;
+  }
+  /* ---------- theme toggle ---------- */
+  .mast-top {
+    display: flex;
+    justify-content: space-between;
+    align-items: flex-start;
+    gap: 20px;
+    flex-wrap: wrap;
+  }
+  .mast-top .eyebrow { margin-bottom: 0; }
+  .theme {
+    display: inline-flex;
+    border: 1px solid var(--rule);
+    border-radius: 3px;
+    overflow: hidden;
+    background: var(--surface);
+    flex-shrink: 0;
+  }
+  .theme button {
+    font-family: var(--mono);
+    font-size: 10.5px;
+    letter-spacing: .09em;
+    text-transform: uppercase;
+    padding: 5px 11px;
+    border: 0;
+    border-right: 1px solid var(--rule);
+    background: transparent;
+    color: var(--ink-faint);
+    cursor: pointer;
+    transition: background .12s, color .12s;
+  }
+  .theme button:last-child { border-right: 0; }
+  .theme button:hover { color: var(--core); }
+  .theme button[aria-pressed="true"] {
+    background: var(--core);
+    color: var(--on-accent);
+    font-weight: 500;
+  }
+  .theme button:focus-visible { outline: 2px solid var(--core); outline-offset: -2px; }
+
+  @media (prefers-reduced-motion: reduce) { * { transition: none !important; } }
+</style>
+
+<script>
+  /* Applied before first paint so an explicit choice never flashes the other theme. */
+  (function () {
+    try {
+      var saved = localStorage.getItem("devinfra-theme");
+      if (saved === "light" || saved === "dark") {
+        document.documentElement.setAttribute("data-theme", saved);
+      }
+    } catch (e) { /* private mode, blocked storage — fall through to system */ }
+  })();
+</script>
+</head>
+<body>
+<div class="wrap">
+  <header class="mast">
+    <div class="mast-top">
+      <p class="eyebrow"><span>Architecture Spine</span><span class="dot">/</span><span>devinfra</span><span class="dot">/</span><span>2026-09-06</span></p>
+      <div class="theme" role="group" aria-label="Colour theme">
+        <button type="button" data-theme-set="light" aria-pressed="false">Light</button>
+        <button type="button" data-theme-set="auto" aria-pressed="true">Auto</button>
+        <button type="button" data-theme-set="dark" aria-pressed="false">Dark</button>
+      </div>
+    </div>
+    <h1>From one compose file to a plug-in stack</h1>
+    <p class="standfirst">devinfra runs thirteen services from a single 424-line <code>compose.yaml</code>. This is the contract for taking it apart — <em>what must stay true</em> so that independently-built modules don't quietly become incompatible.</p>
+    <dl class="facts">
+      <div class="fact"><dt>Decisions</dt><dd>21</dd></div>
+      <div class="fact"><dt>Services today</dt><dd>13</dd></div>
+      <div class="fact"><dt>Compose file</dt><dd>424<small> lines</small></dd></div>
+      <div class="fact"><dt>Holes closed</dt><dd>11</dd></div>
+      <div class="fact"><dt>Paradigm</dt><dd style="font-size:.94rem;padding-top:5px">Microkernel</dd></div>
+    </dl>
+  </header>
+
+  <div class="cols">
+    <nav class="rail" aria-label="Sections">
+      <ol>
+        <li><a href="#forcing">01 · Forcing constraint</a></li>
+        <li><a href="#boundary">02 · The boundary</a></li>
+        <li><a href="#decisions">03 · Decisions</a></li>
+        <li><a href="#closure">04 · Selection</a></li>
+        <li><a href="#attack">05 · What broke</a></li>
+        <li><a href="#storage">06 · Object storage</a></li>
+        <li><a href="#route">07 · Route</a></li>
+        <li><a href="#open">08 · Still open</a></li>
+      </ol>
+    </nav>
+
+    <main>
+      <section id="forcing">
+        <h2>The constraint that decided the shape</h2>
+        <p class="sec-note">Verified empirically, not assumed</p>
+        <p>The obvious way to split a Compose file is one file per service, reassembled with <code>include</code>. The obstacle is how this stack currently shares configuration: a YAML anchor merged into every service.</p>
+        <p><strong>Anchors do not survive the split.</strong> They are scoped to a single YAML document, and <code>include</code> is applied after parsing — so an alias can never reach an anchor in another file. Upstream closed this as won't-fix and points to <code>extends</code>.</p>
+        <div class="split">
+          <figure>
+            <figcaption class="cap-bad">Today — breaks under include</figcaption>
+<pre><span class="k">x-defaults</span>: &amp;defaults
+  &lt;&lt;: [*restart, *logging]
+  networks: [devinfra]
+
+services:
+  postgres:
+    &lt;&lt;: *defaults      <span class="bad">← unknown anchor</span>
+    image: pgvector/pgvector:…</pre>
+          </figure>
+          <figure>
+            <figcaption class="cap-good">After — resolves across files</figcaption>
+<pre>services:
+  postgres:
+    <span class="k">extends</span>:
+      file: ../../common/base.yaml
+      service: defaults    <span class="good">← works</span>
+    image: pgvector/pgvector:…</pre>
+          </figure>
+        </div>
+        <p>That single mechanic cascades. Because <code>extends</code> inherits <code>depends_on</code> keys but <em>doesn't</em> import the services they name, the shared fragment can only ever carry <code>restart</code>, <code>logging</code> and <code>networks</code>. And because network, volume and environment identity can't live inside a module while service definitions can, the architecture is a microkernel whether or not anyone chose one.</p>
+      </section>
+
+      <section id="boundary">
+        <h2>Core Substrate and Service Modules</h2>
+        <p class="sec-note">Dependencies point inward, never out</p>
+        <div class="boundary">
+          <div class="band core">
+            <div class="band-label"><span>Core Substrate — always present</span><span>owns identity and orchestration</span></div>
+            <div class="chips">
+              <span class="chip">compose.yaml · module registry</span>
+              <span class="chip">x-bundles</span>
+              <span class="chip">common/base.yaml</span>
+              <span class="chip">.env namespace</span>
+              <span class="chip">port allocation table</span>
+              <span class="chip">devinfra network</span>
+              <span class="chip">volume identity</span>
+              <span class="chip">select.sh</span>
+              <span class="chip">pixi.toml</span>
+            </div>
+          </div>
+          <p class="arrow-note">▲ modules depend on core · core never depends on a module</p>
+          <div class="band mods">
+            <div class="band-label"><span>Service Modules — pluggable</span><span>one primary service + declared helpers</span></div>
+            <div class="chips">
+              <span class="chip">postgres</span><span class="chip">redis</span><span class="chip">keycloak</span>
+              <span class="chip">object-storage</span><span class="chip">mailpit</span><span class="chip">pgadmin</span>
+              <span class="chip">redisinsight</span><span class="chip">flower</span><span class="chip">otel-collector</span>
+              <span class="chip">prometheus</span><span class="chip">loki</span><span class="chip">tempo</span>
+              <span class="chip">grafana</span><span class="chip">openbao</span>
+            </div>
+          </div>
+        </div>
+        <p>Each module directory carries five things, and CI refuses one that doesn't: a healthcheck, a smoke check that exercises real function, an <code>x-endpoints</code> block, a seed declaration, and a gotchas file. Presence is checked mechanically — never a judgment about whether seed data was "needed".</p>
+      </section>
+
+      <section id="decisions">
+        <h2>Twenty-one invariants</h2>
+        <p class="sec-note">Grouped by what each one protects</p>
+        <p>A decision earns a place here only if two independently-built modules could choose incompatibly, the call is non-obvious, and it's a real trade-off. Everything else is deferred.</p>
+
+        <div class="ad-group">
+          <h3>Data that cannot be recovered <span class="n">2 decisions</span></h3>
+          <div class="ads">
+            <div class="ad data"><span class="id">AD-5</span><span class="t">Volume names are frozen</span><p class="p">A renamed volume is a <em>new</em> volume — the old one orphans and the service starts empty, silently. Module stanzas carry the identifier and nothing else. <code>object-storage</code> keeps <code>minio-data</code>.</p></div>
+            <div class="ad data"><span class="id">AD-12</span><span class="t">Stop → write → restart</span><p class="p">Any write to another module's state stops its dependents first. Covers realm import <em>and</em> Postgres restore, which rewrites the Keycloak database.</p></div>
+          </div>
+        </div>
+
+        <div class="ad-group">
+          <h3>Composition mechanics <span class="n">6 decisions</span></h3>
+          <div class="ads">
+            <div class="ad"><span class="id">AD-1</span><span class="t">extends, never anchors</span><p class="p">Anchors can't cross file boundaries. The base fragment is referenced by <code>extends</code> and never included.</p></div>
+            <div class="ad"><span class="id">AD-2</span><span class="t">Base declares no references</span><p class="p">No <code>depends_on</code>, <code>links</code>, <code>volumes_from</code>. One-shot helpers must override <code>restart: "no"</code>.</p></div>
+            <div class="ad"><span class="id">AD-6</span><span class="t">Closure-validity</span><p class="p">A module validates <em>with its dependency closure</em>. The naive standalone form passed while checking nothing.</p></div>
+            <div class="ad"><span class="id">AD-7</span><span class="t">Bundle names are Core-owned</span><p class="p">Membership sits in each module; the name list sits in Core, or CI has nothing to iterate.</p></div>
+            <div class="ad mod"><span class="id">AD-8</span><span class="t">One primary service + helpers</span><p class="p">Helpers share their primary's profile set exactly. The contract check runs both directions.</p></div>
+            <div class="ad"><span class="id">AD-15</span><span class="t">Dependencies point inward</span><p class="p">A module never edits another module's file.</p></div>
+          </div>
+        </div>
+
+        <div class="ad-group">
+          <h3>Correctness gates <span class="n">5 decisions</span></h3>
+          <div class="ads">
+            <div class="ad"><span class="id">AD-3</span><span class="t">depends_on is the gate</span><p class="p"><code>config -q</code> already refuses an invalid selection. No bespoke resolver — but it's blind to port collisions.</p></div>
+            <div class="ad"><span class="id">AD-16</span><span class="t">Selection resolves to closure</span><p class="p">Selecting <code>keycloak</code> alone legitimately fails. The resolver expands it before Compose sees it.</p></div>
+            <div class="ad"><span class="id">AD-17</span><span class="t">Ports from one table</span><p class="p">Two modules on one host port both validate, then <code>up</code> half-starts. CI parses rendered config for duplicates.</p></div>
+            <div class="ad"><span class="id">AD-18</span><span class="t">Selection is never empty</span><p class="p">Everything profiled means a bare <code>up</code> would start nothing at exit 0. The resolver refuses.</p></div>
+            <div class="ad proc"><span class="id">AD-19</span><span class="t">CI fails loudly or not at all</span><p class="p">No check skips for a missing tool. Iterates every module <em>and</em> every bundle.</p></div>
+          </div>
+        </div>
+
+        <div class="ad-group">
+          <h3>Shared namespaces <span class="n">3 decisions</span></h3>
+          <div class="ads">
+            <div class="ad"><span class="id">AD-4</span><span class="t">Two-tier configuration</span><p class="p">Module variables are prefixed; contract variables like <code>AWS_ENDPOINT_URL</code> are SDK-dictated and get one registered owner.</p></div>
+            <div class="ad"><span class="id">AD-14</span><span class="t">Declare what you need</span><p class="p">Keycloak's database requirement lives in Keycloak's file, not buried in <code>POSTGRES_EXTRA_DATABASES</code>.</p></div>
+            <div class="ad"><span class="id">AD-11</span><span class="t">Tags in .env, annotated</span><p class="p">Renovate skips <code>repo:${VAR:-tag}</code>, so updates run through a regex manager over <code>.env</code>.</p></div>
+          </div>
+        </div>
+
+        <div class="ad-group">
+          <h3>Process and admission <span class="n">5 decisions</span></h3>
+          <div class="ads">
+            <div class="ad proc"><span class="id">AD-9</span><span class="t">pixi is the task surface</span><p class="p">Today <code>make lint</code> exits 0 having skipped shellcheck. No task may branch on <code>command -v</code>.</p></div>
+            <div class="ad proc"><span class="id">AD-10</span><span class="t">Smoke checks are module-owned</span><p class="p">Driven by the resolved selection. The runner fails if that selection is empty.</p></div>
+            <div class="ad proc"><span class="id">AD-21</span><span class="t">Scripts are verified like code</span><p class="p"><code>select.sh</code> is load-bearing for four invariants. A bug in it looks exactly like success.</p></div>
+            <div class="ad proc"><span class="id">AD-20</span><span class="t">Catalog admission policy</span><p class="p">OSI license, no auth token, no privileged host access, maintained upstream. Security posture stays fixed, not improved.</p></div>
+            <div class="ad"><span class="id">AD-13</span><span class="t">Observability stays five containers</span><p class="p">otel-lgtm would discard two gotchas already solved here. Weight is answered by not starting the bundle.</p></div>
+          </div>
+        </div>
+      </section>
+
+      <section id="closure">
+        <h2>Selection, and why it needs a resolver</h2>
+        <p class="sec-note">The idea that's hardest to hold in your head</p>
+        <p>Every service gets a profile, so any subset can start. But profiles don't follow dependencies: asking for <code>keycloak</code> gives you a project referencing a Postgres that isn't there, and Compose correctly refuses it. Keycloak can't fix this by adding itself to Postgres's profile list — that would mean editing another module's file.</p>
+        <p>So the resolver expands a request into its transitive closure first. Pick modules below and watch what actually starts.</p>
+
+        <div class="explorer">
+          <div class="exp-head">
+            <h3>Selection explorer</h3>
+            <span class="exp-hint">click to select · closure resolves live</span>
+          </div>
+          <div class="exp-body">
+            <div class="exp-col">
+              <h4>Request</h4>
+              <div class="picks" id="modpicks"></div>
+              <div class="bundle-picks">
+                <h4>Or a bundle</h4>
+                <div class="picks" id="bundlepicks"></div>
+              </div>
+            </div>
+            <div class="exp-col">
+              <h4>Resolved</h4>
+              <div id="resolved"></div>
+              <div class="tally" id="tally"></div>
+              <div class="cmd" id="cmd"></div>
+            </div>
+          </div>
+        </div>
+        <p>Bundles are required to be closed already, so they never rely on runtime expansion — CI asserts it. The resolver exists for the ad-hoc case, which is the one the PRD names as the headline use.</p>
+      </section>
+
+      <section id="attack">
+        <h2>What the adversarial pass broke</h2>
+        <p class="sec-note">Nine holes and two self-contradictions, found before implementation</p>
+        <p>The first draft of this spine was attacked by constructing pairs of modules that obey every rule and still build incompatibly. Every finding below was reproduced against a running Compose install, and each one closed a hole or corrected a rule.</p>
+        <div class="tw">
+          <table>
+            <thead><tr><th>Finding</th><th>Why it mattered</th><th>Now</th></tr></thead>
+            <tbody>
+              <tr><td>Standalone-validity passed vacuously</td><td>With a profile on every service, validating one module file returned <code>services: {}</code> at exit 0 — checking nothing</td><td class="n">AD-6</td></tr>
+              <tr><td>CI had no bundle list</td><td>Rules said validate every bundle and also forbade a central list. Red on day one</td><td class="n">AD-7</td></tr>
+              <tr><td>Selection wasn't closed</td><td>The headline use case — take just the services you need — simply failed</td><td class="n">AD-16</td></tr>
+              <tr><td><code>config -q</code> is blind to ports</td><td>Two modules on one port both validate; <code>up</code> half-starts. Keycloak's management port already sits on MinIO's natural 9000</td><td class="n">AD-17</td></tr>
+              <tr><td>"Root declaration wins" was false</td><td>Root wins only on keys it sets. Include order could silently change a volume's driver</td><td class="n">AD-5</td></tr>
+              <tr><td>Two owners of one database</td><td>Removing <code>keycloak</code> from an unrelated variable breaks Keycloak with no error</td><td class="n">AD-14</td></tr>
+              <tr><td>Restore destroyed realm state</td><td><code>pg_dumpall</code> restore rewrites every database, and the pipe exits 0 on failure</td><td class="n">AD-12</td></tr>
+              <tr><td><code>AWS_ENDPOINT_URL</code> unownable</td><td>Two modules legitimately need one SDK-dictated name</td><td class="n">AD-4</td></tr>
+              <tr><td>Helpers had no module</td><td><code>minio-init</code> is a service with no directory — invisible to every check</td><td class="n">AD-8</td></tr>
+              <tr><td>Empty selection, green CI</td><td>Started nothing, exited 0, smoke reported all-pass</td><td class="n">AD-18</td></tr>
+              <tr><td>Licensing was ungoverned</td><td>Nothing encoded "no BUSL, no auth token, no socket mount"</td><td class="n">AD-20</td></tr>
+            </tbody>
+          </table>
+        </div>
+      </section>
+
+      <section id="storage">
+        <h2>One decision that can't wait long</h2>
+        <p class="sec-note">Not a version bump</p>
+        <div class="call crit">
+          <span class="tag">Needs a decision</span>
+          <h3>MinIO is archived</h3>
+          <p>The newest <em>pullable</em> image is the one pinned here. The final upstream release fixed a privilege-escalation CVE at CVSS 8.1 — and shipped with zero assets, absent from Docker Hub and quay. Six further advisories have no community fix. Separately, the May 2025 release gutted the console: admin features and LDAP/OIDC moved to a commercial product, leaving an object browser.</p>
+          <p>It touches seeded buckets, the smoke test's object round-trip, the <code>AWS_ENDPOINT_URL</code> contract variable, and the console link in the README. The module is named <code>object-storage</code> rather than <code>minio</code> precisely so the swap doesn't collide with a frozen volume name.</p>
+        </div>
+        <div class="tw">
+          <table>
+            <thead><tr><th>Candidate</th><th>License</th><th>Assessment</th></tr></thead>
+            <tbody>
+              <tr><td><code>pgsty/silo</code></td><td class="n">AGPL-3.0</td><td>MinIO fork, console restored, post-archive CVEs patched. Preserves <code>MINIO_*</code> variables and the on-disk format — close to an image-name swap. Bus factor 1.</td></tr>
+              <tr><td>SeaweedFS 4.45</td><td class="n">Apache-2.0</td><td>Real console, versioning and object lock. Startup bucket seeding would retire the init helper. <code>mc admin</code> won't work; volume server defaults to 8080, which collides with Keycloak.</td></tr>
+              <tr><td>Garage v2.4.0</td><td class="n">AGPL-3.0</td><td><strong>Ruled out</strong> — no versioning at all. The init container enables versioning and the smoke test asserts it.</td></tr>
+              <tr><td>Status quo</td><td class="n">AGPL-3.0</td><td>Permitted only with a dated written acceptance naming the unpatched advisories.</td></tr>
+            </tbody>
+          </table>
+        </div>
+      </section>
+
+      <section id="route">
+        <h2>Getting there without losing data</h2>
+        <p class="sec-note">Eight stages · two carry real risk</p>
+        <p>Two orderings are forced. The task-runner question is settled <em>before</em> any CI is written, or that CI gets rewritten. And the eleven stale image pins are bumped <em>after</em> CI exists but <em>before</em> the file split — debugging a Tempo major upgrade and a refactor simultaneously is the worst available option.</p>
+        <div class="stages">
+          <div class="stage"><span class="num">00</span><div><h4>pixi owns tasks</h4><p>Shell logic moves out of Makefile recipes into testable scripts. No compose change at all. Done when <code>lint</code> fails on a machine without shellcheck — because pixi supplies it and it actually ran.</p></div></div>
+          <div class="stage"><span class="num">01</span><div><h4>CI green on today's stack</h4><p>Prove the harness against a known-good monolith before asking it to police a refactor.</p></div></div>
+          <div class="stage"><span class="num">02</span><div><h4>Image bumps, one PR each</h4><p>Eleven stale pins. Tempo 2→3 and Grafana 12→13 ship together — the span-metrics wiring spans both.</p></div></div>
+          <div class="stage risk"><span class="num">03</span><div><h4>Extract the substrate + one module<span class="flag">risk</span></h4><p>Postgres first: no dependencies, so it isolates the mechanism. Compare rendered <code>compose config</code> before and after — it should be identical but for key ordering.</p></div></div>
+          <div class="stage"><span class="num">04</span><div><h4>The remaining twelve</h4><p>Batched by bundle. Volume identity checked after every batch.</p></div></div>
+          <div class="stage risk"><span class="num">05</span><div><h4>Selection and bundles<span class="flag">breaking</span></h4><p>The visible change: a bare <code>up</code> goes from starting the core five to starting nothing, for anyone whose <code>.env</code> predates it. Mitigated three ways, and led with in the release notes.</p></div></div>
+          <div class="stage"><span class="num">06</span><div><h4>Batteries</h4><p>Dashboards, generated endpoint docs, multi-service backup, the non-destructive realm reimport, worked example.</p></div></div>
+          <div class="stage"><span class="num">07</span><div><h4>Catalog</h4><p>Broker, search, OpenBao, AWS emulation — each through admission first. Settle object storage before adding anything new.</p></div></div>
+        </div>
+      </section>
+
+      <section id="open">
+        <h2>Deliberately unresolved</h2>
+        <p class="sec-note">Named so the silence is a choice</p>
+        <div class="tw">
+          <table>
+            <thead><tr><th>Question</th><th>Why it can wait</th></tr></thead>
+            <tbody>
+              <tr><td>How another repo consumes devinfra</td><td>Closure-validity keeps the reusable-base path reachable at near-zero cost. Nothing here commits to it.</td></tr>
+              <tr><td>Which broker, which search engine</td><td>Each arrives as one module under the same contract, so deferring costs nothing.</td></tr>
+              <tr><td>Idempotent realm-as-code</td><td>The non-destructive reimport removes the pain that motivated it. Revisit if realm editing becomes a workflow.</td></tr>
+              <tr><td>Versioning the repo itself</td><td>Consumed by <code>git clone</code>; no artifact to version. Becomes real only if the reusable-base model wins.</td></tr>
+              <tr><td>OpenBao as credential source</td><td>Being <em>a service in the catalog</em> is settled. Being <em>the mechanism other modules get credentials from</em> is much larger.</td></tr>
+              <tr><td>Running two stacks at once</td><td>Port allocation is governed within one stack. No reported pain across two.</td></tr>
+            </tbody>
+          </table>
+        </div>
+      </section>
+
+      <footer>
+        <span>Architecture spine · 21 decisions · linted clean</span>
+        <span>devinfra · 2026-09-06</span>
+      </footer>
+    </main>
+  </div>
+</div>
+
+<script>
+(function () {
+  var KEY = "devinfra-theme";
+  var buttons = document.querySelectorAll("[data-theme-set]");
+
+  function current() {
+    try { var v = localStorage.getItem(KEY); return v === "light" || v === "dark" ? v : "auto"; }
+    catch (e) { return document.documentElement.getAttribute("data-theme") || "auto"; }
+  }
+
+  function apply(mode) {
+    if (mode === "auto") document.documentElement.removeAttribute("data-theme");
+    else document.documentElement.setAttribute("data-theme", mode);
+    try {
+      if (mode === "auto") localStorage.removeItem(KEY);
+      else localStorage.setItem(KEY, mode);
+    } catch (e) { /* storage unavailable; the choice still applies for this view */ }
+    Array.prototype.forEach.call(buttons, function (b) {
+      b.setAttribute("aria-pressed", b.getAttribute("data-theme-set") === mode ? "true" : "false");
+    });
+  }
+
+  Array.prototype.forEach.call(buttons, function (b) {
+    b.addEventListener("click", function () { apply(b.getAttribute("data-theme-set")); });
+  });
+  apply(current());
+})();
+
+(function () {
+  var DEPS = {
+    postgres: [], redis: [], mailpit: [], "object-storage": [], openbao: [],
+    keycloak: ["postgres", "mailpit"],
+    pgadmin: ["postgres"],
+    redisinsight: ["redis"],
+    flower: ["redis"],
+    loki: [], tempo: [], prometheus: [], grafana: [],
+    "otel-collector": ["loki", "tempo"]
+  };
+  var BUNDLES = {
+    minimal: ["postgres", "redis"],
+    core: ["postgres", "redis", "keycloak", "object-storage", "mailpit"],
+    admin: ["pgadmin", "redisinsight", "flower", "postgres", "redis"],
+    observability: ["otel-collector", "prometheus", "loki", "tempo", "grafana"]
+  };
+  var HELPERS = { "object-storage": ["object-storage-init"] };
+
+  var picked = { modules: [], bundle: null };
+  var modWrap = document.getElementById("modpicks");
+  var bunWrap = document.getElementById("bundlepicks");
+  var out = document.getElementById("resolved");
+  var tally = document.getElementById("tally");
+  var cmd = document.getElementById("cmd");
+
+  Object.keys(DEPS).forEach(function (m) {
+    var b = document.createElement("button");
+    b.type = "button"; b.className = "pick"; b.textContent = m;
+    b.setAttribute("aria-pressed", "false");
+    b.addEventListener("click", function () {
+      picked.bundle = null;
+      var i = picked.modules.indexOf(m);
+      if (i > -1) picked.modules.splice(i, 1); else picked.modules.push(m);
+      render();
+    });
+    modWrap.appendChild(b);
+  });
+  Object.keys(BUNDLES).forEach(function (n) {
+    var b = document.createElement("button");
+    b.type = "button"; b.className = "pick"; b.textContent = n;
+    b.setAttribute("aria-pressed", "false");
+    b.addEventListener("click", function () {
+      picked.modules = [];
+      picked.bundle = picked.bundle === n ? null : n;
+      render();
+    });
+    bunWrap.appendChild(b);
+  });
+
+  function closure(seeds) {
+    var seen = {}, why = {}, queue = seeds.slice();
+    seeds.forEach(function (s) { why[s] = "requested"; });
+    while (queue.length) {
+      var cur = queue.shift();
+      if (seen[cur]) continue;
+      seen[cur] = true;
+      (DEPS[cur] || []).forEach(function (d) {
+        if (!why[d]) why[d] = "needed by " + cur;
+        if (!seen[d]) queue.push(d);
+      });
+    }
+    return { list: Object.keys(seen), why: why };
+  }
+
+  function render() {
+    Array.prototype.forEach.call(modWrap.children, function (b) {
+      b.setAttribute("aria-pressed", picked.modules.indexOf(b.textContent) > -1 ? "true" : "false");
+    });
+    Array.prototype.forEach.call(bunWrap.children, function (b) {
+      b.setAttribute("aria-pressed", picked.bundle === b.textContent ? "true" : "false");
+    });
+
+    var seeds = picked.bundle ? BUNDLES[picked.bundle].slice() : picked.modules.slice();
+    out.innerHTML = "";
+
+    if (!seeds.length) {
+      var w = document.createElement("p");
+      w.className = "empty-warn";
+      w.textContent = "empty selection — select.sh refuses this (AD-18)";
+      out.appendChild(w);
+      tally.innerHTML = "<span>Nothing would start</span><span>exit <b>1</b>, not 0</span>";
+      cmd.textContent = "pixi run up";
+      return;
+    }
+
+    var res = closure(seeds);
+    var added = 0, containers = 0;
+    res.list.sort().forEach(function (m) {
+      var row = document.createElement("div");
+      var isAdded = res.why[m] !== "requested";
+      if (isAdded) added++;
+      containers += 1 + ((HELPERS[m] || []).length);
+      row.className = "result-line" + (isAdded ? " added" : "");
+      row.innerHTML = '<span class="name">' + m + "</span>" +
+        '<span class="why">' + res.why[m] + "</span>";
+      out.appendChild(row);
+    });
+
+    tally.innerHTML =
+      "<span>requested <b>" + seeds.length + "</b> · pulled in <b>" + added + "</b></span>" +
+      "<span><b>" + containers + "</b> containers</span>";
+    cmd.innerHTML = picked.bundle
+      ? "pixi run up <b>" + picked.bundle + "</b>"
+      : "pixi run up <b>" + picked.modules.join(" ") + "</b>";
+  }
+
+  picked.modules = ["keycloak"];
+  render();
+})();
+</script>
+</body>
+</html>
