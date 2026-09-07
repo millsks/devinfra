@@ -1505,6 +1505,53 @@ def main() -> int:
                         f"stdout: {r.stdout!r}",
                     )
 
+            # The Compose-v2 import rule, which is not AD-5's rule and fails on the
+            # identifier-only form the cases above sanction: across `include`, a module may
+            # name a top-level resource only when the root's declaration of it is bare. The
+            # root declares `networks: devinfra:` with `name:` and `driver:`, so Compose
+            # v2.29.7 refuses the whole model — `networks.devinfra conflicts with imported
+            # resource`, exit 15 — while Compose v5.3.0 resolves it without complaint. That
+            # split is why the check is static: `lint-compose` renders with whatever runtime
+            # the developer has, so this defect passed every local gate and failed all three
+            # CI jobs. See the 2026-09-07 amendment in docs/adr/0004.
+            fixture = defect_module / "compose.yaml"
+            with planted(fixture, "services:\n  zz-selftest-defect:\n    image: alpine:3.22\nnetworks:\n  devinfra:\n"):
+                r = pixi("lint-config", env=fresh(document=clean_doc))
+                expect(
+                    "lint-config rejects a module redeclaring a network the root declares with keys",
+                    r.returncode != 0,
+                    "exited 0",
+                )
+                expect(
+                    "lint-config names the conflicting module, stanza and root keys",
+                    "services/zz-selftest-defect/compose.yaml" in r.stderr
+                    and "networks.devinfra" in r.stderr
+                    and "conflicts with imported resource" in r.stderr,
+                    f"stderr: {r.stderr!r}",
+                )
+                # The advice must be "delete it", not "strip it to an identifier": the entry
+                # above *is* an identifier and Compose still refuses it. A diagnostic that
+                # reached for the AD-5 wording would send the next author round the loop.
+                expect(
+                    "lint-config does not misreport the conflict as an AD-5 extra-key defect",
+                    "names the identifier and" not in r.stderr,
+                    f"stderr: {r.stderr!r}",
+                )
+
+            # The other side of the same rule, and the reason it is stated against the
+            # *root's* body rather than the module's: `volumes: postgres-data:` is bare in
+            # the root, so a module may name it, and Compose v2 accepts that. A check that
+            # banned every redeclaration would reject the tracked postgres module.
+            with planted(
+                fixture, "services:\n  zz-selftest-defect:\n    image: alpine:3.22\nvolumes:\n  postgres-data:\n"
+            ):
+                r = pixi("lint-config", env=fresh(document=clean_doc))
+                expect(
+                    "lint-config accepts a module redeclaring a volume the root declares bare",
+                    r.returncode == 0,
+                    f"output: {(r.stdout + r.stderr)!r}",
+                )
+
             # A module file that is not UTF-8 must be a named diagnostic, not an
             # interpreter traceback — the contract lint-json, commit-msg and lint-renovate
             # already hold. `read_model` reads text, so it is where the byte is met.

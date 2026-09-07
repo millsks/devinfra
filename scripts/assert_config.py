@@ -22,13 +22,21 @@ Four properties, one pass per profile combination:
   `minio-init` must set `restart: "no"` — so telling a legitimate override from a lost
   inheritance needs a way to declare the exception, which no story has settled yet.
 
-One property is read from the module files' own text instead, because the rendered model
-cannot express it: every `volumes:`, `networks:`, `configs:` and `secrets:` entry in a
-`services/*/compose.yaml` names an identifier the root file already declares, and carries
-nothing else (AD-5). A module key the root file does not set *wins* — `docker compose
-config` reports the module's own `name:` or `driver:` and `config -q` accepts it — so a
-module that added one, or that named an identifier of its own, would silently mount a
-different Docker volume and orphan the real data with no error anywhere.
+Two properties are read from the module files' own text instead, because the rendered model
+cannot express them.
+
+* Every `volumes:`, `networks:`, `configs:` and `secrets:` entry in a `services/*/compose.yaml`
+  names an identifier the root file already declares, and carries nothing else (AD-5). A module
+  key the root file does not set *wins* — `docker compose config` reports the module's own
+  `name:` or `driver:` and `config -q` accepts it — so a module that added one, or that named an
+  identifier of its own, would silently mount a different Docker volume and orphan the real data
+  with no error anywhere.
+* No module names a top-level resource the root file declares *with keys*. Compose v2 refuses
+  that whole model — `networks.devinfra conflicts with imported resource`, exit 15 — while
+  Compose v5 resolves it happily. The rule is asserted statically here precisely because the
+  rendered model cannot state it: whether the defect is visible at all depends on which Compose
+  the developer has installed, so `lint-compose` passes on one machine and every CI job fails.
+  See the 2026-09-07 amendment in docs/adr/0004-volume-names-are-frozen.md.
 
 A combination that renders no services is a failure, not a pass, and so is a module scan
 that found no module file: a check that walked an empty set has verified nothing, which is
@@ -258,20 +266,23 @@ def read_model(path: Path) -> dict[str, object]:
     return parsed
 
 
-def root_identifiers(stanza: str) -> set[str]:
-    """List the identifiers the root file declares in one top-level stanza.
+def root_declarations(stanza: str) -> dict[str, object]:
+    """Read what the root file declares in one top-level stanza, bodies included.
+
+    The bodies matter as much as the names: a module may redeclare a root resource only
+    when the root's own declaration is bare, so the check cannot work from names alone.
 
     Args:
         stanza: The stanza name, one of `MODULE_STANZAS`.
 
     Returns:
-        Every identifier the root `compose.yaml` declares there.
+        Every identifier the root `compose.yaml` declares there, mapped to its body.
 
     Raises:
         RuntimeError: If the root file cannot be read or does not parse as a compose model.
     """
     declared = read_model(REPO / "compose.yaml").get(stanza)
-    return set(declared) if isinstance(declared, dict) else set()
+    return dict(declared) if isinstance(declared, dict) else {}
 
 
 def shared_logging() -> dict[str, object]:
@@ -292,7 +303,10 @@ def shared_logging() -> dict[str, object]:
 
 
 def identifier_only(paths: list[Path]) -> list[str]:
-    """Assert every module stanza names its resource and declares nothing about it.
+    """Assert every module stanza is one the root sanctions, and says nothing about it.
+
+    Two rules, both read from the module's own text because the rendered model cannot
+    state either one.
 
     A renamed or re-driven named volume is a *new* volume: the old one is orphaned and
     the service starts empty, with no error anywhere (AD-5). The rendered model cannot
@@ -301,17 +315,27 @@ def identifier_only(paths: list[Path]) -> list[str]:
     straight through and `config -q` accepts it. So the rule is asserted where it is
     stated: in the module's own text.
 
+    The second rule is Compose's, not this repository's: across `include`, a module may
+    name a top-level resource only when the root's declaration of it is bare. Name one the
+    root declares with keys and Compose v2 rejects the entire model — `networks.devinfra
+    conflicts with imported resource`, exit 15 — where Compose v5 resolves it without
+    complaint. That version split is the whole reason this is a static check: `lint-compose`
+    renders with whatever Compose the developer happens to have, so the defect can pass
+    every local gate and fail every CI job. Redeclaring is never *needed* — a module service
+    reaches the resource through the root either way — so the rule costs nothing to hold.
+
     Args:
         paths: The module compose files to read.
 
     Returns:
-        One diagnostic per entry carrying anything but its identifier.
+        One diagnostic per entry the root does not sanction, carries a body, or may not
+        be named here at all.
 
     Raises:
         RuntimeError: If a file cannot be read or does not parse as a compose model.
     """
     problems: list[str] = []
-    known = {stanza: root_identifiers(stanza) for stanza in MODULE_STANZAS}
+    known = {stanza: root_declarations(stanza) for stanza in MODULE_STANZAS}
     for path in paths:
         where = path.relative_to(REPO).as_posix()
         parsed = read_model(path)
@@ -325,6 +349,7 @@ def identifier_only(paths: list[Path]) -> list[str]:
                 )
                 continue
             for name, body in declared.items():
+                root_body = known[stanza].get(str(name))
                 if str(name) not in known[stanza]:
                     problems.append(
                         f"{where}: {stanza}.{name} is not declared in the root compose.yaml — "
@@ -332,6 +357,24 @@ def identifier_only(paths: list[Path]) -> list[str]:
                         f"root declares is orphaned and the service starts empty (AD-5). Declare it "
                         f"in the root {stanza}: list, or fix the spelling"
                     )
+                elif root_body:
+                    # Bare in the root means None or {}; anything else is a keyed declaration,
+                    # and Compose v2 refuses to import a module that names it at all. Reported
+                    # instead of the body rule below, not as well as it: this entry must go,
+                    # so telling its author to strip it to an identifier would be wrong advice.
+                    root_keys = (
+                        sorted(str(key) for key in root_body) if isinstance(root_body, dict) else [repr(root_body)]
+                    )
+                    problems.append(
+                        f"{where}: {stanza}.{name} is redeclared here, but the root compose.yaml "
+                        f"declares it with {root_keys} — Compose v2 rejects the whole model with "
+                        f"'{stanza}.{name} conflicts with imported resource' (exit 15), while newer "
+                        f"Compose resolves it, so this passes locally and fails every CI job. A "
+                        f"module may name a top-level resource only when the root's declaration is "
+                        f"bare. Delete the entry: the service reaches the {stanza[:-1]} through the "
+                        f"root regardless"
+                    )
+                    continue
                 if body is None or body == {}:
                     continue
                 keys = sorted(str(key) for key in body) if isinstance(body, dict) else [repr(body)]
@@ -484,7 +527,9 @@ def main() -> int:
     # Held, not written as they are earned. stdout and stderr interleave by buffering, so
     # a run that found a data-loss violation would otherwise end on a run of `OK` lines
     # and read as a pass to anyone who trusts the output over the exit status.
-    passed: list[str] = [f"OK {len(modules)} module file(s) declare identifiers only"]
+    passed: list[str] = [
+        f"OK {len(modules)} module file(s) declare identifiers only, and redeclare no keyed root resource"
+    ]
 
     try:
         logging = shared_logging()

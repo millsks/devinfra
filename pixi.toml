@@ -163,7 +163,7 @@ description = "Validate the compose configuration for every combination of the d
 cmd = "./scripts/lint-compose.sh"
 
 [tasks.lint-config]
-description = "Assert the rendered config binds locally, collides on no host port, pins every image, shares one logging policy, and every module stanza names a root-declared identifier only"
+description = "Assert the rendered config binds locally, collides on no host port, pins every image, shares one logging policy, and every module stanza names a root-declared identifier only, redeclaring no resource the root declares with keys"
 cmd = "python scripts/assert_config.py"
 
 [tasks.lint-pins]
