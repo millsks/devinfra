@@ -5,6 +5,15 @@
 # A Module. The rules every Module holds are spelled out once in
 # services/postgres/compose.yaml and in the 2026-09-07 amendment to
 # docs/adr/0004-volume-names-are-frozen.md; `lint-config` enforces them.
+
+# What this Module publishes, keyed by the variable that sets the host port.
+# `lint-config` reconciles this against the ports the file actually publishes, so
+# a new port with no entry here fails the build. See docs/adr/0012.
+x-endpoints:
+  TEMPO_PORT:
+    url: http://localhost:${TEMPO_PORT:-3200}
+    description: Tempo HTTP API — /ready, /api/traces/<id>, and OTLP ingest. Not in scripts/urls.sh.
+
 services:
   tempo:
     extends:
@@ -19,10 +28,12 @@ services:
       - tempo-data:/var/tempo
       - ./conf/tempo.yaml:/etc/tempo/tempo.yaml:ro
     command: ["-config.file=/etc/tempo/tempo.yaml"]
-    # No healthcheck, for the same reason as loki: Tempo 3.0 dropped the
-    # busybox layer, so the container holds /usr/bin/tempo and nothing else and
-    # a Docker healthcheck has nothing to run. smoke-test.sh polls /ready from
-    # the host instead, before the OTLP round-trip.
+    # No healthcheck, for the same reason as loki, and declared in
+    # healthcheck.none beside this file rather than left silent. Verified against
+    # the pinned image on 2026-09-07: grafana/tempo:3.0.3 carries /tempo and
+    # nothing else — no /bin/sh, no busybox, no wget — so a Docker healthcheck
+    # has nothing to run. smoke.sh polls /ready from the host instead, before the
+    # OTLP round-trip.
 
 volumes:
   tempo-data:

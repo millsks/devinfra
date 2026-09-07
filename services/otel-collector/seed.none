@@ -1,0 +1,8 @@
+# Why this Module ships no seed/ directory.
+# A marker with no justification is a silent skip in file form; lint-config
+# refuses an empty one.
+
+The collector is stateless: it owns no named volume at all. Every byte it handles
+is in flight from an OTLP client to Tempo, Loki or Prometheus.
+conf/otel-collector-config.yaml is configuration, bind-mounted read-only, not
+seed.

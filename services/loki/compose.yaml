@@ -4,6 +4,15 @@
 # A Module. The rules every Module holds are spelled out once in
 # services/postgres/compose.yaml and in the 2026-09-07 amendment to
 # docs/adr/0004-volume-names-are-frozen.md; `lint-config` enforces them.
+
+# What this Module publishes, keyed by the variable that sets the host port.
+# `lint-config` reconciles this against the ports the file actually publishes, so
+# a new port with no entry here fails the build. See docs/adr/0012.
+x-endpoints:
+  LOKI_PORT:
+    url: http://localhost:${LOKI_PORT:-3100}
+    description: Loki HTTP API — /ready, /loki/api/v1/*, and the /otlp ingest path. Not in scripts/urls.sh.
+
 services:
   loki:
     extends:
@@ -18,11 +27,12 @@ services:
       - loki-data:/loki
       - ./conf/loki-config.yaml:/etc/loki/local-config.yaml:ro
     command: ["-config.file=/etc/loki/local-config.yaml"]
-    # No healthcheck: Loki 3.7 dropped the busybox layer its image used to carry,
-    # so the container holds /usr/bin/loki and nothing else — no shell, no wget,
-    # no HTTP client of any kind — and a Docker healthcheck has nothing to run.
-    # The readiness gate is not lost, it moved: smoke-test.sh polls /ready from
-    # the host, before the OTLP round-trip, and strict mode fails on it.
+    # No healthcheck, and the exemption is declared in healthcheck.none beside
+    # this file rather than left silent. Verified against the pinned image on
+    # 2026-09-07: grafana/loki:3.7.7 carries /usr/bin/loki and nothing else — no
+    # /bin/sh, no busybox, no wget — so a Docker healthcheck has nothing to run.
+    # The readiness gate is not lost, it moved: smoke.sh polls /ready from the
+    # host, before the OTLP round-trip, and strict mode fails on it.
 
 volumes:
   loki-data:

@@ -1,15 +1,27 @@
 #!/usr/bin/env bash
-# End-to-end smoke test for the devinfra stack.
+# End-to-end smoke test for the devinfra stack — the driver.
 #
 # Proves each service is not merely running but actually usable: real queries,
 # real auth flows, a real object round-trip, a real email, and a real OTLP
-# trace/log/metric traversing the collector into Tempo/Loki/Prometheus.
+# trace/log/metric traversing the collector into its backends.
 #
 #   ./scripts/smoke-test.sh
 #
-# Exits non-zero if any check fails. Services belonging to a profile that is not
-# currently running are skipped rather than failed — FR-5, and what a developer
-# running a partial selection wants.
+# The checks themselves are not here. Every Module owns its own
+# `services/<module>/smoke.sh`, and this file enumerates them with a glob: it
+# holds the counters, the helpers and the preflights, and knows no Module by
+# name. Adding a Module to the catalog therefore adds its checks to this suite
+# without editing Core — which is the whole point, and why a hard-coded module
+# name here is a defect the self-test fails on.
+#
+# The module scripts are *sourced*, not executed. The counters are shell globals
+# and the checks read .env values loaded below; a subprocess would need a
+# counting protocol over stdout or exit codes to report anything at all.
+#
+# Exits non-zero if any check fails. Modules that are not currently running are
+# skipped rather than failed — FR-5, and what a developer running a partial
+# Selection wants. The `running` oracle is observational: it asks the runtime
+# what is up, never COMPOSE_PROFILES or a resolver.
 #
 #   SMOKE_STRICT=1 ./scripts/smoke-test.sh
 #
@@ -24,7 +36,7 @@ source "$(dirname "$0")/lib/common.sh"
 
 # Tools this suite cannot run without: curl for every HTTP check, openssl for the
 # trace and span IDs the OTLP round-trip is identified by, base64 for decoding the
-# Keycloak token whose claims the realm mappers are asserted on. A missing one
+# OIDC access token whose claims the realm mappers are asserted on. A missing one
 # fails here, naming it, before a single check runs — the alternative is a run in
 # which a dozen checks fail for one reason nothing reports. This is a fail-loud
 # preflight, not a presence branch: there is no arm that passes having checked
@@ -48,6 +60,21 @@ if ! compose version >/dev/null; then
     exit 1
 fi
 
+# The catalog, read from the filesystem rather than from a list in this file:
+# Core learns nothing about which Modules exist. A glob that matched nothing
+# expands to itself, so the first entry is then a path that does not exist —
+# a repository with no Modules, not a clean run. A suite that walked an empty set
+# has verified nothing, which is the silent skip this repository keeps removing,
+# so it is the third preflight rather than a quiet zero.
+DRIVER_MODULE_SMOKES=(services/*/smoke.sh)
+if [[ ! -f "${DRIVER_MODULE_SMOKES[0]}" ]]; then
+    printf 'smoke-test: found no services/*/smoke.sh — a suite over zero Modules verifies nothing\n' >&2
+    exit 1
+fi
+
+# Read by the module scripts this driver sources, never by the driver itself,
+# which is all shellcheck can see from here.
+# shellcheck disable=SC2034
 BIND="${BIND_ADDRESS:-127.0.0.1}"
 PASS=0
 FAIL=0
@@ -100,173 +127,9 @@ assert_contains() {
 
 dc() { compose exec -T "$@"; }
 
-# ===========================================================================
-section "PostgreSQL"
-# ===========================================================================
-if running postgres; then
-    assert_contains "server is PostgreSQL 17" "PostgreSQL 17" \
-        "$(dc postgres psql -U "${POSTGRES_USER}" -d "${POSTGRES_DB}" -tAc 'select version();' 2>&1)"
-
-    assert_contains "pgvector distance operator works" "2.828" \
-        "$(dc postgres psql -U "${POSTGRES_USER}" -d "${POSTGRES_DB}" -tAc "select '[1,2,3]'::vector <-> '[3,2,1]'::vector;" 2>&1)"
-
-    assert_contains "pg_stat_statements is loaded" "pg_stat_statements" \
-        "$(dc postgres psql -U "${POSTGRES_USER}" -d "${POSTGRES_DB}" -tAc 'select extname from pg_extension;' 2>&1)"
-
-    assert_contains "custom postgresql.conf is in effect" "logical" \
-        "$(dc postgres psql -U "${POSTGRES_USER}" -d "${POSTGRES_DB}" -tAc "select current_setting('wal_level');" 2>&1)"
-
-    assert_contains "data checksums enabled" "on" \
-        "$(dc postgres psql -U "${POSTGRES_USER}" -d "${POSTGRES_DB}" -tAc 'show data_checksums;' 2>&1)"
-
-    for db in ${POSTGRES_EXTRA_DATABASES//,/ }; do
-        assert_contains "extra database '${db}' exists" "1" \
-            "$(dc postgres psql -U "${POSTGRES_USER}" -d "${POSTGRES_DB}" -tAc "select count(*) from pg_database where datname='${db}';" 2>&1)"
-    done
-
-    assert_contains "write/read round-trip" "smoke-ok" \
-        "$(dc postgres psql -U "${POSTGRES_USER}" -d "${POSTGRES_DB}" -tAc \
-            "create table if not exists smoke_probe(v text); truncate smoke_probe; insert into smoke_probe values ('smoke-ok'); select v from smoke_probe;" 2>&1)"
-else
-    skip "postgres not running"
-fi
-
-# ===========================================================================
-section "Redis"
-# ===========================================================================
-if running redis; then
-    assert_contains "responds to authenticated PING" "PONG" \
-        "$(dc redis redis-cli -a "${REDIS_PASSWORD}" --no-auth-warning ping 2>&1)"
-
-    assert_contains "rejects unauthenticated clients" "NOAUTH" \
-        "$(dc redis redis-cli ping 2>&1)"
-
-    assert_contains "AOF persistence is on" "yes" \
-        "$(dc redis redis-cli -a "${REDIS_PASSWORD}" --no-auth-warning config get appendonly 2>&1)"
-
-    # noeviction matters: this instance is a Celery broker, and an LRU policy
-    # would silently discard queued tasks under memory pressure.
-    assert_contains "maxmemory-policy is noeviction" "noeviction" \
-        "$(dc redis redis-cli -a "${REDIS_PASSWORD}" --no-auth-warning config get maxmemory-policy 2>&1)"
-
-    dc redis redis-cli -a "${REDIS_PASSWORD}" --no-auth-warning -n "${REDIS_BROKER_DB}" set smoke-probe smoke-ok >/dev/null 2>&1
-    assert_contains "broker db ${REDIS_BROKER_DB} write/read round-trip" "smoke-ok" \
-        "$(dc redis redis-cli -a "${REDIS_PASSWORD}" --no-auth-warning -n "${REDIS_BROKER_DB}" get smoke-probe 2>&1)"
-else
-    skip "redis not running"
-fi
-
-# ===========================================================================
-section "Keycloak (OpenID Connect)"
-# ===========================================================================
-KC="http://${BIND}:${KEYCLOAK_PORT}"
-TOKEN_URL="${KC}/realms/${KEYCLOAK_REALM}/protocol/openid-connect/token"
-
-if running keycloak; then
-    DISCOVERY="$(curl -sf "${KC}/realms/${KEYCLOAK_REALM}/.well-known/openid-configuration" 2>&1)"
-    assert_contains "OIDC discovery document is served" '"issuer"' "${DISCOVERY}"
-
-    # A stable issuer is what lets clients validate tokens against the
-    # discovery document; if KC_HOSTNAME drifts, every client breaks. The issuer
-    # is pinned to localhost by KC_HOSTNAME regardless of the bind address, so
-    # it is asserted against localhost rather than ${BIND}.
-    KC_ISSUER="http://localhost:${KEYCLOAK_PORT}/realms/${KEYCLOAK_REALM}"
-    assert_contains "issuer is pinned to ${KC_ISSUER}" "\"issuer\":\"${KC_ISSUER}\"" "${DISCOVERY}"
-    assert_contains "PKCE S256 is advertised" "S256" "${DISCOVERY}"
-
-    assert_contains "client_credentials grant (devinfra-api)" "access_token" \
-        "$(curl -s -X POST "${TOKEN_URL}" \
-            -d grant_type=client_credentials \
-            -d client_id=devinfra-api \
-            -d "client_secret=${KEYCLOAK_CLIENT_SECRET}" 2>&1)"
-
-    USER_TOKEN="$(curl -s -X POST "${TOKEN_URL}" \
-        -d grant_type=password -d client_id=devinfra-cli \
-        -d username=dev -d password=dev -d scope=openid 2>&1)"
-    assert_contains "password grant for user 'dev' (devinfra-cli)" "access_token" "${USER_TOKEN}"
-    assert_contains "refresh token issued" "refresh_token" "${USER_TOKEN}"
-
-    # Decode the access token payload to confirm the realm's mappers fired.
-    CLAIMS="$(printf '%s' "${USER_TOKEN}" |
-        sed -n 's/.*"access_token":"[^.]*\.\([^.]*\)\..*/\1/p' |
-        tr '_-' '/+' | { read -r p; printf '%s' "${p}$(printf '%*s' $(((4 - ${#p} % 4) % 4)) '' | tr ' ' '=')"; } |
-        base64 -d 2>/dev/null)"
-    assert_contains "audience mapper puts devinfra-api in aud" 'devinfra-api' "${CLAIMS}"
-    assert_contains "realm roles present in token" 'app_admin' "${CLAIMS}"
-
-    assert_contains "health endpoint reports UP" '"status": "UP"' \
-        "$(curl -sf "http://${BIND}:${KEYCLOAK_MGMT_PORT}/health/ready" 2>&1)"
-else
-    skip "keycloak not running"
-fi
-
-# ===========================================================================
-section "MinIO"
-# ===========================================================================
-if running minio; then
-    dc minio mc alias set smoke "http://127.0.0.1:9000" "${MINIO_ROOT_USER}" "${MINIO_ROOT_PASSWORD}" >/dev/null 2>&1
-    BUCKET_LIST="$(dc minio mc ls smoke 2>&1)"
-    for bucket in ${MINIO_BUCKETS//,/ }; do
-        assert_contains "bucket '${bucket}' provisioned" "${bucket}" "${BUCKET_LIST}"
-    done
-
-    FIRST_BUCKET="${MINIO_BUCKETS%%,*}"
-    assert_contains "object put/get round-trip" "smoke-ok" \
-        "$(dc minio sh -c "echo smoke-ok > /tmp/smoke.txt && mc cp /tmp/smoke.txt smoke/${FIRST_BUCKET}/smoke.txt >/dev/null 2>&1 && mc cat smoke/${FIRST_BUCKET}/smoke.txt" 2>&1)"
-
-    assert_contains "versioning enabled on '${FIRST_BUCKET}'" "versioning is enabled" \
-        "$(dc minio mc version info "smoke/${FIRST_BUCKET}" 2>&1)"
-else
-    skip "minio not running"
-fi
-
-# ===========================================================================
-section "Mailpit"
-# ===========================================================================
-if running mailpit; then
-    BEFORE="$(curl -sf "http://${BIND}:${MAILPIT_UI_PORT}/api/v1/messages?limit=1" 2>/dev/null |
-        sed -n 's/.*"messages_count":\([0-9]*\).*/\1/p')"
-    BEFORE="${BEFORE:-0}"
-
-    # Speak just enough SMTP over the raw socket to avoid a Python dependency.
-    if exec 3<>"/dev/tcp/${BIND}/${MAILPIT_SMTP_PORT}" 2>/dev/null; then
-        {
-            printf 'EHLO smoke\r\n'
-            printf 'MAIL FROM:<smoke@example.com>\r\n'
-            printf 'RCPT TO:<dev@example.com>\r\n'
-            printf 'DATA\r\n'
-            printf 'Subject: devinfra smoke test\r\n\r\nsmoke-ok\r\n.\r\n'
-            printf 'QUIT\r\n'
-            sleep 1
-        } >&3
-        cat <&3 >/dev/null 2>&1
-        exec 3<&- 3>&-
-        sleep 1
-
-        AFTER="$(curl -sf "http://${BIND}:${MAILPIT_UI_PORT}/api/v1/messages?limit=1" 2>/dev/null |
-            sed -n 's/.*"messages_count":\([0-9]*\).*/\1/p')"
-        AFTER="${AFTER:-0}"
-        if ((AFTER > BEFORE)); then
-            pass "SMTP message accepted and stored (${BEFORE} -> ${AFTER})"
-        else
-            fail "SMTP message accepted and stored" "count did not increase (${BEFORE} -> ${AFTER})"
-        fi
-    else
-        fail "SMTP port ${MAILPIT_SMTP_PORT} reachable" "could not open socket"
-    fi
-else
-    skip "mailpit not running"
-fi
-
-# ===========================================================================
-section "Observability pipeline (OTLP -> Tempo / Loki / Prometheus)"
-# ===========================================================================
-# Readiness first, and from the host. Loki 3.7 and Tempo 3.0 ship distroless
-# images holding nothing but their own binary, so compose.yaml can carry no
-# healthcheck for either and wait-healthy.sh can only see that the container is
-# running. Asserting /ready here restores the gate and puts it ahead of the
-# round-trip below, so a backend that never came up reads as itself rather than
-# as a trace or log line that never landed.
+# A counted readiness assertion, for a Module whose image can carry no Docker
+# healthcheck: its healthcheck.none marker says why, and this is then the only
+# readiness gate the stack has for it. Strict mode fails on it.
 assert_ready() {
     local label="$1" url="$2"
     for _ in $(seq 1 60); do
@@ -279,151 +142,65 @@ assert_ready() {
     fail "$label" "${url} did not report ready within 120s"
 }
 
-if running loki; then
-    assert_ready "Loki reports ready" "http://${BIND}:${LOKI_PORT}/ready"
-else
-    skip "loki not running"
-fi
-
-if running tempo; then
-    assert_ready "Tempo reports ready" "http://${BIND}:${TEMPO_PORT}/ready"
-else
-    skip "tempo not running"
-fi
-
-if running otel-collector; then
-    TRACE_ID="$(openssl rand -hex 16)"
-    SPAN_ID="$(openssl rand -hex 8)"
-    NOW_S="$(date +%s)"
-    NOW_NS="${NOW_S}000000000"
-    END_NS="$((NOW_S + 1))000000000"
-    MARKER="devinfra-smoke-${TRACE_ID:0:8}"
-    OTLP="http://${BIND}:${OTEL_HTTP_PORT}"
-
-    post_otlp() {
-        curl -s -o /dev/null -w '%{http_code}' -X POST "${OTLP}/v1/$1" \
-            -H 'Content-Type: application/json' -d "$2"
-    }
-
-    # Build each payload into a variable first. A brace-heavy literal written
-    # inline inside "$( ... )" gets brace-expanded by the shell, which silently
-    # shreds the JSON into fragments and fires one request per fragment.
-    RESOURCE="\"resource\":{\"attributes\":[{\"key\":\"service.name\",\"value\":{\"stringValue\":\"${MARKER}\"}}]}"
-
-    TRACE_PAYLOAD="{\"resourceSpans\":[{${RESOURCE},\"scopeSpans\":[{\"scope\":{\"name\":\"smoke\"},\"spans\":[{\"traceId\":\"${TRACE_ID}\",\"spanId\":\"${SPAN_ID}\",\"name\":\"smoke-span\",\"kind\":2,\"startTimeUnixNano\":\"${NOW_NS}\",\"endTimeUnixNano\":\"${END_NS}\",\"status\":{\"code\":1}}]}]}]}"
-    assert_contains "collector accepts OTLP traces" "200" "$(post_otlp traces "${TRACE_PAYLOAD}")"
-
-    LOG_PAYLOAD="{\"resourceLogs\":[{${RESOURCE},\"scopeLogs\":[{\"scope\":{\"name\":\"smoke\"},\"logRecords\":[{\"timeUnixNano\":\"${NOW_NS}\",\"severityNumber\":9,\"severityText\":\"INFO\",\"body\":{\"stringValue\":\"smoke-ok trace_id=${TRACE_ID}\"},\"traceId\":\"${TRACE_ID}\",\"spanId\":\"${SPAN_ID}\"}]}]}]}"
-    assert_contains "collector accepts OTLP logs" "200" "$(post_otlp logs "${LOG_PAYLOAD}")"
-
-    METRIC_PAYLOAD="{\"resourceMetrics\":[{${RESOURCE},\"scopeMetrics\":[{\"scope\":{\"name\":\"smoke\"},\"metrics\":[{\"name\":\"devinfra_smoke_counter\",\"unit\":\"1\",\"sum\":{\"aggregationTemporality\":2,\"isMonotonic\":true,\"dataPoints\":[{\"asInt\":\"1\",\"startTimeUnixNano\":\"${NOW_NS}\",\"timeUnixNano\":\"${NOW_NS}\"}]}}]}]}]}"
-    assert_contains "collector accepts OTLP metrics" "200" "$(post_otlp metrics "${METRIC_PAYLOAD}")"
-
-    # Tempo needs a moment to move the span from WAL into a searchable block,
-    # and Prometheus needs at least one 15s scrape of the collector.
-    printf '        %s' "$(dim 'waiting up to 60s for backends to ingest')"
-    TEMPO_OK=""
-    LOKI_OK=""
-    PROM_OK=""
-    for _ in $(seq 1 12); do
-        sleep 5
-        printf '.'
-        [[ -z "${TEMPO_OK}" ]] && running tempo &&
-            curl -sf "http://${BIND}:${TEMPO_PORT}/api/traces/${TRACE_ID}" 2>/dev/null | grep -q 'smoke-span' && TEMPO_OK=1
-        if [[ -z "${LOKI_OK}" ]] && running loki; then
-            L_END="$(date +%s)000000000"
-            L_START="$((NOW_S - 300))000000000"
-            curl -sfG "http://${BIND}:${LOKI_PORT}/loki/api/v1/query_range" \
-                --data-urlencode "query={service_name=\"${MARKER}\"}" \
-                --data-urlencode "start=${L_START}" --data-urlencode "end=${L_END}" 2>/dev/null |
-                grep -q 'smoke-ok' && LOKI_OK=1
-        fi
-        if [[ -z "${PROM_OK}" ]] && running prometheus; then
-            # /api/v1/series is step-independent, unlike query_range, so a
-            # short-lived series cannot be stepped over.
-            curl -sfG "http://${BIND}:${PROMETHEUS_PORT}/api/v1/series" \
-                --data-urlencode 'match[]=devinfra_smoke_counter_total' \
-                --data-urlencode "start=$((NOW_S - 300))" --data-urlencode "end=$(date +%s)" 2>/dev/null |
-                grep -q "${MARKER}" && PROM_OK=1
-        fi
-        [[ -n "${TEMPO_OK}" && -n "${LOKI_OK}" && -n "${PROM_OK}" ]] && break
+# The silent half of the same idea, and deliberately not a check: it counts
+# nothing, prints nothing and never fails. Modules run in glob order, so a Module
+# that fans out to a backend alphabetically after it would otherwise read a
+# not-yet-ready backend as its own lost data. Restoring that diagnostic is what
+# this is for; it is never a substitute for a counted assertion.
+await_url() {
+    # The same 120s budget assert_ready spends. A shorter one here would silently move
+    # the bar: a backend that becomes ready between the two would fail a counted check in
+    # the Module that pre-waited on it, where the old central ordering passed.
+    for _ in $(seq 1 60); do
+        curl -sf "$1" >/dev/null 2>&1 && return 0
+        sleep 2
     done
-    printf '\n'
+    return 1
+}
 
-    if running tempo; then
-        if [[ -n "${TEMPO_OK}" ]]; then
-            pass "trace stored in Tempo and retrievable by ID"
-        else
-            fail "trace stored in Tempo and retrievable by ID" "trace ${TRACE_ID} not found"
-        fi
-    else skip "tempo not running"; fi
-
-    if running loki; then
-        if [[ -n "${LOKI_OK}" ]]; then
-            pass "log line stored in Loki and queryable by label"
-        else
-            fail "log line stored in Loki and queryable by label" "no stream for service_name=${MARKER}"
-        fi
-    else skip "loki not running"; fi
-
-    if running prometheus; then
-        if [[ -n "${PROM_OK}" ]]; then
-            pass "metric scraped from collector into Prometheus"
-        else
-            fail "metric scraped from collector into Prometheus" "series devinfra_smoke_counter_total absent"
-        fi
-    else skip "prometheus not running"; fi
-
-    if running prometheus; then
-        DOWN="$(curl -sf "http://${BIND}:${PROMETHEUS_PORT}/api/v1/targets?state=active" 2>/dev/null |
-            tr ',' '\n' | grep -c '"health":"down"')"
-        if [[ "${DOWN}" == "0" ]]; then
-            pass "all Prometheus scrape targets healthy"
-        else
-            fail "all Prometheus scrape targets healthy" "${DOWN} target(s) down — see http://${BIND}:${PROMETHEUS_PORT}/targets"
-        fi
-    fi
-else
-    skip "otel-collector not running (observability profile off)"
-fi
-
-# ===========================================================================
-section "Grafana"
-# ===========================================================================
-if running grafana; then
-    GF="http://${GRAFANA_ADMIN_USER}:${GRAFANA_ADMIN_PASSWORD}@${BIND}:${GRAFANA_PORT}"
-    for uid in prometheus loki tempo postgres; do
-        BODY="$(curl -sf "${GF}/api/datasources/uid/${uid}" 2>/dev/null)"
-        assert_contains "datasource '${uid}' provisioned" "\"uid\":\"${uid}\"" "${BODY}"
-    done
-    # Tempo's backend implements no health endpoint, so it is checked by
-    # provisioning presence above rather than by /health.
-    for uid in prometheus loki postgres; do
-        assert_contains "datasource '${uid}' connects" "OK" \
-            "$(curl -sf "${GF}/api/datasources/uid/${uid}/health" 2>/dev/null)"
-    done
-else
-    skip "grafana not running"
-fi
-
-# ===========================================================================
-section "Admin UIs"
-# ===========================================================================
+# Liveness over HTTP, un-gated: the driver has already established the Module is
+# running before it sources the file that calls this.
 check_http() {
-    if running "$1"; then
-        CODE="$(curl -s -o /dev/null -w '%{http_code}' --max-time 10 "$2" 2>&1)"
-        if [[ "${CODE}" =~ ^(200|302)$ ]]; then
-            pass "$1 responds on $2 (HTTP ${CODE})"
-        else
-            fail "$1 responds on $2" "HTTP ${CODE}"
-        fi
+    # `local`, because every module script this driver sources writes into the same
+    # namespace: a plain global here is a name a Module could capture.
+    local driver_http_code
+    driver_http_code="$(curl -s -o /dev/null -w '%{http_code}' --max-time 10 "$2" 2>&1)"
+    if [[ "${driver_http_code}" =~ ^(200|302)$ ]]; then
+        pass "$1 responds on $2 (HTTP ${driver_http_code})"
     else
-        skip "$1 not running"
+        fail "$1 responds on $2" "HTTP ${driver_http_code}"
     fi
 }
-check_http pgadmin "http://${BIND}:${PGADMIN_PORT}/misc/ping"
-check_http redisinsight "http://${BIND}:${REDISINSIGHT_PORT}/"
-check_http flower "http://${BIND}:${FLOWER_PORT}/api/workers"
+
+# ===========================================================================
+# Each Module in turn, in glob order. A Module that is not in the current
+# Selection reports `skip`, never a pass and never a fail — and under
+# SMOKE_STRICT=1 that skip is a failure naming it.
+# ===========================================================================
+# Every name the driver keeps across an iteration is prefixed, because a sourced module
+# script writes into this very namespace: a Module assigning a bare `module=` would
+# otherwise break enumeration for every Module after it in glob order, silently.
+for driver_module_smoke in "${DRIVER_MODULE_SMOKES[@]}"; do
+    driver_module="$(basename "$(dirname "${driver_module_smoke}")")"
+    section "${driver_module}"
+    if running "${driver_module}"; then
+        # A module script that does not parse must not vanish. `source` would return
+        # non-zero, the loop would carry on, and that Module would contribute no pass, no
+        # fail and no skip while the suite still exited 0 — the silent skip in its purest
+        # form. Parsed first rather than judged by the source's own exit status, which is
+        # only whatever the file's last command happened to return.
+        if bash -n "${driver_module_smoke}" 2>/dev/null; then
+            # Sourced, not executed; the path is only known at runtime.
+            # shellcheck source=/dev/null
+            source "${driver_module_smoke}"
+        else
+            fail "${driver_module} smoke checks could not be sourced" \
+                "${driver_module_smoke} is not readable as bash — none of its checks ran"
+        fi
+    else
+        skip "${driver_module} not running"
+    fi
+done
 
 # ===========================================================================
 printf '\n\033[1m%s\033[0m\n' "Summary"

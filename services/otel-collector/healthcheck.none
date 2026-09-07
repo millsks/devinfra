@@ -1,0 +1,12 @@
+# Why this Module's primary service carries no `healthcheck:`.
+# A marker with no justification is a silent skip in file form; lint-config
+# refuses an empty one.
+
+The pinned image otel/opentelemetry-collector-contrib:0.160.0 is distroless:
+`sh` is not on its PATH and it ships no HTTP client, verified 2026-09-07. A
+Docker healthcheck has nothing to execute. This is the one Module whose smoke
+check already proves the thing a healthcheck would only approximate:
+services/otel-collector/smoke.sh posts a real trace, log line and metric over
+OTLP from the host and then reads all three back out of Tempo, Loki and
+Prometheus. The health_check extension is deliberately not enabled — it would
+add a port to publish and still need a client inside the container to poll it.

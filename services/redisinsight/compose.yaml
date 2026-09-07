@@ -5,6 +5,21 @@
 # docs/adr/0004-volume-names-are-frozen.md; `lint-config` enforces them.
 #
 # No config or seed files: the volume is the whole of this module's state.
+
+# What this Module publishes, keyed by the variable that sets the host port.
+# `lint-config` reconciles this against the ports the file actually publishes, so
+# a new port with no entry here fails the build. See docs/adr/0012.
+x-endpoints:
+  REDISINSIGHT_PORT:
+    url: http://localhost:${REDISINSIGHT_PORT:-5540}
+    description: RedisInsight web UI, with the stack's Redis auto-added on first start.
+
+# What this Module consumes from another, named by the provider's own endpoint
+# keys. Every entry must have a matching `depends_on` edge (ADR 0002).
+x-requires:
+  redis:
+    - REDIS_PORT
+
 services:
   redisinsight:
     extends:
@@ -28,6 +43,15 @@ services:
       RI_REDIS_ALIAS: devinfra
     volumes:
       - redisinsight-data:/data
+    healthcheck:
+      # The image carries /bin/sh and wget; /api/health is RedisInsight's own
+      # liveness endpoint. It says nothing about the Redis connection: see
+      # gotchas.md.
+      test: ["CMD-SHELL", "wget -q -O /dev/null http://127.0.0.1:5540/api/health"]
+      interval: 15s
+      timeout: 5s
+      retries: 10
+      start_period: 20s
 
 volumes:
   redisinsight-data:

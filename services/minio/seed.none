@@ -1,0 +1,9 @@
+# Why this Module ships no seed/ directory.
+# A marker with no justification is a silent skip in file form; lint-config
+# refuses an empty one.
+
+The buckets are provisioned by the minio-init helper, not by a seed directory.
+Its `command:` reads MINIO_BUCKETS, runs `mc mb --ignore-existing` and `mc
+version enable` for each name, then exits 0. That is where new buckets are added
+— editing MINIO_BUCKETS in .env.example, not dropping files here. Object content
+itself is runtime data written through the S3 API.

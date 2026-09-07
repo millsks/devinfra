@@ -261,3 +261,59 @@ source_spec: `spec-2-3-the-admin-and-observability-modules.md`
 severity: low
 reason: AGENTS.md:2 is the bmad-project-context managed-block header, which records the revision the block was verified against. The block's layout and "still inlined" claims were corrected here because leaving them false was worse than editing a managed region, but the stamp now names a revision that predates the edit. Routed to defer because the fix edits an agent-context file; a bmad-project-context refresh regenerates both the block and its stamp.
 status: open
+
+### DW-34: Host port numbers are declared in three places — .env.example, each module file's `${VAR:-N}` ports fallback, and now each module's `x-endpoints:` url — with nothing reconciling them; assert_pins.py
+origin: spec-deferred eaf58395bf3a
+location: scripts/assert_pins.py:60 (PIN regex); services/*/compose.yaml x-endpoints urls
+source_spec: `spec-2-4-every-module-carries-its-own-contract-enforced.md`
+severity: low
+reason: Confirmed by reading assert_pins.py's PIN regex, which matches version pins alone. The class is pre-existing — the compose fallbacks already duplicated .env.example unchecked — but this story adds seventeen more instances of it inside the very block written to end endpoint drift. All three sources agree today, verified against .env.example lines 62-170. Settling it is an extension of assert_pins.py's existing occurrences() / dotenv_declarations() machinery to `*_PORT`, which is a check this story did not own.
+status: open
+
+### DW-35: The bidirectional contract check reads module-file text, so a Compose service reaching the rendered model from anywhere but a `services/<dir>/compose.yaml` is not caught by this check.
+origin: spec-deferred def4e9fa01b8
+location: scripts/assert_config.py module_contract() — service-ownership rule
+source_spec: `spec-2-4-every-module-carries-its-own-contract-enforced.md`
+severity: low
+reason: Real. module_contract() asserts that every service key in a module file is `<dir>` or `<dir>-<role>`; closure at the rendered surface depends on the separate, pre-existing pin that the root compose.yaml declares no `services:` key (lint_selftest.py:646-654). A service arriving via compose.override.yaml — which the self-test's own defects table already plants for lint-compose — or via an `include:` outside services/ would satisfy the new check. The trade is argued in this spec's Design Notes: asserting it against the rendered model instead breaks a dozen stub-document fixtures that name services no directory owns on purpose. Settling it needs a rendered-model pass that tolerates those fixtures, most likely by keying off the real runtime run rather than the stubs.
+status: open
+
+### DW-36: The live-stack acceptance criteria were settled against containers running images that are stale relative to the pins, so the pinned loki and tempo tags were never actually run.
+origin: spec-deferred 13cbc40f538d
+location: spec Verification section (live-stack commands)
+source_spec: `spec-2-4-every-module-carries-its-own-contract-enforced.md`
+severity: medium
+reason: `pixi run smoke` reports 47 passed, 0 failed, 0 skipped from this worktree, and the baseline suite run against the same stack produces a byte-identical set of PASS labels — but `docker inspect` shows the running containers are grafana/loki:3.5.7 and grafana/tempo:2.9.0 while .env.example pins 3.7.7 and 3.0.3. Every module pins a fixed container_name and the live stack runs from the main checkout, so recreating from here would repoint its binds at a directory deleted when the run ends. The five added healthchecks were each executed inside their live container and in a throwaway container from the pinned image; the two healthcheck.none exemptions were settled by exporting the pinned image filesystems. What remains unrun is `docker compose --profile admin --profile observability up -d` followed by `./scripts/wait-healthy.sh` and `pixi run smoke` from the checkout that owns the live stack, on the pinned images. Same shape as DW-30, which records the identical gap for story 2-3.
+status: open
+
+### DW-37: The healthcheck exemption is a property of the pinned image tag, so a version bump can silently make a marker false without any check noticing.
+origin: spec-deferred 5cdc4e8d9012
+location: services/{loki,tempo,otel-collector}/healthcheck.none
+source_spec: `spec-2-4-every-module-carries-its-own-contract-enforced.md`
+severity: low
+reason: Directly demonstrated by this story: the plan called for real healthchecks on loki and tempo because the *running* 3.5.7/2.9.0 images carry /busybox/wget, while the pinned 3.7.7/3.0.3 images hold only their own binary. The same movement can go the other way — a future tag that regains a shell leaves a healthcheck.none standing that is no longer true, and lint-config only checks the marker is justified, never that the justification still holds. ADR 0012 records that the exemption must be re-verified on a version bump; nothing enforces it. Settling it needs a check that runs against the image, which is a runtime dependency the static lint surface deliberately does not have.
+status: open
+
+### DW-38: Nothing pins that the rendered Compose document carries no top-level `x-endpoints:` or `x-requires:` key.
+origin: spec-deferred d81b29ec8fdb
+location: scripts/assert_config.py module_contract(); docs/adr/0012
+source_spec: `spec-2-4-every-module-carries-its-own-contract-enforced.md`
+severity: low
+reason: Verified absent on Compose v5.3.0: the rendered document's top-level keys are name, networks, services and volumes only. No bad outcome is reachable on any supported Compose — assert_config.py reads the raw module files, as ADR 0012 now states it must. If a future Compose merged them, `x-requires.postgres` is declared by both keycloak and pgadmin with different value lists and one would silently win. A one-line self-test assertion over the rendered stub document would settle it.
+status: open
+
+### DW-39: The `x-requires:` reconciliation runs one direction only, so a Module that consumes another and declares nothing passes the contract in silence.
+origin: spec-deferred 8acff1451fde
+location: scripts/assert_config.py module_contract() — x-requires leg; services/grafana/compose.yaml:22-28
+source_spec: `spec-2-4-every-module-carries-its-own-contract-enforced.md`
+severity: medium
+reason: Confirmed by reading module_contract(): the loop walks `requires.items()`, so it can only judge entries that exist. Grafana is the live instance — it provisions a `postgres` datasource (services/grafana/conf/provisioning/datasources/datasources.yaml:76-79), reads POSTGRES_USER/PASSWORD/DB from its own environment, and its smoke.sh asserts `datasource 'postgres' connects` — while its `x-requires:` names only prometheus, loki and tempo and its `depends_on` omits postgres. `lint-config` is green. The omission is pre-existing (git show 30fdb19:services/grafana/compose.yaml has the same depends_on and the same POSTGRES_* environment), so this story did not cause it; what the story adds is a declaration mechanism that cannot catch it. The mirror rule — a `depends_on` edge onto another Module with no `x-requires:` entry naming it — would close it, but the smallest fix for grafana specifically is adding `depends_on: postgres`, which is a runtime-model change this story's constraints forbid.
+status: open
+
+### DW-40: `scripts/urls.sh` is not reconciled against the `x-endpoints:` blocks that now supersede it, and already omits three ports those blocks declare.
+origin: spec-deferred 2afb77eb0732
+location: scripts/urls.sh:14-28; scripts/lint_selftest.py:1125-1160
+source_spec: `spec-2-4-every-module-carries-its-own-contract-enforced.md`
+severity: medium
+reason: Verified: the union of `x-endpoints:` keys across the thirteen Modules is seventeen variables; `scripts/urls.sh` sets defaults for fourteen and omits LOKI_PORT, TEMPO_PORT and KEYCLOAK_MGMT_PORT — so `pixi run urls` prints no Loki, Tempo or Keycloak-management endpoint while `lint-config` certifies those three entries as complete. The drift is pre-existing, but enforcing the new list without reconciling the old one makes further divergence silent: a fourteenth port declared tomorrow (as lint-config now forces) and forgotten in urls.sh keeps `pixi run ci` green. The only urls case, lint_selftest.py:1125-1160, asserts a hardcoded twelve-name / fourteen-default tuple derived from nothing, so it encodes the drift rather than detecting it. ADR 0012 states the decision explicitly ("scripts/urls.sh is left alone rather than half-migrated") and assigns generation to story 3-3; the cheap interim is a self-test case comparing the union of `x-endpoints:` keys against urls.sh's text.
+status: open

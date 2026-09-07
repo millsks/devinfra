@@ -1,0 +1,11 @@
+# Why this Module's primary service carries no `healthcheck:`.
+# A marker with no justification is a silent skip in file form; lint-config
+# refuses an empty one.
+
+The pinned image grafana/tempo:3.0.3 is distroless. Verified 2026-09-07 by
+exporting the image filesystem: it holds /tempo and nothing else — no /bin/sh,
+no /busybox, no wget — so `docker run --entrypoint /bin/sh grafana/tempo:3.0.3`
+fails with "stat /bin/sh: no such file or directory". A Docker healthcheck has
+nothing to execute. The readiness gate is not lost: services/tempo/smoke.sh
+polls /ready from the host before the OTLP round-trip, and SMOKE_STRICT=1 fails
+on it.
