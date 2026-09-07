@@ -812,6 +812,17 @@ def main() -> int:
             REPO / "services" / "redisinsight" / "zz_selftest_defect.yaml",
             "root:\n  a: 1\n      b: 2\n",
         ),
+        # The shell half of that same argument, and the reason `services/**/*.sh` is a
+        # term in its own right rather than a leftover from the Postgres seed scripts:
+        # since story 2-4 every Module owns a smoke.sh, so that pattern now reaches the
+        # verification for the whole stack. Placed in redisinsight/ for the same reason as
+        # the YAML fixture above — the one module with nothing bind-mounted into a
+        # container, so a fixture surviving a killed run reaches no container.
+        (
+            "lint-shell",
+            REPO / "services" / "redisinsight" / "zz_selftest_defect.sh",
+            '#!/usr/bin/env bash\nv="$1"\necho $v\n',
+        ),
         (
             "lint-compose",
             REPO / "compose.override.yaml",
@@ -839,7 +850,13 @@ def main() -> int:
     # placed to avoid, one size larger. `git status` names every one, and renaming the
     # `.selftest-moved` files back — or `git checkout --` — restores the tree.
     empties: list[tuple[str, list[Path]]] = [
-        ("lint-shell", sorted((REPO / "services" / "postgres" / "seed").glob("*.sh"))),
+        # The whole recursive `services/**/*.sh` term, not just the Postgres seed scripts
+        # it was pinned on before story 2-4. Thirteen Module smoke.sh files now live under
+        # that pattern, so hiding the seed scripts alone no longer empties it: the task
+        # would pass, this case would fail, and the term could be deleted from pixi.toml
+        # with every Module's own verification going unlinted. Same widening the lint-yaml
+        # `services/` entry below already carries, one story later.
+        ("lint-shell", sorted((REPO / "services").rglob("*.sh"))),
         # The three glob halves of the lint-yaml pattern, pinned one term per entry.
         # Hiding several at once would let any one of `common/**/*.y*ml`,
         # `services/**/*.y*ml` and `.github/workflows/*.y*ml` be deleted from pixi.toml
@@ -1632,6 +1649,39 @@ def main() -> int:
         # reused, and torn down whole rather than by an rmdir that a surviving fixture
         # file would defeat.
         defect_module.mkdir(exist_ok=True)
+        # Since story 2-4 a module directory is a Module, and lint-config refuses one that
+        # does not carry the contract. This fixture exists on disk while lint-config runs
+        # in a dozen cases below, one of which expects exit 0, so it is made
+        # contract-complete rather than exempted by a `zz-*` special case in production
+        # code — an exemption there would be a hole every real Module could fall through.
+        # The bodies planted below all carry the healthcheck and the x-endpoints block the
+        # contract's other two legs need.
+        contract_siblings = {
+            "smoke.sh": (
+                "# Self-test fixture. Sourced by scripts/smoke-test.sh, never executed.\n"
+                "#\n"
+                "# shellcheck shell=bash\n"
+                "\n"
+                "true\n"
+            ),
+            "gotchas.md": "# zz-selftest-defect — gotchas\n\nA self-test fixture. It runs nothing and bites nobody.\n",
+            "seed.none": (
+                "# Why this Module ships no seed/ directory.\n\nA self-test fixture loads nothing at first boot.\n"
+            ),
+        }
+        for sibling, sibling_body in contract_siblings.items():
+            (defect_module / sibling).write_text(sibling_body, encoding="utf-8", newline="\n")
+        contract_prefix = (
+            "x-endpoints:\n"
+            "  ZZ_SELFTEST_PORT:\n"
+            "    url: http://localhost:1\n"
+            "    description: a self-test fixture endpoint\n"
+            "services:\n"
+            "  zz-selftest-defect:\n"
+            "    image: alpine:3.22\n"
+            '    healthcheck:\n      test: ["CMD", "true"]\n'
+            '    ports:\n      - "127.0.0.1:${ZZ_SELFTEST_PORT:-19990}:1"\n'
+        )
         try:
             for stanza, body in (
                 ("volumes", "volumes:\n  postgres-data:\n    name: somewhere-else\n"),
@@ -1645,7 +1695,7 @@ def main() -> int:
                 ("volumes", "volumes:\n  postgres-dataa:\n"),
             ):
                 fixture = defect_module / "compose.yaml"
-                with planted(fixture, "services:\n  zz-selftest-defect:\n    image: alpine:3.22\n" + body):
+                with planted(fixture, contract_prefix + body):
                     r = pixi("lint-config", env=fresh(document=clean_doc))
                     expect(
                         f"lint-config rejects a module {stanza} entry the root does not sanction",
@@ -1676,7 +1726,7 @@ def main() -> int:
             # the developer has, so this defect passed every local gate and failed all three
             # CI jobs. See the 2026-09-07 amendment in docs/adr/0004.
             fixture = defect_module / "compose.yaml"
-            with planted(fixture, "services:\n  zz-selftest-defect:\n    image: alpine:3.22\nnetworks:\n  devinfra:\n"):
+            with planted(fixture, contract_prefix + "networks:\n  devinfra:\n"):
                 r = pixi("lint-config", env=fresh(document=clean_doc))
                 expect(
                     "lint-config rejects a module redeclaring a network the root declares with keys",
@@ -1703,9 +1753,7 @@ def main() -> int:
             # *root's* body rather than the module's: `volumes: postgres-data:` is bare in
             # the root, so a module may name it, and Compose v2 accepts that. A check that
             # banned every redeclaration would reject the tracked postgres module.
-            with planted(
-                fixture, "services:\n  zz-selftest-defect:\n    image: alpine:3.22\nvolumes:\n  postgres-data:\n"
-            ):
+            with planted(fixture, contract_prefix + "volumes:\n  postgres-data:\n"):
                 r = pixi("lint-config", env=fresh(document=clean_doc))
                 expect(
                     "lint-config accepts a module redeclaring a volume the root declares bare",
@@ -1732,6 +1780,289 @@ def main() -> int:
                 undecodable.unlink(missing_ok=True)
         finally:
             shutil.rmtree(defect_module, ignore_errors=True)
+
+        # --- The Module contract (ADR 0012): one negative per leg, plus the ownership
+        # rule and the three x-requires rules. A leg that is never removed is a leg the
+        # check could quietly stop asserting — the tracked Modules all satisfy it, so the
+        # clean run says nothing about whether the check is still there. Every case
+        # asserts three things: a non-zero exit, a diagnostic naming the module *and* the
+        # missing thing, and no `OK` on stdout, because stdout and stderr interleave by
+        # buffering and a run that ended on a wall of OK lines would read as a pass.
+        contract_module = REPO / "services" / "zz-selftest-contract"
+        complete_siblings = {
+            "smoke.sh": (
+                "# Self-test fixture. Sourced by scripts/smoke-test.sh, never executed.\n"
+                "#\n"
+                "# shellcheck shell=bash\n"
+                "\n"
+                "true\n"
+            ),
+            "gotchas.md": "# zz-selftest-contract — gotchas\n\nA self-test fixture. It runs nothing.\n",
+            "seed.none": (
+                "# Why this Module ships no seed/ directory.\n\nA self-test fixture loads nothing at first boot.\n"
+            ),
+        }
+        endpoints_block = (
+            "x-endpoints:\n  ZZ_SELFTEST_PORT:\n    url: http://localhost:1\n    description: a fixture endpoint\n"
+        )
+        primary_block = (
+            "services:\n"
+            "  zz-selftest-contract:\n"
+            "    image: alpine:3.22\n"
+            '    healthcheck:\n      test: ["CMD", "true"]\n'
+            '    ports:\n      - "127.0.0.1:${ZZ_SELFTEST_PORT:-19991}:1"\n'
+        )
+        # The same service with the probe declared only to be cancelled, and with no probe
+        # at all: `disable: true` and `test: NONE` are Compose's own off switches, and both
+        # are truthy mappings a presence check would accept.
+        no_probe_block = (
+            "services:\n"
+            "  zz-selftest-contract:\n"
+            "    image: alpine:3.22\n"
+            '    ports:\n      - "127.0.0.1:${ZZ_SELFTEST_PORT:-19991}:1"\n'
+        )
+        disabled_probe_block = no_probe_block + "    healthcheck:\n      disable: true\n"
+        cancelled_probe_block = no_probe_block + '    healthcheck:\n      test: ["NONE"]\n'
+        # A probe, but nothing published: the endpoint above then describes a port that no
+        # longer exists, which is the same drift one file later.
+        probe_no_ports_block = (
+            "services:\n"
+            "  zz-selftest-contract:\n"
+            "    image: alpine:3.22\n"
+            '    healthcheck:\n      test: ["CMD", "true"]\n'
+        )
+        complete_body = endpoints_block + primary_block
+
+        @contextlib.contextmanager
+        def contract_fixture(body: str, siblings: dict[str, str]) -> Iterator[None]:
+            # Reused and torn down whole, exactly as defect_module is, so a killed run
+            # neither aborts the next one nor needs a hand cleanup.
+            contract_module.mkdir(exist_ok=True)
+            try:
+                for name, text in siblings.items():
+                    (contract_module / name).write_text(text, encoding="utf-8", newline="\n")
+                (contract_module / "compose.yaml").write_text(body, encoding="utf-8", newline="\n")
+                yield
+            finally:
+                shutil.rmtree(contract_module, ignore_errors=True)
+
+        def without(*names: str) -> dict[str, str]:
+            return {name: text for name, text in complete_siblings.items() if name not in names}
+
+        # A comment-only marker is the silent skip in file form: it satisfies a
+        # presence check while stating nothing. Both marker legs are pinned against it.
+        empty_marker = "# a heading and nothing else\n"
+
+        contract_cases: list[tuple[str, str, dict[str, str], list[str]]] = [
+            ("a missing smoke.sh", complete_body, without("smoke.sh"), ["zz-selftest-contract", "smoke.sh"]),
+            ("a missing gotchas.md", complete_body, without("gotchas.md"), ["zz-selftest-contract", "gotchas.md"]),
+            (
+                "neither seed/ nor seed.none",
+                complete_body,
+                without("seed.none"),
+                ["zz-selftest-contract", "seed/", "seed.none"],
+            ),
+            (
+                "a seed.none with no justification",
+                complete_body,
+                {**complete_siblings, "seed.none": empty_marker},
+                ["zz-selftest-contract", "seed.none"],
+            ),
+            (
+                "no healthcheck and no healthcheck.none",
+                endpoints_block + no_probe_block,
+                complete_siblings,
+                ["zz-selftest-contract", "healthcheck"],
+            ),
+            (
+                "a healthcheck.none with no justification",
+                endpoints_block + no_probe_block,
+                {**complete_siblings, "healthcheck.none": empty_marker},
+                ["zz-selftest-contract", "healthcheck.none"],
+            ),
+            (
+                "no x-endpoints block",
+                primary_block,
+                complete_siblings,
+                ["zz-selftest-contract", "x-endpoints"],
+            ),
+            (
+                "an empty x-endpoints block",
+                "x-endpoints: {}\n" + primary_block,
+                complete_siblings,
+                ["zz-selftest-contract", "x-endpoints"],
+            ),
+            # The urls.sh drift, stated where it can be checked: a port the module
+            # publishes but no endpoint names.
+            (
+                "a published port no x-endpoints entry names",
+                endpoints_block + primary_block + '      - "127.0.0.1:${ZZ_OTHER_PORT:-19992}:2"\n',
+                complete_siblings,
+                ["zz-selftest-contract", "ZZ_OTHER_PORT"],
+            ),
+            # Compose's own off switch for a probe. `healthcheck: {disable: true}` is a
+            # truthy mapping, so a leg that only asked whether the key was present would
+            # accept a Module shipping no probe and no marker either.
+            (
+                "a healthcheck declared only to be disabled",
+                endpoints_block + disabled_probe_block,
+                complete_siblings,
+                ["zz-selftest-contract", "healthcheck"],
+            ),
+            # The other off switch, and the one the `disable: true` case never reaches:
+            # healthcheck_declared() returns at `disable` before it ever reads `test:`, so
+            # deleting both NONE branches leaves every case above green while a Module
+            # shipping Compose's documented probe-cancellation passes the leg.
+            (
+                "a healthcheck whose test cancels the probe",
+                endpoints_block + cancelled_probe_block,
+                complete_siblings,
+                ["zz-selftest-contract", "healthcheck"],
+            ),
+            # The reverse direction of the endpoint rule. Without it, deleting a ports:
+            # line leaves the endpoint declared forever and the block starts lying in
+            # exactly the way scripts/urls.sh already does.
+            (
+                "an x-endpoints entry naming a port the Module does not publish",
+                endpoints_block + probe_no_ports_block,
+                complete_siblings,
+                ["zz-selftest-contract", "ZZ_SELFTEST_PORT"],
+            ),
+            # A literal host port names no variable, so no x-endpoints entry can ever
+            # reconcile against it — it would otherwise slip the whole rule by contributing
+            # nothing to either side of the comparison.
+            (
+                "a published port that interpolates no variable",
+                endpoints_block + primary_block + '      - "127.0.0.1:15432:5432"\n',
+                complete_siblings,
+                ["zz-selftest-contract", "127.0.0.1:15432:5432"],
+            ),
+            # The reverse direction. The root compose.yaml declares no services: key, so
+            # a module file is the only place a service can come from — which makes this
+            # the rule that stops a Compose service no Module directory owns existing.
+            (
+                "a service the module does not own",
+                complete_body + "  grafana:\n    image: alpine:3.22\n",
+                complete_siblings,
+                ["zz-selftest-contract", "grafana"],
+            ),
+            (
+                "a module file with no primary service",
+                endpoints_block + "services:\n  zz-selftest-contract-worker:\n    image: alpine:3.22\n",
+                complete_siblings,
+                ["zz-selftest-contract", "primary"],
+            ),
+            (
+                "an x-requires naming a module that does not exist",
+                complete_body + "x-requires:\n  zz-nosuch:\n    - ZZ_SELFTEST_PORT\n",
+                complete_siblings,
+                ["zz-selftest-contract", "zz-nosuch"],
+            ),
+            (
+                "an x-requires naming an endpoint the provider does not publish",
+                complete_body.replace(
+                    '      test: ["CMD", "true"]\n',
+                    '      test: ["CMD", "true"]\n    depends_on:\n      - postgres\n',
+                )
+                + "x-requires:\n  postgres:\n    - ZZ_NOSUCH_PORT\n",
+                complete_siblings,
+                ["zz-selftest-contract", "postgres", "ZZ_NOSUCH_PORT"],
+            ),
+            # ADR 0002: a dependency not expressed as depends_on does not exist, so a
+            # requirement without the matching edge is a declaration free to drift.
+            (
+                "an x-requires with no matching depends_on",
+                complete_body + "x-requires:\n  postgres:\n    - POSTGRES_PORT\n",
+                complete_siblings,
+                ["zz-selftest-contract", "postgres", "depends_on"],
+            ),
+        ]
+        for case, body, siblings, needles in contract_cases:
+            with contract_fixture(body, siblings):
+                r = pixi("lint-config", env=fresh(document=clean_doc))
+                expect(f"lint-config rejects {case}", r.returncode != 0, "exited 0")
+                unsaid = [needle for needle in needles if needle not in r.stderr]
+                expect(
+                    f"lint-config names the module and the defect for {case}",
+                    not unsaid,
+                    f"never said {unsaid}; stderr: {r.stderr!r}",
+                )
+                expect(
+                    f"lint-config signs off on nothing for {case}",
+                    "OK" not in r.stdout,
+                    f"stdout: {r.stdout!r}",
+                )
+
+        # …and the shapes the contract sanctions stay sanctioned. A one-shot helper named
+        # `<dir>-<role>` is legitimate — minio-init is the tracked one — and the
+        # healthcheck leg is asserted on the primary only, because a helper that exits 0
+        # has nothing to keep healthy. A rule that rejected either would reject the stack.
+        with contract_fixture(
+            complete_body + '  zz-selftest-contract-init:\n    image: alpine:3.22\n    restart: "no"\n',
+            complete_siblings,
+        ):
+            r = pixi("lint-config", env=fresh(document=clean_doc))
+            expect(
+                "lint-config accepts a helper service named <module>-<role> with no healthcheck",
+                r.returncode == 0,
+                f"output: {(r.stdout + r.stderr)!r}",
+            )
+
+        # …and the brace-less interpolation Compose accepts just as readily. A pattern that
+        # only matched `${NAME}` would let `$NAME` publish a port that no endpoint had to
+        # name, which is the reconciliation slipped entirely rather than failed.
+        with contract_fixture(
+            endpoints_block + primary_block.replace("${ZZ_SELFTEST_PORT:-19991}", "$ZZ_SELFTEST_PORT"),
+            complete_siblings,
+        ):
+            r = pixi("lint-config", env=fresh(document=clean_doc))
+            expect(
+                "lint-config reconciles a port written $NAME as well as ${NAME}",
+                r.returncode == 0,
+                f"output: {(r.stdout + r.stderr)!r}",
+            )
+
+        # The depends_on edge may be held by any service the Module owns, and may name the
+        # provider's own helper: minio-init is the tracked shape of both. Demanding the edge
+        # on the primary, naming the provider's primary, would reject a genuine dependency.
+        with contract_fixture(
+            endpoints_block
+            + primary_block
+            + "  zz-selftest-contract-init:\n    image: alpine:3.22\n    depends_on:\n      - minio-init\n"
+            + "x-requires:\n  minio:\n    - MINIO_API_PORT\n",
+            complete_siblings,
+        ):
+            r = pixi("lint-config", env=fresh(document=clean_doc))
+            expect(
+                "lint-config accepts an x-requires edge held by a helper and naming a helper",
+                r.returncode == 0,
+                f"output: {(r.stdout + r.stderr)!r}",
+            )
+
+        # …and the marker legs, satisfied by a justified marker rather than by the thing
+        # itself. Without these the two `justified()` branches could both be inverted and
+        # only the negatives above would notice.
+        with contract_fixture(
+            endpoints_block + no_probe_block,
+            {**complete_siblings, "healthcheck.none": "# why\n\nthe image is distroless, so there is nothing to run\n"},
+        ):
+            r = pixi("lint-config", env=fresh(document=clean_doc))
+            expect(
+                "lint-config accepts a justified healthcheck.none in place of a healthcheck",
+                r.returncode == 0,
+                f"output: {(r.stdout + r.stderr)!r}",
+            )
+
+        # The contract line has to name the number it walked, for the same reason the
+        # identifier-only line does: "OK 0 module file(s) carry the Module contract" is a
+        # sentence a check that walked nothing can also write.
+        tracked_modules = sorted((REPO / "services").glob("*/compose.yaml"))
+        r = pixi("lint-config", env=fresh(document=clean_doc))
+        expect(
+            "lint-config reports the Module contract over every tracked module file",
+            f"OK {len(tracked_modules)} module file(s) carry the Module contract" in r.stdout,
+            f"{len(tracked_modules)} module files; stdout: {r.stdout!r}",
+        )
 
         # The module scan's own guard. Without a case, the `if not modules` return could be
         # deleted and every assertion above would still pass: the clean case looks for
@@ -2633,6 +2964,58 @@ def main() -> int:
             f"{declared_versions} declarations + {image_keys} 'image:' keys, stdout: {r.stdout!r}",
         )
 
+        # --- The carve: the driver enumerates, the Modules own the checks. ---
+        # `lint-config` already refuses a Module with no smoke.sh, but only over the
+        # module files it finds; this pins the other direction, that the set of scripts
+        # the driver's glob will walk is exactly the set of Modules. A smoke.sh under a
+        # directory with no compose.yaml would be a check nothing owns.
+        smoke_owners = sorted(path.parent.name for path in (REPO / "services").glob("*/smoke.sh"))
+        module_owners = sorted(path.parent.name for path in (REPO / "services").glob("*/compose.yaml"))
+        expect("there are Modules to enumerate", bool(module_owners), "found no services/*/compose.yaml")
+        expect(
+            "the driver's glob reaches exactly one smoke.sh per Module",
+            smoke_owners == module_owners,
+            f"smoke.sh under {smoke_owners}; modules {module_owners}",
+        )
+
+        # The contract leg behind smoke.sh is presence-only — `MODULE_FILES` asks `is_file()`
+        # and nothing more — so a Module's verification is deletable from inside that Module
+        # with every gate still green: lint-config sees the file, lint-shell parses it, and
+        # the driver sources a body of comments that contributes no pass, no fail and no skip.
+        # That is the silent skip in file form, which is exactly what seed.none and
+        # healthcheck.none are refused for. Asserted over every Module, not only the
+        # healthcheck-exempt ones: an exempt Module has more riding on its script (the marker
+        # moved its readiness gate there) but a Module with a probe still owns the only
+        # verification of what it actually does. Stated generically over the counting helpers
+        # rather than as `assert_ready`, because the collector's compensation is an
+        # `assert_contains` round-trip, not a readiness poll. No non-empty guard on the
+        # exempt set: zero healthcheck.none markers is a good outcome, not a regression.
+        counted = re.compile(r"^\s*(assert_contains|assert_ready|check_http|pass|fail)\b", re.MULTILINE)
+        silent = [
+            name
+            for name in module_owners
+            if not counted.search((REPO / "services" / name / "smoke.sh").read_text(encoding="utf-8"))
+        ]
+        expect(
+            "every Module asserts something in its own smoke.sh",
+            not silent,
+            f"{silent} carry a smoke.sh with no counted assertion, so nothing they do is verified",
+        )
+
+        # Core must gain no list of Modules. The whole point of the carve is that a new
+        # Module enters the suite by existing, not by being named here — a hard-coded name
+        # would put the catalog back in Core one entry at a time, and the first one to
+        # arrive would look harmless. Case-insensitive, because prose in a comment is
+        # exactly how such a name gets in: mentioning one in the driver's own header is
+        # the same coupling as branching on it.
+        driver_text = (REPO / "scripts" / "smoke-test.sh").read_text(encoding="utf-8")
+        named_modules = [name for name in module_owners if re.search(rf"(?i)\b{re.escape(name)}\b", driver_text)]
+        expect(
+            "the smoke driver names no Module",
+            not named_modules,
+            f"scripts/smoke-test.sh names {named_modules}",
+        )
+
         # --- smoke-test: FR-5 by default, FR-16 under SMOKE_STRICT. ---
         # The stub answers `ps` with nothing, so no service is running. .env is
         # planted because the suite interpolates ports at shell level.
@@ -2641,6 +3024,46 @@ def main() -> int:
             expect("smoke-test exits 0 when a service is absent", r.returncode == 0, f"exit {r.returncode}")
             expect("smoke-test reports SKIP by default", "SKIP" in r.stdout, f"stdout: {r.stdout!r}")
             expect("smoke-test skips the absent keycloak", "keycloak not running" in r.stdout, f"stdout: {r.stdout!r}")
+            # One skip per Module and no more: a carve that dropped a Module's script, or
+            # a driver that stopped enumerating, would still satisfy the two assertions
+            # above while reporting a suite that checked less than it says.
+            # Counted per Module rather than as a global SKIP total: a Module's own script
+            # can emit skips of its own — grafana's and the collector's both do — so the
+            # total stops being one-per-Module the moment any Module is selected.
+            per_module = {name: r.stdout.count(f"{name} not running") for name in module_owners}
+            expect(
+                "smoke-test skips every Module by name when nothing is running",
+                all(count == 1 for count in per_module.values()),
+                f"per-Module skip lines {per_module}; stdout: {r.stdout!r}",
+            )
+
+            # A partial Selection, which is the case the whole skip/pass split exists for
+            # and the one neither the all-absent nor the full-stack run reaches. The stub
+            # answers `ps` with two names, so exactly two Modules are running. What is
+            # asserted is the split: the selected Modules are attempted and the rest are
+            # skipped by name. Whether their checks then pass is a property of a real
+            # runtime — against a stub every one of them fails, which is itself the proof
+            # that the driver sourced the two scripts instead of skipping them.
+            running_modules = ["postgres", "redis"]
+            unselected = [name for name in module_owners if name not in running_modules]
+            r = run_script("smoke-test.sh", env=fresh(stdout="\n".join(running_modules) + "\n"))
+            expect(
+                "a partial Selection skips exactly the Modules that are not running",
+                all(r.stdout.count(f"{name} not running") == 1 for name in unselected),
+                f"per-Module skip lines "
+                f"{ {name: r.stdout.count(f'{name} not running') for name in unselected} }; "
+                f"stdout: {r.stdout!r}",
+            )
+            expect(
+                "a partial Selection skips neither of the Modules that are running",
+                not any(f"{name} not running" in r.stdout for name in running_modules),
+                f"stdout: {r.stdout!r}",
+            )
+            expect(
+                "a partial Selection runs the selected Modules' own checks",
+                (r.stdout.count("PASS") + r.stdout.count("FAIL")) > 0,
+                f"the two sourced scripts reported no check at all; stdout: {r.stdout!r}",
+            )
 
             env = fresh()
             env["SMOKE_STRICT"] = "1"
@@ -2652,6 +3075,43 @@ def main() -> int:
                 "keycloak not running" in r.stdout,
                 f"stdout: {r.stdout!r}",
             )
+
+            # The driver's own empty-set guard. Without a case, deleting it leaves
+            # `pixi run ci` green while `pixi run smoke` reports success having walked no
+            # Modules at all — the silent skip the guard exists to be.
+            smoke_scripts = sorted((REPO / "services").glob("*/smoke.sh"))
+            expect("there are module smoke scripts to hide", bool(smoke_scripts), "found no services/*/smoke.sh")
+            with moved_aside(smoke_scripts):
+                r = pixi("smoke", env=fresh())
+                expect("smoke-test refuses an empty Module set", r.returncode != 0, "a suite over zero Modules")
+                expect(
+                    "smoke-test names the empty Module set",
+                    "services/*/smoke.sh" in r.stderr,
+                    f"stderr: {r.stderr!r}",
+                )
+
+            # A module script that does not parse must be a failure naming the Module, not a
+            # Module that quietly contributes nothing. `source` returns non-zero and the
+            # loop carries on, so without the guard the suite exits 0 having skipped a
+            # Module's checks without once saying so. Planted beside a real Module's script
+            # rather than as a new directory, because a new directory would fail
+            # lint-config's contract check for unrelated reasons — and the stub reports
+            # every Module as running, so this one is reached.
+            # Moved aside and re-planted rather than overwritten in place: the good body then
+            # survives on disk under the .moved name, where an in-place write holds it only in
+            # this process's memory and a killed run leaves the tracked file corrupted. It is
+            # also what every neighbouring fixture does, and `planted` refuses to overwrite.
+            broken = REPO / "services" / "redisinsight" / "smoke.sh"
+            good_body = broken.read_text(encoding="utf-8")
+            with moved_aside([broken]), planted(broken, good_body + "\nif then fi\n"):
+                env = fresh(stdout="redisinsight\n")
+                r = run_script("smoke-test.sh", env=env)
+                expect("smoke-test fails on a module script that cannot be sourced", r.returncode != 0, "exited 0")
+                expect(
+                    "smoke-test names the Module whose checks did not run",
+                    "redisinsight smoke checks could not be sourced" in r.stdout,
+                    f"stdout: {r.stdout!r}",
+                )
 
             # The runtime must go through the compose seam, or the strict CI run
             # would talk to a real daemon regardless of what it was pointed at.

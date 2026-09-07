@@ -1,0 +1,8 @@
+# Why this Module ships no seed/ directory.
+# A marker with no justification is a silent skip in file form; lint-config
+# refuses an empty one.
+
+Flower stores its own state in the flower-data volume (--persistent=True,
+--db=/data/flower.db) and rebuilds everything else from the Celery broker. There
+is nothing to load at first boot: with no worker connected it shows an empty
+cluster, which is the correct empty state rather than missing data.

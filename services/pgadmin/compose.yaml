@@ -3,6 +3,21 @@
 # A Module. The rules every Module holds are spelled out once in
 # services/postgres/compose.yaml and in the 2026-09-07 amendment to
 # docs/adr/0004-volume-names-are-frozen.md; `lint-config` enforces them.
+
+# What this Module publishes, keyed by the variable that sets the host port.
+# `lint-config` reconciles this against the ports the file actually publishes, so
+# a new port with no entry here fails the build. See docs/adr/0012.
+x-endpoints:
+  PGADMIN_PORT:
+    url: http://localhost:${PGADMIN_PORT:-5050}
+    description: pgAdmin web UI, with the stack's Postgres pre-registered.
+
+# What this Module consumes from another, named by the provider's own endpoint
+# keys. Every entry must have a matching `depends_on` edge (ADR 0002).
+x-requires:
+  postgres:
+    - POSTGRES_PORT
+
 services:
   pgadmin:
     extends:
@@ -28,6 +43,14 @@ services:
       - pgadmin-data:/var/lib/pgadmin
       - ./conf/servers.json:/pgadmin4/servers.json:ro
     user: "5050:5050"
+    healthcheck:
+      # The image carries /bin/sh and wget, and /misc/ping answers as the 5050
+      # user the service runs as. It is liveness, not function: see gotchas.md.
+      test: ["CMD-SHELL", "wget -q -O /dev/null http://127.0.0.1:80/misc/ping"]
+      interval: 15s
+      timeout: 5s
+      retries: 10
+      start_period: 30s
 
 volumes:
   pgadmin-data:

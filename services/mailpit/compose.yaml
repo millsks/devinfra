@@ -20,6 +20,18 @@
 # bare redeclaration here is accepted. The service still joins the network: it
 # inherits `networks: [devinfra]` from common/base.yaml through `extends`. See the
 # 2026-09-07 amendment in docs/adr/0004-volume-names-are-frozen.md.
+
+# What this Module publishes, keyed by the variable that sets the host port.
+# `lint-config` reconciles this against the ports the file actually publishes, so
+# a new port with no entry here fails the build. See docs/adr/0012.
+x-endpoints:
+  MAILPIT_SMTP_PORT:
+    url: smtp://localhost:${MAILPIT_SMTP_PORT:-1025}
+    description: SMTP sink — accepts any credentials, stores every message.
+  MAILPIT_UI_PORT:
+    url: http://localhost:${MAILPIT_UI_PORT:-8025}
+    description: Mailpit web UI and REST API (/api/v1/messages), plus /readyz.
+
 services:
   mailpit:
     extends:

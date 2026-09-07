@@ -8,6 +8,25 @@
 # Two directories, and they are not the same kind of thing: conf/provisioning/ is
 # configuration read at startup, while dashboards/ is a live drop-zone Grafana
 # re-scans every 30 seconds.
+
+# What this Module publishes, keyed by the variable that sets the host port.
+# `lint-config` reconciles this against the ports the file actually publishes, so
+# a new port with no entry here fails the build. See docs/adr/0012.
+x-endpoints:
+  GRAFANA_PORT:
+    url: http://localhost:${GRAFANA_PORT:-3000}
+    description: Grafana UI and HTTP API over Prometheus, Loki and Tempo.
+
+# What this Module consumes from another, named by the provider's own endpoint
+# keys. Every entry must have a matching `depends_on` edge (ADR 0002).
+x-requires:
+  prometheus:
+    - PROMETHEUS_PORT
+  loki:
+    - LOKI_PORT
+  tempo:
+    - TEMPO_PORT
+
 services:
   grafana:
     extends:
@@ -39,6 +58,14 @@ services:
       - grafana-data:/var/lib/grafana
       - ./conf/provisioning:/etc/grafana/provisioning:ro
       - ./dashboards:/var/lib/grafana/dashboards:ro
+    healthcheck:
+      # The image carries /bin/sh and wget; /api/health is Grafana's own readiness
+      # endpoint and reports the database check with it.
+      test: ["CMD-SHELL", "wget -q -O /dev/null http://127.0.0.1:3000/api/health"]
+      interval: 15s
+      timeout: 5s
+      retries: 10
+      start_period: 20s
 
 volumes:
   grafana-data:

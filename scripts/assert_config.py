@@ -30,7 +30,7 @@ Five properties, one pass per profile combination:
   Empty directories are rejected too, because Docker's own repair for a missing source is
   what an existence-only check would then accept forever.
 
-Two properties are read from the module files' own text instead, because the rendered model
+Three properties are read from the module files' own text instead, because the rendered model
 cannot express them.
 
 * Every `volumes:`, `networks:`, `configs:` and `secrets:` entry in a `services/*/compose.yaml`
@@ -45,6 +45,20 @@ cannot express them.
   rendered model cannot state it: whether the defect is visible at all depends on which Compose
   the developer has installed, so `lint-compose` passes on one machine and every CI job fails.
   See the 2026-09-07 amendment in docs/adr/0004-volume-names-are-frozen.md.
+* Every Module carries its own contract, and it is checked in both directions (ADR 0012). A
+  Module owns the service named for its directory plus helpers named `<dir>-<role>`, and no
+  module file may declare a service outside that shape — with the root pinned to declare no
+  `services:` key of its own, that makes a Compose service with no owning Module impossible.
+  The Module's primary service declares a `healthcheck:` that is not `disable: true` or
+  `test: NONE` — Compose's own ways of cancelling a probe — or the directory holds a justified
+  `healthcheck.none`; the directory holds a `smoke.sh` and a `gotchas.md`; it holds a `seed/`
+  directory or a justified `seed.none`; it declares a non-empty top-level `x-endpoints:` whose
+  keys and the `*_PORT` variables it publishes are the *same set*, in both directions; and
+  every `x-requires:` entry names an existing provider Module, only endpoints that provider
+  declares, and a provider some service the Module owns already lists in `depends_on`. The
+  check is presence-based throughout: it asks whether the five things exist, never whether
+  their content was warranted — but a marker with no justification is the silent skip in file
+  form, so an empty one is refused, as is a probe that is declared only to be turned off.
 
 A combination that renders no services is a failure, not a pass, and so is a module scan
 that found no module file: a check that walked an empty set has verified nothing, which is
@@ -82,6 +96,16 @@ MODULE_STANZAS = ("volumes", "networks", "configs", "secrets")
 
 #: The shared fragment every module service pulls in through `extends`.
 BASE_FRAGMENT = REPO / "common" / "base.yaml"
+
+#: The files every Module carries beside its compose.yaml, unconditionally.
+MODULE_FILES = ("smoke.sh", "gotchas.md")
+
+#: A published host port comes from a `SOMETHING_PORT` interpolation, which is what ties an
+#: `x-endpoints:` key to the port it names. Both Compose spellings are matched: `${NAME}` and
+#: the brace-less `$NAME`, which is equally legal and would otherwise slip the whole endpoint
+#: reconciliation. The container-side port is a literal and BIND_ADDRESS does not end in
+#: _PORT, so neither is matched.
+PORT_VARIABLE = re.compile(r"\$\{?([A-Z][A-Z0-9_]*_PORT)\b")
 
 
 def compose_argv() -> list[str]:
@@ -394,6 +418,291 @@ def identifier_only(paths: list[Path]) -> list[str]:
     return problems
 
 
+def justified(path: Path) -> bool:
+    """Judge whether a marker file carries a justification rather than only a heading.
+
+    A marker is how a Module declares that one leg of the contract does not apply to it.
+    An empty one is the silent skip in file form — it satisfies the check while saying
+    nothing — so a blank or comment-only marker does not count as present.
+
+    Args:
+        path: The marker file to read.
+
+    Returns:
+        True when the file holds at least one line that is neither blank nor a comment.
+
+    Raises:
+        RuntimeError: If the marker cannot be read as UTF-8 text.
+    """
+    try:
+        text = path.read_text(encoding="utf-8")
+    except UnicodeDecodeError as exc:
+        raise RuntimeError(f"{path}: not valid UTF-8 at byte {exc.start}: {exc.reason}") from exc
+    except OSError as exc:
+        raise RuntimeError(f"{path}: unreadable: {exc}") from exc
+    return any(line.strip() and not line.strip().startswith("#") for line in text.splitlines())
+
+
+def healthcheck_declared(service: dict[str, object]) -> bool:
+    """Judge whether a service actually carries a probe, rather than a stanza that cancels one.
+
+    `healthcheck: {disable: true}` and `test: NONE` are Compose's own ways of turning a probe
+    *off*, and both are truthy mappings: a presence check reading the key alone would accept a
+    Module that ships no probe at all and no `healthcheck.none` either, which is precisely the
+    silent skip this leg exists to remove.
+
+    A stanza with no `test:` is accepted: it is tuning an inherited image `HEALTHCHECK`, which
+    is a real probe.
+
+    Args:
+        service: One service body from a module file.
+
+    Returns:
+        True when the service declares a probe that will actually run.
+    """
+    declared = service.get("healthcheck")
+    if not isinstance(declared, dict) or not declared:
+        return False
+    if declared.get("disable"):
+        return False
+    test = declared.get("test")
+    if isinstance(test, str):
+        return test.strip().upper() != "NONE"
+    if isinstance(test, list):
+        return [str(item).strip().upper() for item in test] != ["NONE"]
+    return True
+
+
+def published_ports(services: dict[str, object]) -> tuple[set[str], list[str]]:
+    """Read what a module file publishes on the host, and how each entry names it.
+
+    Read from the module's own text rather than the rendered model, because the rendered
+    model has already substituted the values away — and the variable name is exactly what
+    an `x-endpoints:` key has to agree with.
+
+    Args:
+        services: The module file's `services:` mapping.
+
+    Returns:
+        The `*_PORT` variables the file interpolates into a `ports:` entry, and the entries
+        that name no variable at all — a literal host port cannot be reconciled against
+        anything, so it is reported rather than silently contributing nothing.
+    """
+    found: set[str] = set()
+    literal: list[str] = []
+    for body in services.values():
+        if not isinstance(body, dict):
+            continue
+        ports = body.get("ports")
+        if not isinstance(ports, list):
+            continue
+        for entry in ports:
+            text = (
+                entry if isinstance(entry, str) else str(entry.get("published", "")) if isinstance(entry, dict) else ""
+            )
+            names = PORT_VARIABLE.findall(text)
+            if names:
+                found.update(names)
+            elif str(text).strip():
+                literal.append(str(text))
+    return found, literal
+
+
+def depends_on_names(service: dict[str, object]) -> set[str]:
+    """Read the services one service declares a dependency edge on.
+
+    Both Compose forms are accepted, because both are in use here: the list form waits for
+    start, the mapping form waits for a condition, and `x-requires:` is about the edge
+    existing rather than about which form expresses it.
+
+    Args:
+        service: One rendered-or-source service body.
+
+    Returns:
+        The service names named in `depends_on`, empty when there is none.
+    """
+    declared = service.get("depends_on")
+    if isinstance(declared, dict):
+        return {str(name) for name in declared}
+    if isinstance(declared, list):
+        return {str(name) for name in declared}
+    return set()
+
+
+def module_contract(paths: list[Path]) -> list[str]:
+    """Assert every Module carries its own contract, and that no service escapes one.
+
+    Five things per Module, and the check is presence-based: it asks whether each exists,
+    never whether its content was warranted. What makes that worth having is the second
+    direction. A Compose service can be declared in a module file or in the root, the root
+    is pinned to declare no `services:` key at all, and every service key here must be
+    `<dir>` or `<dir>-<role>` — so a service that no Module directory owns cannot exist.
+    Asserting that against the *rendered* model instead would be weaker and would break a
+    dozen self-test fixtures, which name services no directory owns on purpose.
+
+    `x-requires:` is reconciled against the provider's own `x-endpoints:` keys rather than
+    against anything this checker knows about databases or brokers, which is what keeps the
+    rule generic. The matching `depends_on` is required alongside it because a dependency
+    not expressed as `depends_on` does not exist (ADR 0002) — without that, the declaration
+    would be free to drift away from the runtime edge it describes.
+
+    Args:
+        paths: The module compose files to read.
+
+    Returns:
+        One diagnostic per contract leg a Module fails to hold.
+
+    Raises:
+        RuntimeError: If a file cannot be read or does not parse as a compose model.
+    """
+    problems: list[str] = []
+    parsed_by_module: dict[str, dict[str, object]] = {}
+    endpoints_by_module: dict[str, list[str]] = {}
+    for path in paths:
+        parsed = read_model(path)
+        module = path.parent.name
+        parsed_by_module[module] = parsed
+        block = parsed.get("x-endpoints")
+        endpoints_by_module[module] = [str(name) for name in block] if isinstance(block, dict) else []
+
+    for path in paths:
+        module = path.parent.name
+        directory = path.parent
+        where = path.relative_to(REPO).as_posix()
+        parsed = parsed_by_module[module]
+
+        services = parsed.get("services")
+        if not isinstance(services, dict) or not services:
+            problems.append(
+                f"{where}: module '{module}' declares no services — a module directory whose file "
+                f"contributes nothing is a directory the catalog cannot admit (ADR 0007)"
+            )
+            continue
+
+        # Both directions of the ownership rule, in one pass.
+        for name in services:
+            role = str(name)[len(module) + 1 :] if str(name).startswith(f"{module}-") else ""
+            if str(name) == module or role:
+                continue
+            problems.append(
+                f"{where}: declares the service '{name}', which module '{module}' does not own — a "
+                f"module file may declare '{module}' and helpers named '{module}-<role>' and nothing "
+                f"else. The root compose.yaml declares no services: key, so this is the only place a "
+                f"service can come from, and a service no module directory owns must be impossible"
+            )
+        primary = services.get(module)
+        if not isinstance(primary, dict):
+            problems.append(
+                f"{where}: module '{module}' declares no primary service named '{module}' — the "
+                f"directory maps to no service, so nothing owns its healthcheck, its smoke checks or "
+                f"its endpoints"
+            )
+            primary = {}
+
+        # 1. A healthcheck on the primary, or a justified exemption. A one-shot helper has
+        #    nothing to keep healthy, so the leg is asserted on the primary only.
+        marker = directory / "healthcheck.none"
+        if not healthcheck_declared(primary) and not (marker.is_file() and justified(marker)):
+            problems.append(
+                f"{where}: module '{module}' declares no healthcheck: on its primary service and "
+                f"carries no justified services/{module}/healthcheck.none — without one "
+                f"wait-healthy.sh can see only that the container is running, which is the silent "
+                f"skip this repository keeps removing. A marker with no justification does not "
+                f"count, and neither does a stanza that disables the probe"
+            )
+
+        # 2. and 3. The two files every Module carries, unconditionally.
+        for filename in MODULE_FILES:
+            if not (directory / filename).is_file():
+                problems.append(
+                    f"{where}: module '{module}' is missing services/{module}/{filename} — every "
+                    f"Module proves it works and records what bites; neither is optional"
+                )
+
+        # 4. Seed data, or a justified statement that there is none to load.
+        seed_marker = directory / "seed.none"
+        if not (directory / "seed").is_dir() and not (seed_marker.is_file() and justified(seed_marker)):
+            problems.append(
+                f"{where}: module '{module}' has neither a services/{module}/seed/ directory nor a "
+                f"justified services/{module}/seed.none — say what is loaded at first boot, or say "
+                f"why nothing is. A marker with no justification does not count"
+            )
+
+        # 5. Endpoints, reconciled against the ports in both directions. This is the drift
+        #    scripts/urls.sh has already accumulated, stated where it can be checked — and a
+        #    one-way check would only relocate it: a port deleted from ports: would leave its
+        #    endpoint declared forever, which is the same lie in the newer file.
+        variables, literal_ports = published_ports(services)
+        for entry in literal_ports:
+            problems.append(
+                f"{where}: module '{module}' publishes '{entry}', which interpolates no *_PORT "
+                f"variable — a literal host port cannot be named by an x-endpoints: entry, so it is "
+                f"a published port no declaration can ever be reconciled against"
+            )
+        endpoints = parsed.get("x-endpoints")
+        if not isinstance(endpoints, dict) or not endpoints:
+            problems.append(
+                f"{where}: module '{module}' declares no non-empty top-level x-endpoints: — a Module "
+                f"says what it publishes, or a developer has to read the ports: list to find it"
+            )
+        else:
+            for variable in sorted(variables):
+                if variable not in endpoints_by_module[module]:
+                    problems.append(
+                        f"{where}: module '{module}' publishes ${{{variable}}} but declares no "
+                        f"x-endpoints: entry named {variable} — an endpoint that only the ports: list "
+                        f"knows about is the drift this block exists to end"
+                    )
+            for name in sorted(endpoints_by_module[module]):
+                if name not in variables:
+                    problems.append(
+                        f"{where}: module '{module}' declares the x-endpoints: entry {name} but "
+                        f"publishes no port that names it — a declaration outliving the port it "
+                        f"describes is the same drift, one file later"
+                    )
+
+        # 6. Requirements, reconciled against the provider's own declaration and its edge.
+        requires = parsed.get("x-requires")
+        if requires is None:
+            continue
+        if not isinstance(requires, dict):
+            problems.append(
+                f"{where}: module '{module}' declares x-requires: as "
+                f"{type(requires).__name__}, not a mapping of provider module to endpoint names"
+            )
+            continue
+        edges: set[str] = set()
+        for body in services.values():
+            if isinstance(body, dict):
+                edges |= depends_on_names(body)
+        for provider, wanted in requires.items():
+            provider = str(provider)
+            if provider not in parsed_by_module:
+                problems.append(
+                    f"{where}: module '{module}' requires '{provider}', which is not a Module — there "
+                    f"is no services/{provider}/compose.yaml for it to be satisfied by"
+                )
+                continue
+            names = [str(name) for name in wanted] if isinstance(wanted, list) else [str(wanted)]
+            for name in names:
+                if name not in endpoints_by_module[provider]:
+                    problems.append(
+                        f"{where}: module '{module}' requires endpoint {name} from '{provider}', which "
+                        f"'{provider}' does not publish — its x-endpoints: declares "
+                        f"{sorted(endpoints_by_module[provider])}"
+                    )
+            # The edge may be held by any service this Module owns — a helper is often the
+            # one that actually talks to the provider — and it may name the provider's own
+            # helper rather than its primary, which is still a genuine edge to that Module.
+            if provider not in edges and not any(edge.startswith(f"{provider}-") for edge in edges):
+                problems.append(
+                    f"{where}: module '{module}' requires '{provider}' but no service it owns "
+                    f"declares depends_on '{provider}' — a dependency not expressed as depends_on "
+                    f"does not exist (ADR 0002), so the runtime would start them in either order"
+                )
+    return problems
+
+
 def tag_problem(image: str) -> str | None:
     """Judge whether an image reference is pinned.
 
@@ -564,6 +873,7 @@ def main() -> int:
 
     try:
         problems: list[str] = identifier_only(modules)
+        problems += module_contract(modules)
     except RuntimeError as exc:
         sys.stderr.write(f"assert-config: {exc}\n")
         return 1
@@ -571,7 +881,8 @@ def main() -> int:
     # a run that found a data-loss violation would otherwise end on a run of `OK` lines
     # and read as a pass to anyone who trusts the output over the exit status.
     passed: list[str] = [
-        f"OK {len(modules)} module file(s) declare identifiers only, and redeclare no keyed root resource"
+        f"OK {len(modules)} module file(s) declare identifiers only, and redeclare no keyed root resource",
+        f"OK {len(modules)} module file(s) carry the Module contract, and declare no service they do not own",
     ]
 
     try:

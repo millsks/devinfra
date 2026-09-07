@@ -1,0 +1,10 @@
+# Why this Module ships no seed/ directory.
+# A marker with no justification is a silent skip in file form; lint-config
+# refuses an empty one.
+
+Grafana has conf/provisioning/ and dashboards/, and neither is seed data.
+conf/provisioning/ is configuration read at startup — datasources and the
+dashboard provider — and is bind-mounted read-only, so Grafana never writes to
+it and re-reads it on every restart. dashboards/ is a live drop-zone Grafana
+re-scans every 30 seconds; it is tracked only by its .gitkeep. Seed data is
+written once into a volume and then owned by the service; neither of these is.

@@ -1,0 +1,8 @@
+# Why this Module ships no seed/ directory.
+# A marker with no justification is a silent skip in file form; lint-config
+# refuses an empty one.
+
+RedisInsight adds the stack Redis itself, from the RI_REDIS_* environment
+variables, on first start — that is the only registration this Module needs and
+it is configuration, not seed. Everything else is per-user UI state in the
+redisinsight-data volume.

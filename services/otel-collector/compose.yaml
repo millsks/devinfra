@@ -7,6 +7,26 @@
 #
 # There is deliberately no `volumes:` stanza: the collector owns no named volume,
 # and a Module declares only the identifiers it uses.
+
+# What this Module publishes, keyed by the variable that sets the host port.
+# `lint-config` reconciles this against the ports the file actually publishes, so
+# a new port with no entry here fails the build. See docs/adr/0012.
+x-endpoints:
+  OTEL_GRPC_PORT:
+    url: grpc://localhost:${OTEL_GRPC_PORT:-4317}
+    description: OTLP/gRPC ingest for traces, logs and metrics.
+  OTEL_HTTP_PORT:
+    url: http://localhost:${OTEL_HTTP_PORT:-4318}
+    description: OTLP/HTTP ingest — /v1/traces, /v1/logs, /v1/metrics.
+
+# What this Module consumes from another, named by the provider's own endpoint
+# keys. Every entry must have a matching `depends_on` edge (ADR 0002).
+x-requires:
+  loki:
+    - LOKI_PORT
+  tempo:
+    - TEMPO_PORT
+
 services:
   otel-collector:
     extends:
@@ -24,3 +44,6 @@ services:
     volumes:
       - ./conf/otel-collector-config.yaml:/etc/otelcol-contrib/config.yaml:ro
     command: ["--config=/etc/otelcol-contrib/config.yaml"]
+    # No healthcheck, and the exemption is declared in healthcheck.none beside
+    # this file rather than left silent. The image is distroless: no shell, no
+    # HTTP client. smoke.sh proves the whole pipeline from the host instead.

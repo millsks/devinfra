@@ -1,0 +1,8 @@
+# Why this Module ships no seed/ directory.
+# A marker with no justification is a silent skip in file form; lint-config
+# refuses an empty one.
+
+Redis is a cache and a Celery broker. Its content is created and consumed at
+runtime and deliberately survives only through AOF in the redis-data volume; a
+pre-seeded key would be a stale cache entry or a phantom queued task.
+conf/redis.conf is configuration, bind-mounted read-only, not seed.

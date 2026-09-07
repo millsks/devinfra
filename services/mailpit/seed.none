@@ -1,0 +1,8 @@
+# Why this Module ships no seed/ directory.
+# A marker with no justification is a silent skip in file form; lint-config
+# refuses an empty one.
+
+Mailpit is a sink. Its whole content is the mail that arrives at runtime, and a
+pre-seeded inbox would be indistinguishable from a real message and actively
+misleading in a test. MP_DATABASE points into the mailpit-data volume, which is
+the entirety of this Module state.

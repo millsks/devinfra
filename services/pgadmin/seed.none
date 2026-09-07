@@ -1,0 +1,8 @@
+# Why this Module ships no seed/ directory.
+# A marker with no justification is a silent skip in file form; lint-config
+# refuses an empty one.
+
+conf/servers.json is configuration, not seed. It is bind-mounted read-only at
+/pgadmin4/servers.json and read by pgAdmin at startup to pre-register the
+connection; pgAdmin never writes to it, and the pgadmin-data volume holds the
+user state it does write.

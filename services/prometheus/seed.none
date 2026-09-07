@@ -1,0 +1,7 @@
+# Why this Module ships no seed/ directory.
+# A marker with no justification is a silent skip in file form; lint-config
+# refuses an empty one.
+
+Prometheus holds only what it scrapes. The TSDB is built at runtime and has a
+15-day retention, so anything written here would age out rather than persist.
+conf/prometheus.yml is configuration, bind-mounted read-only, not seed.

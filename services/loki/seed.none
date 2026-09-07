@@ -1,0 +1,7 @@
+# Why this Module ships no seed/ directory.
+# A marker with no justification is a silent skip in file form; lint-config
+# refuses an empty one.
+
+Loki stores log streams and nothing else. Every stream arrives at runtime from
+the collector, so there is no first-boot state to load. conf/loki-config.yaml is
+configuration, bind-mounted read-only, not seed.

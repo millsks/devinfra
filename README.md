@@ -209,10 +209,17 @@ scripts/destroy.sh              deletes every volume; requires typing `destroy`
 scripts/keycloak-reimport.sh    drops the realm db; requires typing `reimport`
 scripts/keycloak-export.sh      live realm back over the JSON
 scripts/token.sh                mint an access token via the CLI client
-scripts/smoke-test.sh           end-to-end verification; SMOKE_STRICT=1 forbids skips
+scripts/smoke-test.sh           the smoke driver: preflights, counters, helpers, then a
+                                glob over services/*/smoke.sh; SMOKE_STRICT=1 forbids skips
 scripts/lint-compose.sh         `config -q` for every combination of declared profiles
-scripts/assert_config.py        bind address, host-port collisions, image pinning, and
-                                identifier-only module volume/network stanzas
+scripts/assert_config.py        bind address, host-port collisions, image pinning,
+                                identifier-only module volume/network stanzas, and the
+                                Module contract: a healthcheck or a justified
+                                healthcheck.none, a smoke.sh, a gotchas.md, seed/ or a
+                                justified seed.none, an x-endpoints: block naming every
+                                published port, x-requires: reconciled against the
+                                provider's endpoints and depends_on, and no service a
+                                module directory does not own (ADR 0012)
 scripts/lint_json.py            the JSON check, one file per diagnostic
 scripts/assert_pins.py          .env.example and every compose fallback must agree
 scripts/assert_renovate.py      the bot's own regexes must still detect every pin
@@ -220,22 +227,27 @@ scripts/check_commit_msg.py     the commit-message contract, where it can be tes
 scripts/podman-socket.sh        stops Docker and enables Podman's API socket (CI)
 scripts/assert-podman.sh        proves Podman itself reports the running containers
 scripts/lint_selftest.py        proves the lint surface and the scripts hold
-services/                       one directory per service, listed in the order
+services/                       one directory per Module, listed in the order
                                 compose.yaml's `include:` reads them; every service
-                                is extracted, so this is the whole stack
+                                is extracted, so this is the whole stack. Every Module
+                                also carries smoke.sh, gotchas.md, and seed/ or
+                                seed.none — plus healthcheck.none where its image can
+                                run no probe. `lint-config` refuses one that does not
   flower/compose.yaml           the Flower service; volume only, no config files
   grafana/compose.yaml          the Grafana service; depends_on prometheus, loki, tempo
   grafana/conf/provisioning/    datasources + dashboard provider
   grafana/dashboards/           drop dashboard JSON here; picked up within 30s
   keycloak/compose.yaml         the Keycloak service; depends_on postgres and mailpit
   keycloak/seed/                realm imported on first boot
-  loki/compose.yaml             the Loki service; no healthcheck by design
+  loki/compose.yaml             the Loki service
+  loki/healthcheck.none         why the distroless image can run no probe
   loki/conf/loki-config.yaml    single-binary config, filesystem storage
   mailpit/compose.yaml          the Mailpit service; no config files, volume only
   minio/compose.yaml            the Silo server plus the one-shot minio-init helper
                                 that provisions its buckets (the volume keeps the
                                 minio- prefix; see below)
   otel-collector/compose.yaml   the collector; depends_on loki and tempo, no volume
+  otel-collector/healthcheck.none  why the distroless image can run no probe
   otel-collector/conf/          collector pipelines
   pgadmin/compose.yaml          the pgAdmin service; depends_on postgres
   pgadmin/conf/servers.json     the pre-registered Postgres connection
@@ -247,7 +259,8 @@ services/                       one directory per service, listed in the order
   redis/compose.yaml            the Redis service
   redis/conf/redis.conf         AOF + RDB persistence, noeviction
   redisinsight/compose.yaml     the RedisInsight service; depends_on redis
-  tempo/compose.yaml            the Tempo service; no healthcheck by design
+  tempo/compose.yaml            the Tempo service
+  tempo/healthcheck.none        why the distroless image can run no probe
   tempo/conf/tempo.yaml         storage + metrics_generator config
 ```
 
@@ -327,6 +340,16 @@ Nothing in the workflow can report success having checked nothing. There is no
 steps are `if: failure()` diagnostics that print container status and logs after
 the job has already failed. `scripts/lint_selftest.py` asserts all of that
 against the workflow file, so it holds in the gate rather than by review.
+
+### Where the smoke checks live
+
+`scripts/smoke-test.sh` is a driver, not a suite. It holds the preflights, the
+counters and the shared helpers, then globs `services/*/smoke.sh` and sources each
+Module's own checks — so it knows no Module by name, and a new Module joins the
+suite by existing rather than by editing Core. A Module that is not running reports
+a skip; nothing else about the run changes. `lint-config` refuses a Module with no
+`smoke.sh`, and `scripts/lint_selftest.py` asserts that the driver names no Module
+and that the glob reaches exactly one script per Module.
 
 ### Strict smoke mode
 
@@ -627,7 +650,11 @@ the 5-minute lookback window and report nothing for data that is present.
 
 ## Gotchas worth knowing
 
-These are the things that cost time when building this stack:
+These are the things that cost time when building this stack. Every Module also
+carries its own `services/<name>/gotchas.md`, which goes further than this section
+does — including where a Module's smoke check is liveness rather than real function,
+and where `scripts/urls.sh` omits its endpoint. Read the Module's file before
+changing anything under `services/<name>/`.
 
 - **The Postgres volume mount path is version-specific.** 17 keeps `PGDATA` at
   `/var/lib/postgresql/data`; 18 moved it to `/var/lib/postgresql/18/docker` and
