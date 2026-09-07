@@ -170,6 +170,10 @@ cmd = "python scripts/assert_config.py"
 description = "Assert every image pin agrees between .env.example and the compose.yaml fallback"
 cmd = "python scripts/assert_pins.py"
 
+[tasks.lint-renovate]
+description = "Assert the Renovate configuration's own regexes still detect every image pin"
+cmd = "python scripts/assert_renovate.py"
+
 [tasks.lint-shell]
 description = "shellcheck every shell script in the repository, at any depth"
 cmd = "shellcheck scripts/**/*.sh docker/postgres/initdb/*.sh"
@@ -180,7 +184,7 @@ cmd = "yamllint --strict -c .yamllint.yaml .yamllint.yaml compose.yaml .github/w
 
 [tasks.lint-json]
 description = "Validate every JSON config parses"
-cmd = "python scripts/lint_json.py docker/**/*.json"
+cmd = "python scripts/lint_json.py renovate.json docker/**/*.json"
 
 [tasks.lint-python]
 description = "ruff and mypy over the repository's own Python"
@@ -192,7 +196,7 @@ cmd = "python scripts/lint_selftest.py"
 
 [tasks.lint]
 description = "Run every validation check"
-depends-on = ["lint-compose", "lint-config", "lint-pins", "lint-shell", "lint-yaml", "lint-json", "lint-python"]
+depends-on = ["lint-compose", "lint-config", "lint-pins", "lint-renovate", "lint-shell", "lint-yaml", "lint-json", "lint-python"]
 
 [tasks.ci]
 description = "The done-gate: every check this repository needs"
