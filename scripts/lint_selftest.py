@@ -632,10 +632,11 @@ def main() -> int:
     expect("lint-shell covers every script at any depth", not uncovered, f"unlinted: {uncovered}")
 
     # common/base.yaml and compose.yaml's anchors are two sources of one truth until
-    # every service is extracted: the twelve inlined services read `x-defaults`, the
-    # module reads `defaults`. A logging or restart change applied to one and not the
-    # other lands on some services and silently skips the rest, and nothing renders
-    # both in a way a diff would show. So they are compared here, resolved.
+    # every service is extracted: the eight inlined admin and observability services
+    # read `x-defaults`, the modules read `defaults`. A logging or restart change
+    # applied to one and not the other lands on some services and silently skips the
+    # rest, and nothing renders both in a way a diff would show. So they are compared
+    # here, resolved.
     base_model = yaml.safe_load((REPO / "common" / "base.yaml").read_text(encoding="utf-8"))
     root_model = yaml.safe_load((REPO / "compose.yaml").read_text(encoding="utf-8"))
     shared = base_model.get("services", {}).get("defaults")
@@ -651,6 +652,58 @@ def main() -> int:
         "the shared fragment declares only restart, logging and networks",
         isinstance(shared, dict) and set(shared) == {"restart", "logging", "networks"},
         f"common/base.yaml defaults declares {sorted(shared) if isinstance(shared, dict) else shared!r}",
+    )
+
+    # minio-init is a one-shot helper, and `extends` made its `restart` override
+    # load-bearing: while it aliased x-logging it only restated Docker's own default, but
+    # common/base.yaml declares `restart: unless-stopped`, so an extending helper without
+    # the override is restarted the instant it exits 0 and loops forever. Nothing in the
+    # static gate reads `restart` — assert_config.py deliberately does not, precisely
+    # because this override is sanctioned — so deleting the line leaves `pixi run ci`
+    # green and only the running stack shows it. Both halves are asserted: the extends
+    # block, because without it the override is redundant again, and the override itself.
+    minio_model = yaml.safe_load((REPO / "services" / "minio" / "compose.yaml").read_text(encoding="utf-8"))
+    minio_services = minio_model.get("services")
+    helper = minio_services.get("minio-init") if isinstance(minio_services, dict) else None
+    expect("services/minio/compose.yaml declares the minio-init helper", isinstance(helper, dict), f"got {helper!r}")
+    helper = helper if isinstance(helper, dict) else {}
+    extends_block = helper.get("extends")
+    helper_extends = extends_block if isinstance(extends_block, dict) else {}
+    expect(
+        "minio-init inherits the shared fragment through extends",
+        str(helper_extends.get("file", "")).endswith("common/base.yaml")
+        and helper_extends.get("service") == "defaults",
+        f"extends is {extends_block!r}, which is not common/base.yaml's `defaults`",
+    )
+    expect(
+        "minio-init overrides the inherited restart policy with 'no'",
+        helper.get("restart") == "no",
+        f"restart is {helper.get('restart')!r}, so the one-shot helper restart-loops forever",
+    )
+
+    # Mailpit's durability is two keys in one module file and nothing else. Drop either
+    # and the model still renders, `config -q` still passes, assert_config.py still passes
+    # (it reads image, logging and ports, by design), and the smoke test still passes —
+    # it sends a message and reads the count back inside one run, which succeeds against
+    # an in-memory store. The volume is mounted and never written, and every captured
+    # email is lost on the next restart. Same class as the minio-init override above: a
+    # value that only the running stack, days later, would show missing.
+    mailpit_model = yaml.safe_load((REPO / "services" / "mailpit" / "compose.yaml").read_text(encoding="utf-8"))
+    mailpit_services = mailpit_model.get("services")
+    mailpit = mailpit_services.get("mailpit") if isinstance(mailpit_services, dict) else None
+    expect("services/mailpit/compose.yaml declares the mailpit service", isinstance(mailpit, dict), f"got {mailpit!r}")
+    mailpit = mailpit if isinstance(mailpit, dict) else {}
+    mailpit_environment = mailpit.get("environment")
+    mailpit_env = mailpit_environment if isinstance(mailpit_environment, dict) else {}
+    expect(
+        "mailpit stores its database on the mounted volume",
+        str(mailpit_env.get("MP_DATABASE", "")).startswith("/data/"),
+        f"MP_DATABASE is {mailpit_env.get('MP_DATABASE')!r}, so Mailpit keeps messages in memory and loses them on restart",
+    )
+    expect(
+        "mailpit mounts mailpit-data at the path MP_DATABASE writes to",
+        "mailpit-data:/data" in [str(m) for m in mailpit.get("volumes", [])],
+        f"volumes are {mailpit.get('volumes')!r}, so the database path is not on the named volume",
     )
 
     # --- Every task fails on a real defect. Planted fixtures, never edits in place. ---
@@ -672,6 +725,17 @@ def main() -> int:
         ),
         ("lint-yaml", REPO / "docker" / "loki" / "zz_selftest_defect.yaml", "root:\n  a: 1\n      b: 2\n"),
         ("lint-json", REPO / "docker" / "pgadmin" / "zz_selftest_defect.json", '{\n  "a": 1,\n}\n'),
+        # …and the same defect one directory tree over. The `services/**/*.json` term is
+        # newer than the `docker/**/*.json` one and covers the Keycloak realm; a fixture
+        # under docker/ alone would still pass if that term were dropped. It sits beside
+        # the module file, not in seed/: that directory is bind-mounted wholesale into
+        # Keycloak's --import-realm path, so a fixture surviving a killed run would break
+        # the next realm import.
+        (
+            "lint-json",
+            REPO / "services" / "keycloak" / "zz_selftest_defect.json",
+            '{\n  "a": 1,\n}\n',
+        ),
         (
             "lint-compose",
             REPO / "compose.override.yaml",
@@ -699,7 +763,15 @@ def main() -> int:
         # empty the file set on its own.
         ("lint-yaml", sorted((REPO / "common").rglob("*.y*ml"))),
         ("lint-yaml", sorted((REPO / "services").glob("*/compose.yaml"))),
+        # The two *glob* halves of the lint-json pattern, pinned one term per entry, for
+        # the same reason the lint-yaml halves are: hiding only docker/'s JSON would leave
+        # `services/**/*.json` deletable from pixi.toml with every case here still green,
+        # and hiding only services/' would leave `docker/**/*.json` deletable. The third
+        # term, the literal `renovate.json`, is not pinned here and does not need to be:
+        # a literal path cannot silently stop matching, which is the only failure this
+        # mechanism detects, and assert_renovate.py parses that file on every run anyway.
         ("lint-json", sorted((REPO / "docker").rglob("*.json"))),
+        ("lint-json", sorted((REPO / "services").rglob("*.json"))),
     ]
     for task, targets in empties:
         expect(f"{task} has a glob target to empty", bool(targets), "found no files to hide")
@@ -915,7 +987,7 @@ def main() -> int:
             == [
                 "cp",
                 "keycloak:/tmp/kc-export/devinfra-realm.json",
-                "docker/keycloak/realms/devinfra-realm.json",
+                "services/keycloak/seed/devinfra-realm.json",
             ],
             f"recorded {args}",
         )
@@ -1794,7 +1866,7 @@ def main() -> int:
         # so the pin is declared once in .env.example and referenced only in the module.
         # The reverse scan therefore has to run over the *union* of every file's
         # references: file by file it would report the module's pin missing from the
-        # root and the root's twelve missing from the module, and go red on a correct
+        # root and the root's own pins missing from the module, and go red on a correct
         # repository — which is how a check stops being read.
         module_dir = pins_dir / "services" / "postgres"
         module_dir.mkdir(parents=True, exist_ok=True)

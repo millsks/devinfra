@@ -1,6 +1,6 @@
 # 8. Object storage replacement
 
-Date: 2026-09-06 · Status: **Accepted** · Spine: Deferred (now resolved)
+Date: 2026-09-06 · Status: **Accepted** (amended 2026-09-07) · Spine: Deferred (now resolved)
 
 ## Context
 
@@ -44,6 +44,10 @@ it no longer points at a MinIO release. The volume stays `minio-data` and the
 config directory stays `docker/minio/` per ADR 0004: renaming a volume orphans its
 data, and no amount of tidiness is worth that.
 
+> The `docker/minio/` half of that sentence is refuted — no such directory has ever
+> existed, and ADR 0004 freezes volume identifiers, not paths. See the 2026-09-07
+> amendment at the end of this record.
+
 ## Verification
 
 Tested against a copy of the live `minio-data` volume before any change was made to
@@ -76,3 +80,30 @@ neither is urgent while the format stays portable.
 
 Silo passes the ADR 0007 admission policy: AGPL-3.0, no account or token, no
 privileged host access, actively maintained (published 2026-09-04).
+
+## Amendment — 2026-09-07: the config directory the Decision froze never existed
+
+The Decision above says "the config directory stays `docker/minio/` per ADR 0004".
+Two things are wrong with that sentence, and story 2-2 — which extracted object
+storage into a module — had to settle both.
+
+**`docker/minio/` has never existed in this tree.** Not before the Silo swap, not
+after it. Object storage takes no config file: the server is configured entirely
+through `MINIO_*` environment variables and its command line, and the buckets are
+provisioned by the `minio-init` container, not by anything on disk. The sentence
+described a directory nobody had ever created, and the README repeated it.
+
+**ADR 0004 freezes volume identifiers, not paths.** The hazard it records is that a
+renamed or re-driven named volume is a *new* volume — the old one is orphaned and
+the service starts empty, with no error anywhere. A directory in the repository
+carries no data and can be moved freely; nothing in ADR 0004 ever applied to one.
+
+So: the volume is `minio-data` and stays `minio-data`, exactly as the Decision
+intends and for exactly the reason it gives. The module is `services/minio/`, named
+after the service in the model, and it holds `compose.yaml` and nothing else.
+Should object storage ever need a config file, it belongs at
+`services/minio/conf/`, beside the module that mounts it.
+
+The sentence in the Decision is left standing rather than edited, because a decided
+ADR records what was decided at the time; this amendment records what was found to
+be true afterwards.

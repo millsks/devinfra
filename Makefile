@@ -127,7 +127,7 @@ keycloak-reimport: ## Re-import the realm after editing the JSON (DESTROYS realm
 	@pixi run keycloak-reimport
 
 .PHONY: keycloak-export
-keycloak-export: ## Export the live realm back to docker/keycloak/realms/
+keycloak-export: ## Export the live realm back to services/keycloak/seed/
 	@$(NOTICE)
 	@pixi run keycloak-export
 

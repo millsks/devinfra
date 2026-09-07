@@ -143,7 +143,7 @@ description = "Re-import the realm after editing the JSON (DESTROYS realm state)
 cmd = "./scripts/keycloak-reimport.sh"
 
 [tasks.keycloak-export]
-description = "Export the live realm back to docker/keycloak/realms/"
+description = "Export the live realm back to services/keycloak/seed/"
 cmd = "./scripts/keycloak-export.sh"
 
 [tasks.token]
@@ -184,7 +184,7 @@ cmd = "yamllint --strict -c .yamllint.yaml .yamllint.yaml compose.yaml common/**
 
 [tasks.lint-json]
 description = "Validate every JSON config parses"
-cmd = "python scripts/lint_json.py renovate.json docker/**/*.json"
+cmd = "python scripts/lint_json.py renovate.json docker/**/*.json services/**/*.json"
 
 [tasks.lint-python]
 description = "ruff and mypy over the repository's own Python"

@@ -163,7 +163,7 @@ land in http://localhost:8025 instead of going nowhere.
 ### Editing the realm
 
 `--import-realm` only creates realms that do not already exist, so editing
-`docker/keycloak/realms/devinfra-realm.json` has no effect on a realm that is
+`services/keycloak/seed/devinfra-realm.json` has no effect on a realm that is
 already there. Two ways to work:
 
 ```sh
@@ -174,9 +174,10 @@ pixi run keycloak-export     # write the live realm back over the JSON
 ## Repository layout
 
 ```
-compose.yaml                    the stack: the `include:` registry, the twelve
-                                services not yet extracted, and the volume and
-                                network declarations
+compose.yaml                    the stack: the `include:` registry, the eight
+                                admin and observability services not yet
+                                extracted, and the volume and network
+                                declarations
 common/base.yaml                restart, logging and networks; every module's
                                 `extends` target, never itself included
 .env.example                    every tunable, with defaults
@@ -220,16 +221,23 @@ scripts/check_commit_msg.py     the commit-message contract, where it can be tes
 scripts/podman-socket.sh        stops Docker and enables Podman's API socket (CI)
 scripts/assert-podman.sh        proves Podman itself reports the running containers
 scripts/lint_selftest.py        proves the lint surface and the scripts hold
-services/                       one directory per extracted service; the rest are
-                                still inlined in compose.yaml
+services/                       one directory per extracted service, listed in the
+                                order compose.yaml's `include:` reads them; the admin
+                                and observability services are not extracted yet and
+                                are still inlined in compose.yaml
+  keycloak/compose.yaml         the Keycloak service; depends_on postgres and mailpit
+  keycloak/seed/                realm imported on first boot
+  mailpit/compose.yaml          the Mailpit service; no config files, volume only
+  minio/compose.yaml            the Silo server plus the one-shot minio-init helper
+                                that provisions its buckets (the volume keeps the
+                                minio- prefix; see below)
   postgres/compose.yaml         the Postgres service, pulled in by `include:`
   postgres/conf/postgresql.conf dev-tuned config (loaded via config_file)
   postgres/seed/                extensions + extra databases, first boot only
-docker/
-  redis/redis.conf              AOF + RDB persistence, noeviction
-  keycloak/realms/              realm imported on first boot
-  minio/                        buckets provisioned by the minio-init container
-                                (volume and paths keep the minio- prefix; see below)
+  redis/compose.yaml            the Redis service
+  redis/conf/redis.conf         AOF + RDB persistence, noeviction
+docker/                         config for the services still inlined
+  pgadmin/servers.json          the pre-registered Postgres connection
   otel/                         collector pipelines
   prometheus/ loki/ tempo/      backend configs
   grafana/provisioning/         datasources + dashboard provider
@@ -604,8 +612,8 @@ Grafana, a full `down` followed by `up` returns every one of them intact.
 
 Telemetry backends keep data far longer than you usually need locally: Prometheus
 15 days, Tempo 7 days, Loki until compaction. If the volumes grow inconveniently,
-`pixi run destroy` is the blunt fix; per-service retention lives in the config files
-under `docker/`.
+`pixi run destroy` is the blunt fix; per-service retention lives in each backend's
+config file under `docker/`.
 
 When querying Prometheus for a short-lived series, use `/api/v1/series` or a small
 `step`. A `query_range` with a large step can land every evaluation point outside
@@ -644,8 +652,10 @@ These are the things that cost time when building this stack:
   Silo preserves the `MINIO_*` environment variables and the on-disk format, so
   this was an image swap with no data migration, and it is reversible: MinIO
   reads Silo-written data and vice versa (both directions verified). The volume
-  is still named `minio-data` and the config directory is still `docker/minio/`
-  — renaming a volume orphans its data, so those names stay. The same image
+  is still named `minio-data` — renaming a volume orphans its data with no error
+  anywhere, so that name stays frozen. The module directory is
+  `services/minio/`; the object-storage service has never had a config
+  directory, and ADR 0004 freezes volume identifiers, not paths. The same image
   also supplies `mc`, which is why there is no separate client image.
 
 ## Security

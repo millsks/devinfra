@@ -1,0 +1,48 @@
+# Redis 8 — cache (db 0), Celery broker (db 1), Celery backend (db 2).
+#
+# Pulled into the model by the `include:` list in the root compose.yaml. Shared
+# configuration arrives through `extends` rather than a YAML anchor: anchors are
+# document-scoped and cannot cross a file boundary.
+#
+# Every relative path here is resolved against *this* directory, not the project
+# directory, so `./conf` is the module's own. `project_directory` is deliberately
+# not used — it would re-base every relative path in the file.
+#
+# The `volumes:` stanza below carries the identifier and nothing else. Driver keys
+# live in the root compose.yaml, which wins on every key it sets explicitly; a
+# module adding one would silently win instead.
+#
+# There is deliberately no `networks:` stanza here, and adding one back breaks CI.
+# Compose v2 refuses an `include` in which a module declares a top-level resource
+# the root declares *with keys* — `networks.devinfra conflicts with imported
+# resource`, exit 15. The root's `networks: devinfra:` carries `name:` and
+# `driver:`, so no module may name it; its `volumes: redis-data:` is bare, so a
+# bare redeclaration here is accepted. The service still joins the network: it
+# inherits `networks: [devinfra]` from common/base.yaml through `extends`. See the
+# 2026-09-07 amendment in docs/adr/0004-volume-names-are-frozen.md.
+services:
+  redis:
+    extends:
+      file: ../../common/base.yaml
+      service: defaults
+    image: redis:${REDIS_VERSION:-8.10.1-alpine}
+    container_name: devinfra-redis
+    ports:
+      - "${BIND_ADDRESS:-127.0.0.1}:${REDIS_PORT:-6379}:6379"
+    volumes:
+      - redis-data:/data
+      - ./conf/redis.conf:/usr/local/etc/redis/redis.conf:ro
+    command:
+      - redis-server
+      - /usr/local/etc/redis/redis.conf
+      - --requirepass
+      - ${REDIS_PASSWORD:-devinfra}
+    healthcheck:
+      test: ["CMD-SHELL", "redis-cli -a ${REDIS_PASSWORD:-devinfra} --no-auth-warning ping | grep -q PONG"]
+      interval: 10s
+      timeout: 5s
+      retries: 10
+      start_period: 10s
+
+volumes:
+  redis-data:

@@ -15,7 +15,7 @@
 # container-runtime command.
 
 # Run every script from the repository root, so relative paths (.env,
-# docker/keycloak/realms/, backups/) resolve the same way `make` resolved them.
+# services/keycloak/seed/, backups/) resolve the same way `make` resolved them.
 cd "$(dirname "${BASH_SOURCE[0]}")/../.." || exit 1
 
 # An `if` rather than smoke-test.sh's `[[ -f .env ]] && ...` chain: under
