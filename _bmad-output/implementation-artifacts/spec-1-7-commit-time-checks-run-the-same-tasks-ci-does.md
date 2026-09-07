@@ -2,7 +2,7 @@
 title: 'Commit-time checks run the same tasks CI does'
 type: 'feature'
 created: '2026-09-07'
-status: 'awaiting-operator'
+status: done
 baseline_revision: '9a38ccc47b61a97aa8ce1c688cc9f7845993f80d'
 review_loop_iteration: 0
 followup_review_recommended: true
@@ -421,3 +421,14 @@ run recorded below, never by the gate. Patched by verdict: high 0, medium 9, low
 - `check_commit_msg.py` judges the subject only. A `feat!:` subject carries no obligation to
   have a `BREAKING CHANGE:` footer, and a footer is neither required nor validated. Recorded
   in the checker's docstring and in ADR 0011.
+
+## Operator Confirmation
+
+Confirmed 2026-09-07: the external actions this story owed were carried out.
+
+- Run `pixi run bootstrap` once in every clone of this repository you commit from. `core.hooksPath` lives in `.git/config`, which is not part of the tree, so no commit can install the hooks and no clone arrives with them — until you run it, this story's checks do not exist on your machine and CI is the only gate.
+- Before running it in a clone the bmad-loop orchestrator drives, decide what happens to its commit subjects. `story <id>: implemented and reviewed via bmad-loop` is not a Conventional Commit and the `commit-msg` hook rejects it (verified against the shipped checker); its `Merge ...` commits are accepted. Either have the loop commit with `--no-verify`, or change its subject convention to `chore(story): ...`.
+- After bootstrapping, make one real commit and confirm the hooks fire: `pixi run precommit` should run before the commit is written, and a subject such as `updated the readme` should be refused. That is the story's actual acceptance evidence for the first criterion — everything in this branch was proved in throwaway clones.
+- Merge this branch to `main`. Nothing here changes CI, so the hosted run is unaffected, but the hooks are only useful once they are on `main` for every clone to pick up.
+
+_Appended by the bmad-loop orchestrator (`bmad-loop confirm`, #335): a human confirmed these external actions out of band, and the story was advanced from `awaiting-operator` to `done`._

@@ -2,7 +2,7 @@
 title: 'Image updates arrive as validated pull requests'
 type: 'feature'
 created: '2026-09-07'
-status: 'awaiting-operator'
+status: done
 baseline_revision: '46be76136d951bcbf6d4082a47dbd44263d91a13'
 review_loop_iteration: 0
 followup_review_recommended: true
@@ -419,3 +419,15 @@ verdict: high 0, medium 12, low 6.
   ADR 0010's Consequences as a deliberate, in-scope-elsewhere gap.
 - The README service table's Version column cannot be maintained by any regex; `prBodyNotes`
   reminds the reviewer, and nothing enforces it.
+
+## Operator Confirmation
+
+Confirmed 2026-09-07: the external actions this story owed were carried out.
+
+- Mint a credential for the bot and add it as the repository secret `RENOVATE_TOKEN`: a fine-grained personal access token, or a GitHub App installation token, scoped to this repository with `contents: write`, `pull-requests: write` and `issues: write`. It must not be the workflow's own `GITHUB_TOKEN` — a pull request opened with that token triggers no `pull_request` workflow, so the bot's proposals would arrive with no checks having run, which is the one outcome this story exists to prevent.
+- Merge this branch to `main`, then start the Renovate workflow by hand from the Actions tab (`workflow_dispatch`) rather than waiting for Monday's schedule. Nothing in this repository has ever authenticated as the bot; that run is the story's actual acceptance evidence for the first criterion.
+- On that first run, confirm the bot opens one pull request per outdated image and no batched one. A local `--dry-run=full` predicts six branches from four outdated images — RedisInsight, Loki, and Tempo and Grafana at both their current-major and next-major lines — so anything fewer means grouping was re-enabled somewhere the local check cannot see.
+- Open the first bot pull request and confirm all three CI jobs (`validate`, `stack`, `stack-podman`) actually ran on it. If the checks tab is empty, the token is a `GITHUB_TOKEN` equivalent and must be replaced — every in-repository gate stays green in that case.
+- Before merging any bot pull request, update its service's row in the README's Version column by hand. The column records abbreviated versions (`8.10`, `12.2`), so no regex maintains it and no check enforces it; the pull request body carries the same reminder.
+
+_Appended by the bmad-loop orchestrator (`bmad-loop confirm`, #335): a human confirmed these external actions out of band, and the story was advanced from `awaiting-operator` to `done`._
