@@ -22,7 +22,7 @@ Docker Compose stack of local development infrastructure — Postgres, Redis, Ke
 ## Running and verifying
 
 - `make smoke` is the verification, not `make ps` — it mints a token, round-trips an object and pushes a trace through the collector. Requires the stack already running.
-- `make lint` can exit 0 having skipped checks when `shellcheck` or PyYAML are absent. Read its output; do not trust the exit code. (Retire this line once Epic 1 Story 1.1 provisions the tooling.)
+- `pixi run lint` is the validation surface — compose config, shellcheck, yamllint and a JSON parse check, each from a pinned pixi dependency. No check can skip, so the exit code is the answer. `pixi run ci` is the done-gate; `make lint` forwards to `pixi run lint` with a deprecation notice.
 - Object storage volume size is not a data-integrity signal — `.minio.sys` churns constantly through background healing. Check bucket and object listings instead.
 
 ## Conventions that differ from defaults

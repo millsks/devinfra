@@ -318,8 +318,8 @@ services:
       - loki
       - tempo
     ports:
-      - "${BIND_ADDRESS:-127.0.0.1}:${OTEL_GRPC_PORT:-4317}:4317" # OTLP gRPC
-      - "${BIND_ADDRESS:-127.0.0.1}:${OTEL_HTTP_PORT:-4318}:4318" # OTLP HTTP
+      - "${BIND_ADDRESS:-127.0.0.1}:${OTEL_GRPC_PORT:-4317}:4317"  # OTLP gRPC
+      - "${BIND_ADDRESS:-127.0.0.1}:${OTEL_HTTP_PORT:-4318}:4318"  # OTLP HTTP
     volumes:
       - ./docker/otel/otel-collector-config.yaml:/etc/otelcol-contrib/config.yaml:ro
     command: ["--config=/etc/otelcol-contrib/config.yaml"]

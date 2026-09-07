@@ -25,9 +25,17 @@ preserves your data — only an explicit `make destroy` throws it away.
 All ports bind to `127.0.0.1` by default, so the stack is not exposed to your
 network. Change `BIND_ADDRESS` in `.env` if you need otherwise.
 
+## Requirements
+
+- **Docker** (or a compatible engine) with the Compose plugin — runs the stack.
+- **[pixi](https://pixi.sh)** — provisions the validation tooling (`shellcheck`,
+  `yamllint`, `python`, `ruff`, `mypy`) from the committed `pixi.lock`, so
+  `pixi run lint` checks the same versions on every machine.
+
 ## Quick start
 
 ```sh
+pixi install # fetch the pinned validation tooling (once per clone)
 make init    # create .env from the template
 make up      # start everything, wait for health, print endpoints
 make smoke   # verify every service actually works
@@ -154,8 +162,14 @@ make keycloak-export     # write the live realm back over the JSON
 ```
 compose.yaml                    the stack
 .env.example                    every tunable, with defaults
+pixi.toml / pixi.lock           validation tasks and their pinned tools
+pyproject.toml                  ruff and mypy settings (no package here)
+.yamllint.yaml                  YAML lint rules
+.gitattributes                  LF line endings on every checkout
 Makefile                        lifecycle, shells, backup/restore
 scripts/smoke-test.sh           end-to-end verification
+scripts/lint_json.py            the JSON check, one file per diagnostic
+scripts/lint_selftest.py        proves the lint surface cannot silently skip
 docker/
   postgres/postgresql.conf      dev-tuned config (loaded via config_file)
   postgres/initdb/              extensions + extra databases, first boot only
@@ -180,7 +194,9 @@ make mc                       # shell with the S3 client (mc) configured
 make backup                   # pg_dumpall to backups/
 make restore F=backups/x.gz   # restore a dump
 make urls                     # print every endpoint
-make lint                     # validate compose, shell, YAML, JSON
+pixi run lint                 # validate compose, shell, YAML, JSON, Python
+pixi run test                 # prove the lint surface cannot silently skip
+pixi run ci                   # the done-gate: lint + test
 ```
 
 ## Data and persistence

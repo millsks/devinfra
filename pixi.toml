@@ -1,0 +1,50 @@
+[workspace]
+authors = ["Kevin Mills <millsks@gmail.com>"]
+channels = ["conda-forge"]
+name = "devinfra"
+platforms = ["linux-64", "win-64", "osx-64", "osx-arm64"]
+version = "0.1.0"
+
+# Every validation tool this repository runs is a pinned dependency resolved from the
+# committed pixi.lock. A missing tool is impossible, so no task branches on its absence.
+[feature.dev.dependencies]
+shellcheck = "0.11.*"
+yamllint = "1.38.*"
+python = "3.14.*"
+ruff = "0.16.*"
+mypy = "2.3.*"
+
+[environments]
+default = ["dev"]
+
+[tasks.lint-compose]
+description = "Validate the compose configuration for the admin + observability profiles"
+cmd = "docker compose --profile admin --profile observability config -q"
+
+[tasks.lint-shell]
+description = "shellcheck every shell script in the repository"
+cmd = "shellcheck scripts/*.sh docker/postgres/initdb/*.sh"
+
+[tasks.lint-yaml]
+description = "yamllint the compose file and every service YAML config"
+cmd = "yamllint --strict -c .yamllint.yaml .yamllint.yaml compose.yaml docker/**/*.y*ml"
+
+[tasks.lint-json]
+description = "Validate every JSON config parses"
+cmd = "python scripts/lint_json.py docker/**/*.json"
+
+[tasks.lint-python]
+description = "ruff and mypy over the repository's own Python"
+cmd = "ruff format --check scripts && ruff check scripts && mypy scripts"
+
+[tasks.test]
+description = "Prove every lint check fails on a real defect and passes on a clean file"
+cmd = "python scripts/lint_selftest.py"
+
+[tasks.lint]
+description = "Run every validation check"
+depends-on = ["lint-compose", "lint-shell", "lint-yaml", "lint-json", "lint-python"]
+
+[tasks.ci]
+description = "The done-gate: every check this repository needs"
+depends-on = ["lint", "test"]

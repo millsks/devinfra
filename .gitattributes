@@ -1,0 +1,9 @@
+# Normalise line endings on checkout. Without this a Windows clone hands shellcheck
+# CRLF scripts (SC1017) and yamllint CRLF configs, so the lint fails on the checkout
+# rather than on anything a contributor wrote.
+* text=auto eol=lf
+
+# SCM syntax highlighting & preventing 3-way merges. `-diff` is deliberately absent:
+# pixi.lock is this repository's reproducibility artifact and its changes must stay
+# reviewable.
+pixi.lock merge=binary linguist-language=YAML linguist-generated=true
