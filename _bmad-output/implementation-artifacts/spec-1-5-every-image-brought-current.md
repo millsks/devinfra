@@ -14,6 +14,24 @@ operator_actions:
   - "Do not apply these bumps statically without the smoke run. All four tags were confirmed present for `linux/amd64` and `linux/arm64` by direct registry API call on 2026-09-07, so they will resolve — but a bump that is green only in the linter and never exercised is exactly the silent-skip class of defect this epic exists to remove. Tempo 3.0 and Grafana 13 in particular both touch the span-metrics path, and the OTLP round-trip through the collector into Tempo, Loki and Prometheus is their gate."
 deferred:
   - summary: >-
+      `pixi run up` no longer blocks on Loki or Tempo readiness, because their images
+      went distroless and can no longer carry a Docker healthcheck.
+    evidence: |-
+      Loki 3.7 and Tempo 3.0 dropped the busybox layer, so each container holds only its
+      own binary — no shell, no HTTP client — and a Docker healthcheck has nothing to exec.
+      Both healthchecks were removed from compose.yaml and the readiness assertion moved
+      into scripts/smoke-test.sh, which polls /ready from the host with a 120s bound and
+      fails strictly. That restores the gate for `pixi run ci-stack` and for CI, which run
+      the smoke suite — but `pixi run up` is start, wait, urls with no smoke, and
+      wait-healthy.sh treats an empty Health column as "not unhealthy". So the local start
+      path returns while those two may still be initialising, which is a narrowing of
+      NFR-3's "blocks until every container is healthy". Closing it means teaching
+      wait-healthy.sh to probe a readiness URL for services that declare no healthcheck,
+      which is a design change to the health gate rather than a correction to this bump.
+    location: >-
+      compose.yaml (loki, tempo), scripts/wait-healthy.sh
+    severity: medium
+  - summary: >-
       Nothing checks the new `# Image currency` block in `.env.example` against the pins it describes.
     evidence: |-
       assert_pins.py deliberately skips comment lines, so the block can claim a tag or a lag that no
