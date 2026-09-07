@@ -229,3 +229,35 @@ source_spec: `spec-2-2-the-remaining-core-modules.md`
 severity: low
 reason: _bmad-output/planning-artifacts/architecture/architecture-devinfra-2026-09-06/.memlog.md:71 records "AD-5 held - minio-data volume name and `docker/minio/` config path both unchanged". `git log --all -- docker/minio` is empty, so the claim is false there as it was in ADR 0008 and the README, both corrected by this story. Not corrected here because the memlog is a phase 1-3 planning artifact, upstream of this story's bounds, and this story's Tasks list scoped the correction to ADR 0008 and the README. It matters because a future architecture session reads the memlog first.
 status: open
+
+### DW-30: The live-stack half of this story's acceptance criteria was never exercised: the eight Services were never started from this working tree and `pixi run smoke` never ran.
+origin: spec-deferred 833c0ba02094
+location: spec Verification section (live-stack commands)
+source_spec: `spec-2-3-the-admin-and-observability-modules.md`
+severity: medium
+reason: All thirteen devinfra-* containers are running from the main checkout, and every module pins a fixed `container_name`, so a second Compose project cannot start them at all without mutating the shipped files. Recreating them from this worktree would repoint their binds at a directory deleted when the run ends. What is proven instead: the rendered model is identical to the pre-change baseline apart from the seven relocated bind sources and the three deleted `x-*` extension blocks, and a new lint-config assertion proves all eleven rendered bind sources resolve on disk. Settling it needs one operator run of `docker compose --profile admin --profile observability up -d`, `./scripts/wait-healthy.sh` and `pixi run smoke` from the checkout that owns the live stack. Same shape as DW-23, which records the identical gap for story 2-2.
+status: open
+
+### DW-31: Nothing committed pins the assembled model's `depends_on` edges or per-service `command` flags, so a detail lost while transcribing eight service bodies ships green.
+origin: spec-deferred b2c31d6b6a3a
+location: scripts/lint-compose.sh; services/otel-collector/compose.yaml (depends_on)
+source_spec: `spec-2-3-the-admin-and-observability-modules.md`
+severity: medium
+reason: `docker compose config -q` rejects an edge naming an undefined service but is blind to an edge simply deleted; deleting `- loki` from services/otel-collector/compose.yaml renders and validates clean, and the collector retries its exporter so smoke's Loki query still succeeds. Same for `--web.enable-remote-write-receiver` in services/prometheus: dropping it breaks Tempo's metrics_generator remote-write, which no smoke assertion observes. The before/after rendered diff proved it here but ran from a scratch directory and leaves no committed baseline. ADR 0002 makes `config -q` the sanctioned dependency gate, so committing a rendered baseline revisits a decided ADR; epics story 2.4 owns the per-Module contract check. Duplicates DW-25 and DW-28 in kind, now with eight more bodies behind it.
+status: open
+
+### DW-32: scripts/lint-compose.sh treats a successfully-read empty profile list as "no profiles", validating one combination and reporting OK.
+origin: spec-deferred 81114d6f867c
+location: scripts/lint-compose.sh:46-47
+source_spec: `spec-2-3-the-admin-and-observability-modules.md`
+severity: low
+reason: scripts/lint-compose.sh:33-47 guards the case where `compose config --profiles` *fails*, and its comment says an unreadable enumeration is never treated as no profiles. A successful but empty read is not guarded: `count` is 0, `combinations` is 1, and the loop validates only the profile-less selection before printing OK. Pre-existing — the same vacuity existed while profiles were declared in the root file — but every profile now lives in a module file, so the model has more independent places to lose one. The literal member-set pins added to scripts/lint_selftest.py in this pass catch the realistic case (one service losing its key); this entry is the all-profiles-gone case.
+status: open
+
+### DW-33: AGENTS.md still stamps "Verified 2026-09-07 against e8971ad" although this change hand-edited three claims inside its managed block.
+origin: spec-deferred 14d4bbe24aa7
+location: AGENTS.md:2
+source_spec: `spec-2-3-the-admin-and-observability-modules.md`
+severity: low
+reason: AGENTS.md:2 is the bmad-project-context managed-block header, which records the revision the block was verified against. The block's layout and "still inlined" claims were corrected here because leaving them false was worse than editing a managed region, but the stamp now names a revision that predates the edit. Routed to defer because the fix edits an agent-context file; a bmad-project-context refresh regenerates both the block and its stamp.
+status: open

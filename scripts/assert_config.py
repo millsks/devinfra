@@ -7,20 +7,28 @@ take no part in Compose interpolation, so a port that reads as `127.0.0.1:5432:5
 source file can still render bound to every interface. Only the rendered output says what
 the runtime will actually do.
 
-Four properties, one pass per profile combination:
+Five properties, one pass per profile combination:
 
 * every published port binds to the configured bind address, never to `0.0.0.0` or to an
   empty host address (NFR-2);
 * no two services publish the same host address and port (AD-17) — `config -q` is blind to
   this, so `up` half-starts and reports `port is already allocated` instead;
 * every image resolves to an explicit tag that is not `latest` (NFR-4);
-* every service carries the logging options `common/base.yaml` declares — the inlined
-  services reach them through the `x-logging` anchor and a module through `extends`, and a
-  module that lost its `extends` block renders valid, passes `config -q` and silently ships
-  with unbounded logs. Logging is the only one of the fragment's three keys asserted here:
+* every service carries the logging options `common/base.yaml` declares — every service is
+  a module service and reaches them through `extends`, and a module that lost its `extends`
+  block renders valid, passes `config -q` and silently ships with unbounded logs. Logging
+  is the only one of the fragment's three keys asserted here:
   `restart` cannot be, because overriding it is sanctioned — a one-shot helper such as
   `minio-init` must set `restart: "no"` — so telling a legitimate override from a lost
-  inheritance needs a way to declare the exception, which no story has settled yet.
+  inheritance needs a way to declare the exception, which no story has settled yet;
+* every bind mount's rendered `source` exists on disk and is not an empty directory. A
+  module writes its bind sources against its own directory, and a mistyped one is silent
+  in the worst way: Docker creates the missing path as an empty *directory* and starts the
+  container, so the service runs with its configuration absent rather than failing. pgAdmin
+  is the case that motivated this — a wrong `./conf/servers.json` leaves the server
+  registration missing while `/misc/ping` still returns 200 and the smoke suite passes.
+  Empty directories are rejected too, because Docker's own repair for a missing source is
+  what an existence-only check would then accept forever.
 
 Two properties are read from the module files' own text instead, because the rendered model
 cannot express them.
@@ -444,20 +452,55 @@ def check(
         if problem is not None:
             problems.append(f"{where}: service '{name}' image '{image}': {problem}")
 
-        # An inlined service reads the `x-logging` anchor; a module reads the same three
-        # keys out of common/base.yaml through `extends`. Drop the `extends` block from a
-        # module and nothing else notices: `config -q` still passes, the ports and the
-        # image are unchanged, and the service quietly ships with unbounded logs. The
-        # rendered model is where the two paths converge, so it is where they are
-        # compared. Only `logging` is compared: `restart` has a sanctioned override
-        # (`minio-init` sets `restart: "no"`), so an equality check would reject it.
+        # Every service reads these three keys out of common/base.yaml through `extends`.
+        # Drop the `extends` block from a module and nothing else notices: `config -q`
+        # still passes, the ports and the image are unchanged, and the service quietly
+        # ships with unbounded logs. The rendered model is the only place the inheritance
+        # is visible, so it is where it is checked. Only `logging` is compared: `restart`
+        # has a sanctioned override (`minio-init` sets `restart: "no"`), so an equality
+        # check would reject it.
         if service.get("logging") != logging:
             problems.append(
                 f"{where}: service '{name}' logging is {service.get('logging')!r}, not the "
-                f"{logging!r} every service inherits — an inlined service takes it from the "
-                f"x-logging anchor and a module from common/base.yaml through extends, so this "
-                f"one reaches neither"
+                f"{logging!r} every service inherits from common/base.yaml through extends, "
+                f"so this one reaches it through neither an extends block nor an override"
             )
+
+        # A bind source that does not exist is not an error to Docker: it creates the
+        # path as an empty directory and starts the container, so the service runs with
+        # its configuration simply absent. Nothing else catches it — `config -q` renders
+        # the path without touching the filesystem, and a service reading no config
+        # usually still starts and still answers a health probe. The rendered model is
+        # read rather than the module text because only the rendered value has been
+        # resolved against the module's own directory, which is the step that goes wrong.
+        for mount in service.get("volumes") or []:
+            if not isinstance(mount, dict) or mount.get("type") != "bind":
+                continue
+            source = mount.get("source")
+            if not isinstance(source, str) or not source:
+                problems.append(f"{where}: service '{name}' has a bind mount with no source: {mount!r}")
+            elif not Path(source).exists():
+                problems.append(
+                    f"{where}: service '{name}' bind-mounts '{source}' at "
+                    f"'{mount.get('target')}', and that path does not exist — Docker would "
+                    f"create it as an empty directory and start the service with its "
+                    f"configuration missing rather than failing"
+                )
+            elif Path(source).is_dir() and not any(Path(source).iterdir()):
+                # Existence alone stops being evidence the moment the stack has been
+                # started once: Docker's repair for a missing source *is* an empty
+                # directory, so the mistyped path now exists and `exists()` says yes
+                # forever while the configuration is still absent. An empty directory
+                # is therefore rejected in its own right. No source in this repository
+                # is legitimately empty — the one directory that could be,
+                # services/grafana/dashboards/, carries .gitkeep, which is also how git
+                # tracks it at all.
+                problems.append(
+                    f"{where}: service '{name}' bind-mounts '{source}' at "
+                    f"'{mount.get('target')}', and that path is an empty directory — "
+                    f"either the source is mistyped and Docker already created it, or the "
+                    f"directory needs a .gitkeep, as services/grafana/dashboards/ has"
+                )
 
         ports = service.get("ports")
         if not isinstance(ports, list):

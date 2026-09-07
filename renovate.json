@@ -35,10 +35,10 @@
         "one version resolves to one branch — and therefore one pull request carrying both",
         "edits. Split across two managers the extractions would still share a branch name,",
         "but nothing would keep their versioning settings in step.",
-        "The compose half is no longer one file. Services are being extracted into",
+        "The compose half is no longer one file. Every service was extracted into",
         "services/<name>/compose.yaml, reassembled by the root file's `include:` list, so",
         "the third pattern selects every module file. Without it the bot would see only the",
-        ".env.example half of an extracted service's pin and open a pull request editing one",
+        ".env.example half of a service's pin and open a pull request editing one",
         "file alone — which lint-pins rejects. The pattern is anchored on the",
         "repository-relative path: `/^compose\\.yaml$/` selects the root file only, because",
         "every module file is also named compose.yaml."

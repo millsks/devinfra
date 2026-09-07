@@ -1,0 +1,31 @@
+# Prometheus — metrics store and the remote-write target for Tempo's span
+# metrics. Profile: observability.
+#
+# A Module. The rules every Module holds are spelled out once in
+# services/postgres/compose.yaml and in the 2026-09-07 amendment to
+# docs/adr/0004-volume-names-are-frozen.md; `lint-config` enforces them.
+services:
+  prometheus:
+    extends:
+      file: ../../common/base.yaml
+      service: defaults
+    image: prom/prometheus:${PROMETHEUS_VERSION:-v3.14.0}
+    container_name: devinfra-prometheus
+    profiles: [observability]
+    ports:
+      - "${BIND_ADDRESS:-127.0.0.1}:${PROMETHEUS_PORT:-9090}:9090"
+    volumes:
+      - prometheus-data:/prometheus
+      - ./conf/prometheus.yml:/etc/prometheus/prometheus.yml:ro
+    command:
+      - --config.file=/etc/prometheus/prometheus.yml
+      - --storage.tsdb.path=/prometheus
+      - --storage.tsdb.retention.time=15d
+      # Tempo's metrics_generator remote-writes span metrics here; without this
+      # flag those writes are refused and the Grafana service map stays empty.
+      - --web.enable-remote-write-receiver
+      - --enable-feature=exemplar-storage
+      - --web.enable-lifecycle
+
+volumes:
+  prometheus-data:

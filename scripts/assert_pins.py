@@ -8,11 +8,11 @@ which is what a clone with no `.env` actually runs. Editing one and forgetting t
 other gives two developers on the same commit two different images — the exact
 reproducibility failure the pinning rule exists to prevent.
 
-The compose half is no longer one file. Services are being extracted into
+The compose half is no longer one file. Every service was extracted into
 `services/<name>/compose.yaml`, reassembled by the root file's `include:` list, so the
 check reads the root file *and* every module file and takes the union of what they
-reference. A per-file pass would report every pin that had moved into a module as
-"declared but never referenced" the moment its service was extracted. Module files are
+reference. A per-file pass would report every pin as "declared but never referenced",
+because the root file now declares no services at all. Module files are
 all named `compose.yaml`, so diagnostics name the path as it was given rather than the
 basename — `services/postgres/compose.yaml`, never a bare `compose.yaml` that could be
 any of thirteen files.

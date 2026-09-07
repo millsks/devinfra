@@ -573,11 +573,11 @@ def restated_versionings(config: dict[str, Any]) -> dict[str, set[str]]:
 def check(config_path: Path, composes: list[Path], dotenv: Path, workflow: Path) -> tuple[int, int, list[str]]:
     """Prove the configuration detects every pin, in the dotenv and in some compose file.
 
-    The compose half is a list, not a file. Services are being extracted into
-    `services/<name>/compose.yaml`, so a pin's compose half may live in any of them and
+    The compose half is a list, not a file. Every service was extracted into
+    `services/<name>/compose.yaml`, so a pin's compose half lives in one of them and
     `managerFilePatterns` has to select every one — a pattern set that reached only the
-    root file would leave the bot editing `.env.example` alone for every extracted
-    service, which is the one-file pull request `lint-pins` rejects.
+    root file would leave the bot editing `.env.example` alone for every service, which
+    is the one-file pull request `lint-pins` rejects.
 
     Args:
         config_path: The Renovate configuration.

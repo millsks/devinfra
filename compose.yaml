@@ -10,14 +10,14 @@
 #
 # Select profiles with COMPOSE_PROFILES in .env, or `--profile <name>` per run.
 #
-# Services are moving out of this file one at a time. An extracted service lives in
-# services/<name>/ with its config and seed data beside it, and is reassembled here by
-# the `include:` list below — which is the record of what has moved so far.
-#
-# Every core service has moved. The services still inlined below are the ones in the
-# admin and observability profiles; their `depends_on` edges onto postgres and redis
-# now cross the include boundary, which resolves because include assembles one model
-# before dependencies are checked.
+# Extraction is complete: every service lives in services/<name>/ with its config
+# and seed data beside it, and this file assembles them through the `include:`
+# list below. That list is the record of what the stack runs — this file declares
+# no services of its own, and a service added back here would be invisible to
+# every per-module check. The shared restart/logging/networks fragment lives in
+# common/base.yaml and reaches each module through `extends`; the `x-defaults`
+# anchor that used to duplicate it here is gone, because a YAML anchor cannot
+# cross an `include` boundary and nothing is left in this file to read it.
 
 name: ${COMPOSE_PROJECT_NAME:-devinfra}
 
@@ -25,202 +25,19 @@ name: ${COMPOSE_PROJECT_NAME:-devinfra}
 # Modules — one file per extracted service, reassembled here
 # ---------------------------------------------------------------------------
 include:
+  - ./services/flower/compose.yaml
+  - ./services/grafana/compose.yaml
   - ./services/keycloak/compose.yaml
+  - ./services/loki/compose.yaml
   - ./services/mailpit/compose.yaml
   - ./services/minio/compose.yaml
+  - ./services/otel-collector/compose.yaml
+  - ./services/pgadmin/compose.yaml
   - ./services/postgres/compose.yaml
+  - ./services/prometheus/compose.yaml
   - ./services/redis/compose.yaml
-
-# ---------------------------------------------------------------------------
-# Reusable fragments
-#
-# Anchors are document-scoped, so these reach only the services still inlined in
-# this file. An extracted module gets the same three keys through
-# `extends: {file: ../../common/base.yaml, service: defaults}`; common/base.yaml
-# is an extends source only and is never named above.
-# ---------------------------------------------------------------------------
-x-restart: &restart
-  restart: unless-stopped
-
-x-logging: &logging
-  logging:
-    driver: json-file
-    options:
-      max-size: "10m"
-      max-file: "3"
-
-x-defaults: &defaults
-  <<: [*restart, *logging]
-  networks: [devinfra]
-
-services:
-  # =========================================================================
-  # Admin UIs — profile: admin
-  # =========================================================================
-  pgadmin:
-    <<: *defaults
-    image: dpage/pgadmin4:${PGADMIN_VERSION:-9.17}
-    container_name: devinfra-pgadmin
-    profiles: [admin]
-    depends_on:
-      postgres:
-        condition: service_healthy
-    ports:
-      - "${BIND_ADDRESS:-127.0.0.1}:${PGADMIN_PORT:-5050}:80"
-    environment:
-      # pgAdmin validates this address and exits if it fails; bare "@localhost"
-      # and special-use TLDs (.local, .test) are both rejected.
-      PGADMIN_DEFAULT_EMAIL: ${PGADMIN_EMAIL:-dev@example.com}
-      PGADMIN_DEFAULT_PASSWORD: ${PGADMIN_PASSWORD:-devinfra}
-      PGADMIN_CONFIG_SERVER_MODE: "False"
-      PGADMIN_CONFIG_MASTER_PASSWORD_REQUIRED: "False"
-      PGADMIN_DISABLE_POSTFIX: "True"
-    volumes:
-      - pgadmin-data:/var/lib/pgadmin
-      - ./docker/pgadmin/servers.json:/pgadmin4/servers.json:ro
-    user: "5050:5050"
-
-  redisinsight:
-    <<: *defaults
-    image: redis/redisinsight:${REDISINSIGHT_VERSION:-3.8.0}
-    container_name: devinfra-redisinsight
-    profiles: [admin]
-    depends_on:
-      redis:
-        condition: service_healthy
-    ports:
-      - "${BIND_ADDRESS:-127.0.0.1}:${REDISINSIGHT_PORT:-5540}:5540"
-    environment:
-      RI_APP_HOST: 0.0.0.0
-      RI_APP_PORT: 5540
-      # Auto-adds the local Redis on first start; no manual "add database" step.
-      RI_REDIS_HOST: redis
-      RI_REDIS_PORT: 6379
-      RI_REDIS_PASSWORD: ${REDIS_PASSWORD:-devinfra}
-      RI_REDIS_ALIAS: devinfra
-    volumes:
-      - redisinsight-data:/data
-
-  # Celery monitoring. Runs without any worker present — it will simply show an
-  # empty cluster until a worker on your host connects to the same broker.
-  flower:
-    <<: *defaults
-    image: mher/flower:${FLOWER_VERSION:-2.1.0}
-    container_name: devinfra-flower
-    profiles: [admin]
-    depends_on:
-      redis:
-        condition: service_healthy
-    ports:
-      - "${BIND_ADDRESS:-127.0.0.1}:${FLOWER_PORT:-5555}:5555"
-    environment:
-      CELERY_BROKER_URL: redis://:${REDIS_PASSWORD:-devinfra}@redis:6379/${REDIS_BROKER_DB:-1}
-      CELERY_RESULT_BACKEND: redis://:${REDIS_PASSWORD:-devinfra}@redis:6379/${REDIS_BACKEND_DB:-2}
-      FLOWER_UNAUTHENTICATED_API: "true"
-      FLOWER_PURGE_OFFLINE_WORKERS: "60"
-    volumes:
-      - flower-data:/data
-    command: ["celery", "flower", "--persistent=True", "--db=/data/flower.db", "--state_save_interval=10000"]
-
-  # =========================================================================
-  # Observability — profile: observability
-  # =========================================================================
-  otel-collector:
-    <<: *defaults
-    image: otel/opentelemetry-collector-contrib:${OTEL_COLLECTOR_VERSION:-0.160.0}
-    container_name: devinfra-otel-collector
-    profiles: [observability]
-    depends_on:
-      - loki
-      - tempo
-    ports:
-      - "${BIND_ADDRESS:-127.0.0.1}:${OTEL_GRPC_PORT:-4317}:4317"  # OTLP gRPC
-      - "${BIND_ADDRESS:-127.0.0.1}:${OTEL_HTTP_PORT:-4318}:4318"  # OTLP HTTP
-    volumes:
-      - ./docker/otel/otel-collector-config.yaml:/etc/otelcol-contrib/config.yaml:ro
-    command: ["--config=/etc/otelcol-contrib/config.yaml"]
-
-  prometheus:
-    <<: *defaults
-    image: prom/prometheus:${PROMETHEUS_VERSION:-v3.14.0}
-    container_name: devinfra-prometheus
-    profiles: [observability]
-    ports:
-      - "${BIND_ADDRESS:-127.0.0.1}:${PROMETHEUS_PORT:-9090}:9090"
-    volumes:
-      - prometheus-data:/prometheus
-      - ./docker/prometheus/prometheus.yml:/etc/prometheus/prometheus.yml:ro
-    command:
-      - --config.file=/etc/prometheus/prometheus.yml
-      - --storage.tsdb.path=/prometheus
-      - --storage.tsdb.retention.time=15d
-      # Tempo's metrics_generator remote-writes span metrics here; without this
-      # flag those writes are refused and the Grafana service map stays empty.
-      - --web.enable-remote-write-receiver
-      - --enable-feature=exemplar-storage
-      - --web.enable-lifecycle
-
-  loki:
-    <<: *defaults
-    image: grafana/loki:${LOKI_VERSION:-3.7.7}
-    container_name: devinfra-loki
-    profiles: [observability]
-    ports:
-      - "${BIND_ADDRESS:-127.0.0.1}:${LOKI_PORT:-3100}:3100"
-    volumes:
-      - loki-data:/loki
-      - ./docker/loki/loki-config.yaml:/etc/loki/local-config.yaml:ro
-    command: ["-config.file=/etc/loki/local-config.yaml"]
-    # No healthcheck: Loki 3.7 dropped the busybox layer its image used to carry,
-    # so the container holds /usr/bin/loki and nothing else — no shell, no wget,
-    # no HTTP client of any kind — and a Docker healthcheck has nothing to run.
-    # The readiness gate is not lost, it moved: smoke-test.sh polls /ready from
-    # the host, before the OTLP round-trip, and strict mode fails on it.
-
-  tempo:
-    <<: *defaults
-    image: grafana/tempo:${TEMPO_VERSION:-3.0.3}
-    container_name: devinfra-tempo
-    profiles: [observability]
-    ports:
-      - "${BIND_ADDRESS:-127.0.0.1}:${TEMPO_PORT:-3200}:3200"
-    volumes:
-      - tempo-data:/var/tempo
-      - ./docker/tempo/tempo.yaml:/etc/tempo/tempo.yaml:ro
-    command: ["-config.file=/etc/tempo/tempo.yaml"]
-    # No healthcheck, for the same reason as loki above: Tempo 3.0 dropped the
-    # busybox layer, so the container holds /usr/bin/tempo and nothing else and
-    # a Docker healthcheck has nothing to run. smoke-test.sh polls /ready from
-    # the host instead, before the OTLP round-trip.
-
-  grafana:
-    <<: *defaults
-    image: grafana/grafana:${GRAFANA_VERSION:-13.2.1}
-    container_name: devinfra-grafana
-    profiles: [observability]
-    depends_on:
-      - prometheus
-      - loki
-      - tempo
-    ports:
-      - "${BIND_ADDRESS:-127.0.0.1}:${GRAFANA_PORT:-3000}:3000"
-    environment:
-      GF_SECURITY_ADMIN_USER: ${GRAFANA_ADMIN_USER:-admin}
-      GF_SECURITY_ADMIN_PASSWORD: ${GRAFANA_ADMIN_PASSWORD:-admin}
-      GF_USERS_ALLOW_SIGN_UP: "false"
-      # Local convenience only: skips the login screen entirely.
-      GF_AUTH_ANONYMOUS_ENABLED: "true"
-      GF_AUTH_ANONYMOUS_ORG_ROLE: Admin
-      GF_FEATURE_TOGGLES_ENABLE: traceqlEditor,traceQLStreaming,metricsSummary
-      GF_LOG_LEVEL: warn
-      # Referenced by provisioning/datasources/datasources.yaml.
-      POSTGRES_USER: ${POSTGRES_USER:-devinfra}
-      POSTGRES_PASSWORD: ${POSTGRES_PASSWORD:-devinfra}
-      POSTGRES_DB: ${POSTGRES_DB:-devinfra}
-    volumes:
-      - grafana-data:/var/lib/grafana
-      - ./docker/grafana/provisioning:/etc/grafana/provisioning:ro
-      - ./docker/grafana/dashboards:/var/lib/grafana/dashboards:ro
+  - ./services/redisinsight/compose.yaml
+  - ./services/tempo/compose.yaml
 
 # ---------------------------------------------------------------------------
 # Named volumes — everything stateful lands here and survives `down`

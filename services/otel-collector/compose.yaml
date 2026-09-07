@@ -1,0 +1,26 @@
+# OpenTelemetry Collector — the single OTLP endpoint applications send to; it
+# fans traces out to Tempo and logs out to Loki. Profile: observability.
+#
+# A Module. The rules every Module holds are spelled out once in
+# services/postgres/compose.yaml and in the 2026-09-07 amendment to
+# docs/adr/0004-volume-names-are-frozen.md; `lint-config` enforces them.
+#
+# There is deliberately no `volumes:` stanza: the collector owns no named volume,
+# and a Module declares only the identifiers it uses.
+services:
+  otel-collector:
+    extends:
+      file: ../../common/base.yaml
+      service: defaults
+    image: otel/opentelemetry-collector-contrib:${OTEL_COLLECTOR_VERSION:-0.160.0}
+    container_name: devinfra-otel-collector
+    profiles: [observability]
+    depends_on:
+      - loki
+      - tempo
+    ports:
+      - "${BIND_ADDRESS:-127.0.0.1}:${OTEL_GRPC_PORT:-4317}:4317"  # OTLP gRPC
+      - "${BIND_ADDRESS:-127.0.0.1}:${OTEL_HTTP_PORT:-4318}:4318"  # OTLP HTTP
+    volumes:
+      - ./conf/otel-collector-config.yaml:/etc/otelcol-contrib/config.yaml:ro
+    command: ["--config=/etc/otelcol-contrib/config.yaml"]

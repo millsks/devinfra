@@ -1,8 +1,8 @@
 # The one fragment every Module extends. Never included.
 #
 # YAML anchors are document-scoped and `include:` is applied after parsing, so an
-# alias cannot cross a file boundary — a module file cannot reach the `x-defaults`
-# anchor in the root compose file. `extends` can, so shared configuration lives
+# alias cannot cross a file boundary — a module file cannot reach an anchor defined
+# in the root compose file, or in any other. `extends` can, so shared configuration lives
 # here and every module service pulls it in with:
 #
 #   extends:
