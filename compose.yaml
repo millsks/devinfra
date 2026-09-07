@@ -155,11 +155,17 @@ services:
       start_period: 90s
 
   # =========================================================================
-  # MinIO — S3-compatible object storage
+  # Silo — S3-compatible object storage (maintained MinIO fork)
+  #
+  # minio/minio and minio/mc were both archived upstream in 2026. The last
+  # MinIO release fixed a privilege-escalation CVE and was never published to
+  # any registry, so the newest pullable image is permanently unpatched.
+  # Silo preserves the MINIO_* variables and the on-disk format, so the
+  # existing minio-data volume is read as-is. See docs/adr/0008.
   # =========================================================================
   minio:
     <<: *defaults
-    image: minio/minio:${MINIO_VERSION:-RELEASE.2025-09-07T16-13-09Z}
+    image: pgsty/silo:${SILO_VERSION:-RELEASE.2026-09-03T13-18-01Z}
     container_name: devinfra-minio
     ports:
       - "${BIND_ADDRESS:-127.0.0.1}:${MINIO_API_PORT:-9100}:9000"
@@ -183,7 +189,9 @@ services:
   # will show it as Exited, which is expected.
   minio-init:
     <<: *logging
-    image: minio/mc:${MINIO_MC_VERSION:-RELEASE.2025-08-13T08-35-41Z}
+    # Same image as the server: it ships `mc`, so the archived minio/mc is
+    # no longer needed. Overriding the entrypoint runs the client.
+    image: pgsty/silo:${SILO_VERSION:-RELEASE.2026-09-03T13-18-01Z}
     container_name: devinfra-minio-init
     networks: [devinfra]
     depends_on:

@@ -1,6 +1,6 @@
 # 8. Object storage replacement
 
-Date: 2026-09-06 · Status: **Proposed** — awaiting decision · Spine: Deferred
+Date: 2026-09-06 · Status: **Accepted** · Spine: Deferred (now resolved)
 
 ## Context
 
@@ -31,15 +31,48 @@ test, the `AWS_ENDPOINT_URL` contract variable, and the console URL in the READM
 
 ## Decision
 
-**Not yet made.** Recorded so the choice is deliberate rather than inherited.
+**Adopt `pgsty/silo`**, pinned to `RELEASE.2026-09-03T13-18-01Z`.
 
-The module is named `object-storage` rather than `minio` so the eventual swap does not
-collide with the frozen volume name `minio-data` (ADR 0004). Settle this before adding new
-catalog services, so the module contract is exercised on a replacement that is already
-understood.
+The same image replaces `minio/mc` for the init container — it ships `mc` at
+`/usr/bin/mc`, so overriding the entrypoint runs the client. That removes the
+second archived dependency, which was easy to miss: `minio/mc` is archived too.
 
-## Consequences of deferring
+`MINIO_ROOT_USER`, `MINIO_ROOT_PASSWORD` and `MINIO_BUCKETS` keep their names,
+because Silo genuinely consumes them — that is the compatibility surface, not an
+oversight. Only the image pin was renamed, `MINIO_VERSION` → `SILO_VERSION`, since
+it no longer points at a MinIO release. The volume stays `minio-data` and the
+config directory stays `docker/minio/` per ADR 0004: renaming a volume orphans its
+data, and no amount of tidiness is worth that.
 
-Every day the stack runs a pinned archived image with a known unpatched privilege-escalation
-CVE. Mitigated by loopback-only binding and the stack's local-development-only scope, but it
-is real and it does not improve on its own.
+## Verification
+
+Tested against a copy of the live `minio-data` volume before any change was made to
+the running stack:
+
+- Buckets created by MinIO are read by Silo, with per-bucket versioning state
+  intact — 6/6 checks.
+- **Compatibility is bidirectional.** Silo reads objects MinIO wrote, and MinIO
+  reads objects Silo wrote (6/6 checks). The migration is therefore reversible:
+  rolling back is an image-pin revert, not a restore.
+- The repository's own `scripts/smoke-test.sh` passes in full against the live
+  stack running Silo — **45 passed, 0 failed, 0 skipped**.
+- The image ships `mc` (`RELEASE.2026-09-03T07-13-05Z`), so the smoke test's
+  `mc alias/ls/cp/cat/version` calls work unchanged, and `mc admin info` responds.
+
+Not verified: whether Silo's console restores the admin features MinIO removed in
+`RELEASE.2025-05-24`. Both serve a console over HTTP; comparing their UI features
+needs a browser session. The decision does not rest on it.
+
+## Consequences
+
+The stack no longer depends on any archived image. Object storage is maintained
+again, and the CVE gap is closed.
+
+**Bus factor 1** — Silo is a small fork. That risk is materially reduced by the
+verified reverse compatibility: if it is abandoned, the fallback is any
+MinIO-format-compatible implementation, and no data migration is required to get
+back. Re-evaluate if RustFS reaches GA or if SeaweedFS's ergonomics improve;
+neither is urgent while the format stays portable.
+
+Silo passes the ADR 0007 admission policy: AGPL-3.0, no account or token, no
+privileged host access, actively maintained (published 2026-09-04).

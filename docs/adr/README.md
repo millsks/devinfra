@@ -16,7 +16,7 @@ a superseding ADR, never by editing a decided one.
 | [0005](0005-pixi-as-the-task-surface.md) | pixi as the single task surface | Accepted |
 | [0006](0006-keep-five-container-observability.md) | Keep the five-container observability bundle | Accepted |
 | [0007](0007-catalog-admission-policy.md) | Catalog admission policy | Accepted |
-| [0008](0008-object-storage-replacement.md) | Object storage replacement | Proposed |
+| [0008](0008-object-storage-replacement.md) | Object storage replacement | Accepted |
 
 ## Related
 

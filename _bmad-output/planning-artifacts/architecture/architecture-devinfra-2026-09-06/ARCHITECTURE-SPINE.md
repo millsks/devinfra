@@ -7,7 +7,7 @@ paradigm: 'microkernel (plug-in)'
 scope: 'The devinfra local development infrastructure stack — its modularization, catalog expansion, and durability work'
 status: final
 created: '2026-09-06'
-updated: '2026-09-06'
+updated: '2026-09-07'
 binds: [FR-1, FR-2, FR-3, FR-4, FR-5, FR-6, FR-7, FR-8, FR-9, FR-10, FR-12, FR-13, FR-14, FR-15, FR-16, FR-17, FR-18, FR-19, NFR-1, NFR-2, NFR-3, NFR-4, NFR-5, NFR-6, NFR-7, NFR-8]
 sources:
   - '../../prds/prd-devinfra-2026-09-06/prd.md'
@@ -297,7 +297,7 @@ Verified current as of 2026-09-06. The code owns these once they exist; this is 
 | grafana/tempo | 3.0.3 |
 | grafana/grafana | 13.2.1 |
 | openbao/openbao | 2.6.2 |
-| S3-compatible object storage | **unresolved — see Deferred** |
+| pgsty/silo (object storage) | RELEASE.2026-09-03T13-18-01Z |
 
 ## Structural Seed
 
@@ -400,15 +400,8 @@ graph LR
 
 ## Deferred
 
-- **The S3-compatible object storage Service — the one deferred item with a deadline.** MinIO was archived 2026-04-25. The newest pullable image (`RELEASE.2025-09-07`) predates `RELEASE.2025-10-15`, which fixed CVE-2025-62506 (privilege escalation, CVSS 8.1) and was published with **zero assets** — absent from both Docker Hub and quay. Six further post-archive advisories have no community fix. `RELEASE.2025-05-24` gutted the console (admin features and LDAP/OIDC removed) though an object browser remains, so the pinned image already carries a hollow console. A replacement decision, not a version bump: it touches seeded buckets, the `mc` smoke round-trip, the `AWS_ENDPOINT_URL` contract variable, and the README console link. Not MVP-blocking — MVP is CI and modularity — but settle it before catalog work. The Module is named `object-storage` rather than `minio` precisely so the swap does not collide with AD-5's frozen identifiers.
+- ~~**The S3-compatible object storage Service.**~~ **RESOLVED — adopted `pgsty/silo`.** MinIO and `minio/mc` were both archived upstream, and the final MinIO release fixed a privilege-escalation CVE that was never published to any registry. Silo preserves the `MINIO_*` variables and the on-disk format, so this was an image swap with no data migration and the `minio-data` volume was untouched (AD-5 held). Compatibility was verified **bidirectionally** against a copy of the live volume before any change, making the move reversible, and the full smoke suite passes — 45/0/0. The same image also supplies `mc`, retiring the second archived dependency. See `docs/adr/0008`. Residual risk is bus factor 1, mitigated by the verified format portability.
 
-  | Candidate | License | Verdict |
-  | --- | --- | --- |
-  | **`pgsty/silo`** | AGPL-3.0 | **Leading.** MinIO fork with the full admin console restored and post-archive CVEs patched; preserves `MINIO_*` variables and the on-disk format, so migration is close to an image-name swap. Bus factor 1. |
-  | **SeaweedFS 4.45** | Apache-2.0 | Viable. Real console, S3 on :8333, versioning and object lock supported; `S3_BUCKET=a,b,c` seeds at startup and would retire the `minio-init` helper entirely. `mc admin *` does not work. Note the volume server defaults to 8080 — see AD-17. |
-  | **Garage v2.4.0** | AGPL-3.0 | **Ruled out.** No versioning at all (returns 501), no bucket policies, no object lock. `minio-init` runs `mc version enable` and the Smoke Test asserts versioning is on, so this fails the existing contract outright. |
-  | **RustFS 1.0.0-rc.5** | Apache-2.0 | Revisit at GA. Prerelease; do not pin per NFR-4. |
-  | *Status quo* | AGPL-3.0 | Documented acceptance of a pinned archived image with seven unpatched advisories. Defensible only for a loopback-bound dev stack, and only if written down. |
 - **The consumption model** (PRD Q1). Deliberately open. AD-6's closure-validity is the mechanism keeping the reusable-base path reachable; nothing here commits to it.
 - **`keycloak-config-cli` for idempotent realm reconciliation.** AD-12 removes the pain that motivated it. Revisit if realm-as-code becomes a real workflow. Pin would be `6.5.1-26.5.5` — no `26.4.x` artifact exists.
 - **Which product fills each Catalog category** (message broker, search). Each arrives as one Module under AD-8, so deferring costs nothing.

@@ -11,7 +11,7 @@ preserves your data — only an explicit `make destroy` throws it away.
 | **PostgreSQL** | 17 (+pgvector) | Primary datastore, Celery result backend, Keycloak persistence | `localhost:5432` |
 | **Redis** | 8 | Cache, Celery broker, Celery result backend | `localhost:6379` |
 | **Keycloak** | 26.4 | OpenID Connect provider | http://localhost:8080 |
-| **MinIO** | latest | S3-compatible object storage | http://localhost:9101 (API `:9100`) |
+| **Silo** | 2026-09-03 | S3-compatible object storage (maintained MinIO fork) | http://localhost:9101 (API `:9100`) |
 | **Mailpit** | 1.28 | Catches all outbound SMTP | http://localhost:8025 (SMTP `:1025`) |
 | **pgAdmin** | 9.9 | PostgreSQL web console | http://localhost:5050 |
 | **RedisInsight** | 2.70 | Redis web console | http://localhost:5540 |
@@ -38,7 +38,7 @@ booting and importing its realm.
 
 ### Profiles
 
-Core services (Postgres, Redis, Keycloak, MinIO, Mailpit) always start. The rest
+Core services (Postgres, Redis, Keycloak, Silo, Mailpit) always start. The rest
 are grouped into profiles, selected via `COMPOSE_PROFILES` in `.env`:
 
 | Profile | Services |
@@ -162,6 +162,7 @@ docker/
   redis/redis.conf              AOF + RDB persistence, noeviction
   keycloak/realms/              realm imported on first boot
   minio/                        buckets provisioned by the minio-init container
+                                (volume and paths keep the minio- prefix; see below)
   otel/                         collector pipelines
   prometheus/ loki/ tempo/      backend configs
   grafana/provisioning/         datasources + dashboard provider
@@ -175,7 +176,7 @@ make ps                       # status and health of every container
 make logs S=keycloak          # tail one service
 make psql DB=keycloak         # psql shell against any database
 make redis-cli N=1            # redis-cli against the broker db
-make mc                       # shell with the MinIO client configured
+make mc                       # shell with the S3 client (mc) configured
 make backup                   # pg_dumpall to backups/
 make restore F=backups/x.gz   # restore a dump
 make urls                     # print every endpoint
@@ -195,7 +196,7 @@ prometheus-data               loki-data      tempo-data     grafana-data
 - `make down` / `make stop` — containers go away, **data stays**
 - `make destroy` — containers **and all volumes** deleted; requires typing `destroy`
 
-Verified: with markers written into Postgres, Redis, Keycloak, MinIO, Mailpit and
+Verified: with markers written into Postgres, Redis, Keycloak, Silo, Mailpit and
 Grafana, a full `down` followed by `up` returns every one of them intact.
 
 ### Notes on retention
@@ -234,6 +235,16 @@ These are the things that cost time when building this stack:
   the OTel Collector is deprecated.
 - **Tempo's span metrics need `--web.enable-remote-write-receiver`** on
   Prometheus, or Grafana's service map stays permanently empty.
+- **MinIO is archived; object storage runs Silo, a maintained fork.** Both
+  `minio/minio` and `minio/mc` were archived upstream in 2026, and the final
+  MinIO release — which fixed a privilege-escalation CVE — was never published
+  to any registry, so the newest pullable MinIO image is permanently unpatched.
+  Silo preserves the `MINIO_*` environment variables and the on-disk format, so
+  this was an image swap with no data migration, and it is reversible: MinIO
+  reads Silo-written data and vice versa (both directions verified). The volume
+  is still named `minio-data` and the config directory is still `docker/minio/`
+  — renaming a volume orphans its data, so those names stay. The same image
+  also supplies `mc`, which is why there is no separate client image.
 
 ## Security
 
