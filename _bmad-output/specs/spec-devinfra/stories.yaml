@@ -1,0 +1,207 @@
+# Execution order is list order. Ids mirror epics.md (epic-story); withdrawn
+# stories 4-3, 4-4 and 4-5 are absent and their ids are not reused.
+- id: "1-1"
+  title: Validation tooling that cannot silently skip
+  description: >-
+    Provision every validation tool with the project so a check either runs
+    honestly or fails. Realizes the first half of CAP-16.
+  invoke_dev_with: >-
+    Today `make lint` exits 0 having skipped shellcheck and YAML validation when
+    those tools are absent — reproduce that before changing it, so you know the
+    fix works. No task may branch on `command -v`; a missing tool must be
+    impossible rather than skipped.
+
+- id: "1-2"
+  title: Lifecycle logic extracted into testable scripts
+  description: >-
+    Move the health-wait loop, destroy confirmation and endpoint listing out of
+    Makefile recipes into scripts that run and test standalone.
+
+- id: "1-3"
+  title: CI proves the stack works on every change
+  description: >-
+    Start the stack and run the full smoke suite on every push, gating merge.
+    Realizes CAP-16 against the current monolithic compose file.
+  done_checkpoint: true
+  invoke_dev_with: >-
+    Verify the gate actually bites: open a PR deleting a service's `depends_on`
+    target and confirm CI fails naming the undefined service. A green CI that
+    never fails is the defect this story exists to prevent.
+
+- id: "1-4"
+  title: The stack runs under Podman
+  description: >-
+    Verify the stack starts and the smoke suite passes under Podman, the
+    preferred runtime. Realizes CAP-19.
+  invoke_dev_with: >-
+    Documentation alone does not satisfy this — the suite must actually pass.
+    Sequenced early because Podman is preferred, so anything it breaks should
+    surface before later stories assume Docker semantics.
+
+- id: "1-5"
+  title: Every image brought current
+  description: >-
+    Update the eleven stale pins, each upgrade verified. Realizes CAP-20.
+  done_checkpoint: true
+  invoke_dev_with: >-
+    One commit per bump so a break stays attributable. Ship Tempo 3.0 and
+    Grafana 13 together — the span-metrics wiring spans both. Keycloak crosses
+    three minors; confirm the realm imports and a minted token still carries the
+    roles claim and the devinfra-api audience.
+
+- id: "1-6"
+  title: Image updates arrive as validated pull requests
+  description: >-
+    Automate tag update proposals, each validated by CI before review.
+    Realizes CAP-17.
+  invoke_dev_with: >-
+    Renovate's compose manager skips the `repo:${VAR:-tag}` form this repo uses,
+    so a regex manager over `.env` with `# renovate:` annotations is required.
+    Confirm a dry run reports a non-zero dependency count — a manager matching
+    nothing looks identical to one with no updates available.
+
+- id: "2-1"
+  title: The shared fragment and the first Module
+  description: >-
+    Extract Postgres into a self-contained Module alongside the shared base
+    fragment, proving the decomposition mechanism. Begins CAP-1.
+  spec_checkpoint: true
+  done_checkpoint: true
+  invoke_dev_with: >-
+    Capture `docker compose config` output before you start; the rendered model
+    after extraction must be identical apart from key ordering. That comparison
+    is the primary verification. Check the volume inventory before and after —
+    a renamed volume orphans data silently. YAML anchors cannot cross include
+    boundaries; use `extends` with a file reference.
+
+- id: "2-2"
+  title: The remaining core Modules
+  description: >-
+    Extract Redis, Keycloak, object storage and Mailpit as Modules, preserving
+    every dependency edge. Continues CAP-1.
+  invoke_dev_with: >-
+    The object-storage Module keeps the volume name `minio-data` — do not tidy
+    this, renaming orphans the data. Its init container is a declared helper
+    and must set `restart: "no"` explicitly, or it inherits `unless-stopped`
+    from the base fragment and restart-loops.
+
+- id: "2-3"
+  title: The admin and observability Modules
+  description: >-
+    Extract the remaining eight Services so nothing stays inlined. Completes
+    CAP-1.
+
+- id: "2-4"
+  title: Every Module carries its own contract, enforced
+  description: >-
+    Give each Module its own smoke check and metadata, with CI refusing an
+    incomplete one. Realizes CAP-5 and CAP-6.
+  invoke_dev_with: >-
+    The contract check runs both directions — a Compose service with no Module
+    directory must fail it. `docker compose config -q` is blind to host-port
+    collisions, so parse the rendered config for duplicate published ports
+    separately.
+
+- id: "2-5"
+  title: Selecting a Module brings what it needs
+  description: >-
+    Resolve a Selection to its dependency closure before Compose sees it.
+    Realizes CAP-2 and CAP-3.
+  invoke_dev_with: >-
+    Selecting `keycloak` alone must expand to include Postgres and Mailpit.
+    The resolver is load-bearing for four separate invariants, so it needs
+    tests: closure correctness, refusal of an empty Selection, refusal of an
+    unknown Module name.
+
+- id: "2-6"
+  title: Bundles, and a safe path through the breaking change
+  description: >-
+    Add the Bundle registry and handle the change that makes a bare start with
+    no profiles start nothing. Realizes CAP-4.
+  spec_checkpoint: true
+  done_checkpoint: true
+  invoke_dev_with: >-
+    This is the only user-visible break in the plan. An existing `.env` without
+    COMPOSE_PROFILES must fail loudly naming the variable and the fix — never
+    start nothing and exit 0. Lead with it in the release notes.
+
+- id: "3-1"
+  title: Grafana opens on working dashboards
+  description: >-
+    Provision dashboards over all three signals automatically. Realizes CAP-13.
+  invoke_dev_with: >-
+    Assert one panel per signal renders non-empty against the trace, log and
+    metric the smoke run already injects. A dashboard file whose panels are all
+    broken must fail this check.
+
+- id: "3-2"
+  title: Gotchas become a maintained register
+  description: >-
+    Convert the README gotchas into a maintained per-Module artifact, correcting
+    the obsolete one. Realizes CAP-18.
+  invoke_dev_with: >-
+    The claim that realm re-import cannot overwrite an existing realm is false
+    on Keycloak 26.4 — `kc.sh import` takes `--override`, default true. Replace
+    the database-dropping target with a non-destructive import plus a container
+    restart; the restart is mandatory, since the running server serves cached
+    realm data after an out-of-band import.
+
+- id: "3-3"
+  title: Connection details generated, not hand-maintained
+  description: >-
+    Produce endpoint documentation from each Module's metadata so docs and
+    reality cannot drift. Realizes CAP-12.
+
+- id: "3-4"
+  title: Backup covers everything stateful
+  description: >-
+    Cover every stateful Service in the Selection, ordered safely.
+    Realizes CAP-15.
+  spec_checkpoint: true
+  invoke_dev_with: >-
+    A Postgres restore rewrites every database including Keycloak's, so stop its
+    dependents first and restart them after. Run psql with ON_ERROR_STOP=1 —
+    today's pipe exits 0 when DROP DATABASE fails on open connections, producing
+    a silent partial restore.
+
+- id: "3-5"
+  title: A worked example that proves the contracts
+  description: >-
+    Ship one runnable Python example exercising every endpoint contract, run by
+    CI. Realizes CAP-14.
+
+- id: "4-1"
+  title: A service must earn its place in the catalog
+  description: >-
+    Enforce the admission policy in CI before any new Service is wired in.
+    Realizes the constraint behind CAP-7 through CAP-10's replacements.
+  invoke_dev_with: >-
+    OSI-approved licence, no account or token to start, no privileged host
+    access including a Docker socket mount, actively maintained upstream. This
+    is what disqualified LocalStack. Also reject changes that partially harden
+    the stack — the security posture is fixed, not improved.
+
+- id: "4-2"
+  title: Secrets available locally
+  description: >-
+    Run OpenBao unsealed with a known root token so applications can develop
+    against a real secrets API. Realizes CAP-9.
+  invoke_dev_with: >-
+    The justification is that applications reading secrets from an API in
+    production need one locally, or local and production take different code
+    paths. It is not about avoiding committed secrets — `.env` is gitignored and
+    `.env.example` holds deliberately worthless loopback credentials by design.
+
+- id: "4-6"
+  title: Graph queries alongside vector search
+  description: >-
+    Add graph traversal over the data already in Postgres, in the same instance
+    as pgvector. Realizes CAP-21.
+  spec_checkpoint: true
+  invoke_dev_with: >-
+    Never add `age` to shared_preload_libraries. Its hooks break databases
+    lacking ag_catalog — CREATE EXTENSION pg_stat_statements and TRUNCATE both
+    fail — and this stack preloads pg_stat_statements and creates keycloak and
+    app_test without AGE. Use per-session `LOAD 'age'`. This is the first image
+    devinfra builds: pin the base tag and the apt package version, or the build
+    is not reproducible.
