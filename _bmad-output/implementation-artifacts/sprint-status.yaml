@@ -42,7 +42,7 @@ development_status:
   1-4-the-stack-runs-under-podman: done
   1-5-every-image-brought-current: done
   1-6-image-updates-arrive-as-validated-pull-requests: done
-  1-7-commit-time-checks-run-the-same-tasks-ci-does: awaiting-operator
+  1-7-commit-time-checks-run-the-same-tasks-ci-does: done
   epic-1-retrospective: optional
 
   epic-2: backlog
