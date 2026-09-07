@@ -1,5 +1,5 @@
 <!-- bmad:context -->
-<!-- Verified 2026-09-07 against 1e12e8f. Managed by bmad-project-context; edits inside this block are replaced on refresh. Keep anything you want preserved outside the markers. -->
+<!-- Verified 2026-09-07 against e8971ad. Managed by bmad-project-context; edits inside this block are replaced on refresh. Keep anything you want preserved outside the markers. -->
 
 ## devinfra
 
@@ -8,6 +8,7 @@ Docker Compose stack of local development infrastructure — Postgres, Redis, Ke
 ## Policy
 
 - Never push to `main` — protected, requires a PR. Work on `feature/`, `bugfix/` or `hotfix/` branches.
+- The PR approval requirement guards external contributions. The maintainer merges own PRs with `gh pr merge --admin`; never propose relaxing the ruleset when a merge comes back blocked.
 - Never commit `.env`; put new tunables in `.env.example` with a comment.
 - Never rename a named volume. A renamed volume is a new one — the old data orphans silently with no error. `object-storage` deliberately keeps the volume `minio-data`.
 
