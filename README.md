@@ -2,7 +2,7 @@
 
 A Docker Compose stack of infrastructure components for local development. Every
 stateful service persists to a named volume, so `docker compose down` and back up
-preserves your data — only an explicit `make destroy` throws it away.
+preserves your data — only an explicit `pixi run destroy` throws it away.
 
 ## Contents
 
@@ -35,14 +35,18 @@ network. Change `BIND_ADDRESS` in `.env` if you need otherwise.
 ## Quick start
 
 ```sh
-pixi install # fetch the pinned validation tooling (once per clone)
-make init    # create .env from the template
-make up      # start everything, wait for health, print endpoints
-make smoke   # verify every service actually works
+pixi install       # fetch the pinned tooling (once per clone)
+pixi run init      # create .env from the template
+pixi run up        # start everything, wait for health, print endpoints
+pixi run smoke     # verify every service actually works
 ```
 
-`make up` typically takes under two minutes on a cold start, most of it Keycloak
-booting and importing its realm.
+`pixi run up` typically takes under two minutes on a cold start, most of it
+Keycloak booting and importing its realm.
+
+`pixi task list` shows every task. The `make` targets still work — each forwards
+to its pixi task and prints a deprecation notice on stderr — but they are going
+away, so prefer `pixi run`.
 
 ### Profiles
 
@@ -55,8 +59,8 @@ are grouped into profiles, selected via `COMPOSE_PROFILES` in `.env`:
 | `observability` | OTel Collector, Prometheus, Loki, Tempo, Grafana |
 
 ```sh
-make up-core                              # just the essentials
-COMPOSE_PROFILES=admin make up            # essentials + admin UIs
+pixi run up-core                          # just the essentials
+COMPOSE_PROFILES=admin pixi run up        # essentials + admin UIs
 ```
 
 The observability profile is the expensive one — five containers and roughly a
@@ -140,7 +144,7 @@ Access tokens carry a `roles` claim and an `aud` of `devinfra-api`, so audience
 validation works out of the box. Mint one to inspect:
 
 ```sh
-make token | jq -r .access_token | cut -d. -f2 | base64 -d | jq
+pixi run token | jq -r .access_token | cut -d. -f2 | base64 -d | jq
 ```
 
 Keycloak's SMTP is wired to Mailpit, so password-reset and verification emails
@@ -153,8 +157,8 @@ land in http://localhost:8025 instead of going nowhere.
 already there. Two ways to work:
 
 ```sh
-make keycloak-reimport   # drop the realm and re-import the JSON (destroys realm state)
-make keycloak-export     # write the live realm back over the JSON
+pixi run keycloak-reimport   # drop the realm and re-import the JSON (destroys realm state)
+pixi run keycloak-export     # write the live realm back over the JSON
 ```
 
 ## Repository layout
@@ -166,10 +170,26 @@ pixi.toml / pixi.lock           validation tasks and their pinned tools
 pyproject.toml                  ruff and mypy settings (no package here)
 .yamllint.yaml                  YAML lint rules
 .gitattributes                  LF line endings on every checkout
-Makefile                        lifecycle, shells, backup/restore
+Makefile                        deprecated shims forwarding to pixi tasks
+scripts/lib/common.sh           .env loading and defaults, sourced by the rest
+scripts/wait-healthy.sh         blocks until healthy; non-zero on timeout
+scripts/urls.sh                 every service endpoint
+scripts/init-env.sh             .env from the template, never overwriting
+scripts/up-core.sh              core services only, profiles cleared
+scripts/ps.sh                   container status, health and ports
+scripts/logs.sh                 tail all services or one
+scripts/psql.sh                 psql shell in the postgres container
+scripts/redis-cli.sh            redis-cli shell in the redis container
+scripts/mc.sh                   shell with the S3 client configured
+scripts/backup.sh               pg_dumpall to backups/
+scripts/restore.sh              restore a dump; refuses a bad path first
+scripts/destroy.sh              deletes every volume; requires typing `destroy`
+scripts/keycloak-reimport.sh    drops the realm db; requires typing `reimport`
+scripts/keycloak-export.sh      live realm back over the JSON
+scripts/token.sh                mint an access token via the CLI client
 scripts/smoke-test.sh           end-to-end verification
 scripts/lint_json.py            the JSON check, one file per diagnostic
-scripts/lint_selftest.py        proves the lint surface cannot silently skip
+scripts/lint_selftest.py        proves the lint surface and the scripts hold
 docker/
   postgres/postgresql.conf      dev-tuned config (loaded via config_file)
   postgres/initdb/              extensions + extra databases, first boot only
@@ -185,19 +205,37 @@ docker/
 
 ## Common tasks
 
-```sh
-make ps                       # status and health of every container
-make logs S=keycloak          # tail one service
-make psql DB=keycloak         # psql shell against any database
-make redis-cli N=1            # redis-cli against the broker db
-make mc                       # shell with the S3 client (mc) configured
-make backup                   # pg_dumpall to backups/
-make restore F=backups/x.gz   # restore a dump
-make urls                     # print every endpoint
-pixi run lint                 # validate compose, shell, YAML, JSON, Python
-pixi run test                 # prove the lint surface cannot silently skip
-pixi run ci                   # the done-gate: lint + test
-```
+`pixi task list` is the full list. The common ones:
+
+| Task | What it does | Deprecated equivalent |
+|---|---|---|
+| `pixi run init` | Create `.env` from the template | `make init` |
+| `pixi run up` | Start, wait for health, print endpoints | `make up` |
+| `pixi run up-core` | Start only the core services | `make up-core` |
+| `pixi run down` / `stop` | Remove or stop containers, keeping data | `make down` / `stop` |
+| `pixi run restart` | Recreate the stack, preserving data | `make restart` |
+| `pixi run destroy` | Delete containers **and all volumes** | `make destroy` |
+| `pixi run pull` | Pull newer images for every pinned tag | `make pull` |
+| `pixi run wait` | Block until every healthcheck passes | `make wait` |
+| `pixi run ps` | Status and health of every container | `make ps` |
+| `pixi run logs keycloak` | Tail one service (omit the name for all) | `make logs S=keycloak` |
+| `pixi run smoke` | End-to-end verification | `make smoke` |
+| `pixi run urls` | Print every endpoint | `make urls` |
+| `pixi run psql keycloak` | psql shell against any database | `make psql DB=keycloak` |
+| `pixi run redis-cli 1` | redis-cli against the broker db | `make redis-cli N=1` |
+| `pixi run mc` | Shell with the S3 client (`mc`) configured | `make mc` |
+| `pixi run backup` | `pg_dumpall` to `backups/` | `make backup` |
+| `pixi run restore backups/x.gz` | Restore a dump | `make restore F=backups/x.gz` |
+| `pixi run keycloak-reimport` | Drop the realm db and re-import | `make keycloak-reimport` |
+| `pixi run keycloak-export` | Write the live realm back over the JSON | `make keycloak-export` |
+| `pixi run token dev dev` | Mint an access token | `make token U=dev P=dev` |
+| `pixi run config` | Render the resolved compose configuration | `make config` |
+| `pixi run lint` | Validate compose, shell, YAML, JSON, Python | `make lint` |
+| `pixi run test` | Prove the checks and scripts hold their contracts | — |
+| `pixi run ci` | The done-gate: lint + test | — |
+
+Every script behind these tasks also runs standalone — `./scripts/urls.sh`,
+`./scripts/wait-healthy.sh` — so none of this logic is trapped in a task runner.
 
 ## Data and persistence
 
@@ -209,8 +247,8 @@ pgadmin-data   redisinsight-data             flower-data
 prometheus-data               loki-data      tempo-data     grafana-data
 ```
 
-- `make down` / `make stop` — containers go away, **data stays**
-- `make destroy` — containers **and all volumes** deleted; requires typing `destroy`
+- `pixi run down` / `pixi run stop` — containers go away, **data stays**
+- `pixi run destroy` — containers **and all volumes** deleted; requires typing `destroy`
 
 Verified: with markers written into Postgres, Redis, Keycloak, Silo, Mailpit and
 Grafana, a full `down` followed by `up` returns every one of them intact.
@@ -219,7 +257,7 @@ Grafana, a full `down` followed by `up` returns every one of them intact.
 
 Telemetry backends keep data far longer than you usually need locally: Prometheus
 15 days, Tempo 7 days, Loki until compaction. If the volumes grow inconveniently,
-`make destroy` is the blunt fix; per-service retention lives in the config files
+`pixi run destroy` is the blunt fix; per-service retention lives in the config files
 under `docker/`.
 
 When querying Prometheus for a short-lived series, use `/api/v1/series` or a small
