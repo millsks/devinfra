@@ -1,0 +1,22 @@
+# Tool configuration only. This repository ships no Python package — the two scripts
+# under scripts/ are lint tooling — so there is no [project] table and nothing to build.
+
+[tool.ruff]
+line-length = 120
+src = ["scripts"]
+# The matrix floor, matching [tool.mypy]. Without it ruff assumes py39 and
+# misfiles stdlib tomllib as a third-party import.
+target-version = "py312"
+
+[tool.ruff.lint]
+select = ["E", "F", "I", "UP", "B", "RUF", "D"]
+ignore = ["E501"]
+
+[tool.ruff.lint.pydocstyle]
+convention = "google"
+
+[tool.mypy]
+python_version = "3.12"
+strict = true
+warn_return_any = true
+warn_unused_configs = true

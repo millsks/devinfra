@@ -181,14 +181,6 @@ config: ## Render the fully resolved compose configuration
 	@$(COMPOSE) --profile admin --profile observability config
 
 .PHONY: lint
-lint: ## Validate compose, shell scripts, YAML, and JSON
-	@$(COMPOSE) --profile admin --profile observability config -q && echo "compose.yaml OK"
-	@if command -v shellcheck >/dev/null 2>&1; then \
-		shellcheck scripts/*.sh docker/postgres/initdb/*.sh && echo "shellcheck OK"; \
-	else echo "shellcheck not installed — skipping"; fi
-	@python3 -c "import json,sys; [json.load(open(f)) for f in sys.argv[1:]]; print('JSON OK')" \
-		docker/keycloak/realms/*.json docker/pgadmin/servers.json
-	@python3 -c "import sys,yaml; [yaml.safe_load(open(f)) for f in sys.argv[1:]]; print('YAML OK')" \
-		docker/otel/*.yaml docker/loki/*.yaml docker/tempo/*.yaml \
-		docker/prometheus/*.yml docker/grafana/provisioning/*/*.yaml 2>/dev/null \
-		|| echo "PyYAML not installed — skipping YAML check"
+lint: ## Deprecated: forwards to `pixi run lint`
+	@echo "make lint is deprecated — run 'pixi run lint'. Forwarding." >&2
+	@pixi run lint

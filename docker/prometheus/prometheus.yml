@@ -20,13 +20,13 @@ scrape_configs:
   # via OTLP and it re-exposes in Prometheus format.
   - job_name: otel-collector
     static_configs:
-      - targets: ["otel-collector:8888"] # collector self-telemetry
+      - targets: ["otel-collector:8888"]  # collector self-telemetry
         labels:
           component: collector
 
   - job_name: otel-collector-apps
     static_configs:
-      - targets: ["otel-collector:8889"] # metrics forwarded from instrumented apps
+      - targets: ["otel-collector:8889"]  # metrics forwarded from instrumented apps
         labels:
           component: application
 
@@ -54,6 +54,10 @@ scrape_configs:
     static_configs:
       - targets: ["minio:9000"]
 
+  # yamllint disable rule:comments-indentation
+  # ^ This trailing block is indented to the job-list level, which is correct, but it
+  #   is the last thing in the file, so yamllint compares it against the preceding
+  #   mapping value instead. One rule, re-enabled at the end of the block below.
   # Postgres and Redis have no built-in /metrics endpoint. Add the exporters to
   # compose.yaml and uncomment to enable:
   #   prometheuscommunity/postgres-exporter
@@ -66,3 +70,4 @@ scrape_configs:
   # - job_name: redis
   #   static_configs:
   #     - targets: ["redis-exporter:9121"]
+  # yamllint enable rule:comments-indentation

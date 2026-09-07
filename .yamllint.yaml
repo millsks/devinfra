@@ -1,0 +1,20 @@
+# yamllint configuration for devinfra.
+#
+# Extends the shipped default. Rules are adjusted only where this repository's
+# configs legitimately differ from yamllint's defaults, and every rule stays
+# enabled — a blanket disable would recreate the silent skip in a new form.
+# Run with --strict so warnings fail the task too.
+extends: default
+
+rules:
+  # compose.yaml carries long image references and "${VAR:-default}:port"
+  # publish strings that wrap badly. 120 matches the repo's prose width and
+  # still catches a genuinely runaway line.
+  line-length:
+    max: 120
+
+  # None of these are multi-document streams, and none of the consumers
+  # (compose, Grafana provisioning, Prometheus, Loki, Tempo, OTel) need a
+  # start marker. Enforce their consistent absence rather than ignoring it.
+  document-start:
+    present: false
