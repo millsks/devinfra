@@ -14,7 +14,7 @@ preserves your data — only an explicit `pixi run destroy` throws it away.
 | **Silo** | 2026-09-03 | S3-compatible object storage (maintained MinIO fork) | http://localhost:9101 (API `:9100`) |
 | **Mailpit** | 1.31 | Catches all outbound SMTP | http://localhost:8025 (SMTP `:1025`) |
 | **pgAdmin** | 9.17 | PostgreSQL web console | http://localhost:5050 |
-| **RedisInsight** | 2.70 | Redis web console | http://localhost:5540 |
+| **RedisInsight** | 3.8 | Redis web console | http://localhost:5540 |
 | **Flower** | 2.1 | Celery task monitoring | http://localhost:5555 |
 | **OTel Collector** | 0.160 | Single OTLP ingest point | `localhost:4317` (gRPC) / `:4318` (HTTP) |
 | **Prometheus** | 3.14 | Metrics | http://localhost:9090 |

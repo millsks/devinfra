@@ -266,7 +266,7 @@ services:
 
   redisinsight:
     <<: *defaults
-    image: redis/redisinsight:${REDISINSIGHT_VERSION:-2.70}
+    image: redis/redisinsight:${REDISINSIGHT_VERSION:-3.8.0}
     container_name: devinfra-redisinsight
     profiles: [admin]
     depends_on:
