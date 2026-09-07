@@ -9,11 +9,26 @@
 #   observability  otel-collector, prometheus, loki, tempo, grafana
 #
 # Select profiles with COMPOSE_PROFILES in .env, or `--profile <name>` per run.
+#
+# Services are moving out of this file one at a time. An extracted service lives in
+# services/<name>/ with its config and seed data beside it, and is reassembled here by
+# the `include:` list below — which is the record of what has moved so far.
 
 name: ${COMPOSE_PROJECT_NAME:-devinfra}
 
 # ---------------------------------------------------------------------------
+# Modules — one file per extracted service, reassembled here
+# ---------------------------------------------------------------------------
+include:
+  - ./services/postgres/compose.yaml
+
+# ---------------------------------------------------------------------------
 # Reusable fragments
+#
+# Anchors are document-scoped, so these reach only the services still inlined in
+# this file. An extracted module gets the same three keys through
+# `extends: {file: ../../common/base.yaml, service: defaults}`; common/base.yaml
+# is an extends source only and is never named above.
 # ---------------------------------------------------------------------------
 x-restart: &restart
   restart: unless-stopped
@@ -30,44 +45,6 @@ x-defaults: &defaults
   networks: [devinfra]
 
 services:
-  # =========================================================================
-  # PostgreSQL 17 — primary datastore, Celery result backend option,
-  # and Keycloak's persistence layer
-  # =========================================================================
-  postgres:
-    <<: *defaults
-    image: pgvector/pgvector:${POSTGRES_VERSION:-0.8.6-pg17}
-    container_name: devinfra-postgres
-    ports:
-      - "${BIND_ADDRESS:-127.0.0.1}:${POSTGRES_PORT:-5432}:5432"
-    environment:
-      POSTGRES_USER: ${POSTGRES_USER:-devinfra}
-      POSTGRES_PASSWORD: ${POSTGRES_PASSWORD:-devinfra}
-      POSTGRES_DB: ${POSTGRES_DB:-devinfra}
-      POSTGRES_EXTRA_DATABASES: ${POSTGRES_EXTRA_DATABASES:-}
-      # scram-sha-256 for anything reaching the container over TCP.
-      POSTGRES_HOST_AUTH_METHOD: scram-sha-256
-      POSTGRES_INITDB_ARGS: "--auth-host=scram-sha-256 --data-checksums"
-    volumes:
-      # The mount path is version-specific. PostgreSQL 17 keeps PGDATA at
-      # /var/lib/postgresql/data; 18 moved it to /var/lib/postgresql/18/docker
-      # and declares the volume one level up at /var/lib/postgresql. If you ever
-      # move to 18, this path must change too or the database stops persisting
-      # without any error.
-      - postgres-data:/var/lib/postgresql/data
-      - ./docker/postgres/postgresql.conf:/etc/postgresql/postgresql.conf:ro
-      - ./docker/postgres/initdb:/docker-entrypoint-initdb.d:ro
-    command: ["postgres", "-c", "config_file=/etc/postgresql/postgresql.conf"]
-    healthcheck:
-      # -h forces a TCP connection so the check also proves the listener is up,
-      # not just the local socket.
-      test: ["CMD-SHELL", "pg_isready -h 127.0.0.1 -U ${POSTGRES_USER:-devinfra} -d ${POSTGRES_DB:-devinfra}"]
-      interval: 10s
-      timeout: 5s
-      retries: 10
-      start_period: 30s
-    shm_size: 256mb
-
   # =========================================================================
   # Redis 8 — cache (db 0), Celery broker (db 1), Celery backend (db 2)
   # =========================================================================

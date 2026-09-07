@@ -23,7 +23,7 @@
   "semanticCommitScope": "deps",
   "prBodyNotes": [
     "The README service table's Version column is **not** updated by this bot: it records abbreviated versions (`8.10`, `12.2`), so no regex can maintain it. Update the row for this image by hand before merging.",
-    "Merge only on a green CI run. `pixi run lint-pins` proves `.env.example` and the `compose.yaml` fallback moved together; the stack jobs prove the new image actually starts and passes the strict smoke suite."
+    "Merge only on a green CI run. `pixi run lint-pins` proves `.env.example` and the compose fallback moved together — the root `compose.yaml` and every `services/<name>/compose.yaml` module file; the stack jobs prove the new image actually starts and passes the strict smoke suite."
   ],
   "customManagers": [
     {
@@ -31,12 +31,23 @@
       "description": [
         "Every pinned tag lives in two files that must move together: the annotated",
         "`<NAME>_VERSION=` declaration in .env.example, and the `${<NAME>_VERSION:-tag}`",
-        "fallback in compose.yaml. Both are read by this single manager, so one image at",
+        "fallback in a compose file. Both are read by this single manager, so one image at",
         "one version resolves to one branch — and therefore one pull request carrying both",
         "edits. Split across two managers the extractions would still share a branch name,",
-        "but nothing would keep their versioning settings in step."
+        "but nothing would keep their versioning settings in step.",
+        "The compose half is no longer one file. Services are being extracted into",
+        "services/<name>/compose.yaml, reassembled by the root file's `include:` list, so",
+        "the third pattern selects every module file. Without it the bot would see only the",
+        ".env.example half of an extracted service's pin and open a pull request editing one",
+        "file alone — which lint-pins rejects. The pattern is anchored on the",
+        "repository-relative path: `/^compose\\.yaml$/` selects the root file only, because",
+        "every module file is also named compose.yaml."
       ],
-      "managerFilePatterns": ["/^\\.env\\.example$/", "/^compose\\.yaml$/"],
+      "managerFilePatterns": [
+        "/^\\.env\\.example$/",
+        "/^compose\\.yaml$/",
+        "/^services\\/[^/]+\\/compose\\.yaml$/"
+      ],
       "matchStrings": [
         "# renovate: datasource=(?<datasource>\\S+) depName=(?<depName>\\S+?)(?: versioning=(?<versioning>\\S+))?[ \\t]*\\n(?<varName>[A-Z][A-Z0-9_]*_VERSION)=(?<currentValue>\\S+)",
         "image:[ \\t]+(?<depName>[^\\s:]+):\\$\\{(?<varName>[A-Z][A-Z0-9_]*_VERSION):-(?<currentValue>[^}\\s]+)\\}"

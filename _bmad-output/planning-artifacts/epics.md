@@ -69,7 +69,7 @@ Technical requirements from the Architecture spine and Migration plan that const
 
 *Identity and namespaces*
 
-- Volume names are frozen permanently. A Module's `volumes:`/`networks:` stanzas contain the identifier and nothing else — every other key lives in Core, because omitted keys are last-include-wins (AD-5).
+- Volume names are frozen permanently. A Module's `volumes:` stanza contains the identifier and nothing else — every other key lives in Core, because omitted keys are last-include-wins. A Module never declares the shared `networks:` stanza: Core declares it with keys, and Compose v2 rejects any included file that names a keyed Core resource (AD-5, amended 2026-09-07).
 - The configuration namespace has two tiers: Module variables `<MODULE>_<CONCERN>`, and Contract variables with externally-dictated names registered to exactly one owning Module (AD-4).
 - Host ports are allocated from one Core-owned table; `docker compose config -q` is blind to port collisions and CI must check rendered config for duplicates (AD-17).
 - A Module declares what it needs from another Module as `x-requires:` in its own file; CI reconciles against the provider (AD-14).
