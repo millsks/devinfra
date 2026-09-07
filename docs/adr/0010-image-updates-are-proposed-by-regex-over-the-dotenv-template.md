@@ -117,3 +117,29 @@ Renovate is not a pixi dependency and is never run by `pixi run ci`: it needs No
 and a platform token. `npx --yes renovate --platform=local --dry-run=extract` is the real
 extraction and is documented in the README as evidence a maintainer gathers by hand;
 `--dry-run=full` is what shows the branch resolution above.
+
+## Amendment — 2026-09-07: the hosted App runs it, not a workflow
+
+The decision above is unchanged: one `customManagers` regex reading both files, one branch
+per image, gated locally by `pixi run lint-renovate`. Only who runs it has changed.
+`.github/workflows/renovate.yml` is deleted; the Mend-hosted Renovate GitHub App is
+installed on this repository and reads the same tracked `renovate.json`.
+
+Two instances is the reason. Both would read this configuration, resolve the same
+dependency at the same `newValue`, and therefore compute the same branch name — the pairing
+property this ADR relies on becomes a collision once two proposers share it. One of them
+had to go, and the App is the one with no secret to mint, scope or rotate.
+
+The `GITHUB_TOKEN` reasoning stands and does not apply to the App. That rule is about
+Actions' own token, whose pull requests trigger no `pull_request` workflow. `renovate[bot]`
+is a separate app installation, so its pull requests trigger `ci.yml` normally and
+`validate`, `stack` and `stack-podman` all run on them — the property the `RENOVATE_TOKEN`
+requirement existed to buy, now had for free.
+
+Two consequences above are superseded. There is no operator secret to supply before the bot
+does anything. And `renovate.yml` is no longer the second workflow here, so the self-test's
+per-workflow split has nothing to exercise it — the rule stays (`ci.yml` on `push` and
+`pull_request`; any other workflow scheduled or hand-started and unreachable by a change),
+because the next workflow added must still obey it. `ci.yml`'s `pull_request` trigger is now
+load-bearing for image updates rather than incidental to them, and `assert_renovate.py`
+still refuses every narrowing of it.

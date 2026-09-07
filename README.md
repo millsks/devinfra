@@ -180,8 +180,7 @@ pyproject.toml                  ruff and mypy settings (no package here)
 .yamllint.yaml                  YAML lint rules
 .gitattributes                  LF line endings on every checkout
 .github/workflows/ci.yml        CI: the static gate, and the stack on Docker and Podman
-.github/workflows/renovate.yml  the update bot, on a schedule; opens image-bump PRs
-renovate.json                   what the bot reads: one regex manager over the two files above
+renovate.json                   what the update bot reads: one regex manager over both files above
 Makefile                        deprecated shims forwarding to pixi tasks
 scripts/lib/common.sh           .env loading and defaults, sourced by the rest
 scripts/compose.sh              the container runtime, honouring DEVINFRA_COMPOSE
@@ -306,11 +305,11 @@ service. Nothing else about any check changes.
 
 ## Keeping images current
 
-Every pinned tag is watched by [Renovate](https://docs.renovatebot.com).
-`.github/workflows/renovate.yml` runs the bot weekly (and on demand from the
-Actions tab); each image whose upstream has moved arrives as its own pull
-request, which `ci.yml` validates exactly like a human's. Nothing is merged
-automatically — the bot proposes, CI gates, you decide.
+Every pinned tag is watched by [Renovate](https://docs.renovatebot.com), running
+as the Mend-hosted GitHub App installed on this repository. Each image whose
+upstream has moved arrives as its own pull request, which `ci.yml` validates
+exactly like a human's. Nothing is merged automatically — the bot proposes, CI
+gates, you decide.
 
 ### The annotation contract
 
@@ -356,14 +355,26 @@ npx --yes renovate --platform=local --dry-run=extract
 
 ### What the operator must supply
 
-The bot authenticates with a repository secret named **`RENOVATE_TOKEN`** — a
-fine-grained personal access token or a GitHub App installation token with
-`contents: write`, `pull-requests: write` and `issues: write` (the last for the
-dependency dashboard issue) on this repository. It is deliberately *not* the
-workflow's own `GITHUB_TOKEN`: a pull request opened with that token triggers no
-`pull_request` workflow, so the bot's proposals would arrive looking validated
-with nothing having run. Without the secret the bot cannot authenticate and
-proposes nothing, so set it before relying on the schedule.
+Nothing. The App holds its own installation credentials, so there is no secret to
+mint, scope or rotate here — the repository ships `renovate.json` and the App
+supplies everything else. That is also why there is no workflow of our own: a
+self-hosted run and the App would both read this configuration, propose the same
+updates and race each other over identical branch names (`renovate/grafana-loki-3.x`
+is one branch, not two), so exactly one of them may exist. The App is the one.
+
+It runs on Mend's schedule rather than one written down here, which means the
+cadence is not this repository's to state. What the App is currently seeing is:
+the **Dependency Dashboard** issue it maintains lists every dependency the
+`customManagers` regexes detected, so if a pin you expect is missing from that
+issue, the regex stopped matching it — check the dashboard before assuming a tag
+is simply current.
+
+Its pull requests are checked like anyone else's. `renovate[bot]` is a separate
+app installation, not Actions' own `GITHUB_TOKEN`, so its pull requests do trigger
+`ci.yml` — `validate`, `stack` and `stack-podman` all run on them, and a bump that
+breaks the stack is red before you look at it. (A pull request opened with a
+workflow's `GITHUB_TOKEN` triggers no `pull_request` workflow at all; that is the
+trap the App sidesteps by not being a workflow.)
 
 One thing a bot pull request cannot do for you: the service table at the top of
 this README abbreviates versions (`8.10`, `12.2`), so no regex can maintain it.
