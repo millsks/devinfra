@@ -37,3 +37,43 @@ source_spec: `spec-1-4-the-stack-runs-under-podman.md`
 severity: low
 reason: `scripts/lib/common.sh` does `set -a; source .env`, so a value such as `PASSWORD=ab$cd` is exported as `ab` and, because an exported value beats `.env`, Compose then interpolates the truncated value. This pre-dates the story - sixteen scripts already source `common.sh`, including `up-core.sh`, `smoke-test.sh` and `backup.sh` - and this diff extends it to the five repointed tasks, which makes the surface more consistent rather than less. Verified as inert for this repository today: `docker compose --profile admin --profile observability config` and `pixi run config` render byte-identical output. The fix is a decision about whether the scripts parse `.env` themselves rather than sourcing it, which belongs with the seam, not with this story.
 status: open
+
+### DW-6: Nothing checks the new `# Image currency` block in `.env.example` against the pins it describes.
+origin: spec-deferred 9f5fcd0b572d
+location: .env.example (# Image currency block) / scripts/assert_pins.py
+source_spec: `spec-1-5-every-image-brought-current.md`
+severity: medium
+reason: assert_pins.py deliberately skips comment lines, so the block can claim a tag or a lag that no longer matches the declaration twenty lines below it. It is the artifact CAP-20's "dated written reason" leans on, so silent drift there un-meets the criterion without any gate noticing. Settling it means a parser for the block's own lines, which is a second check rather than a fix to this one.
+status: open
+
+### DW-7: The README service table's Version column is guarded by nothing.
+origin: spec-deferred 95b119121e13
+location: README.md:11-23
+source_spec: `spec-1-5-every-image-brought-current.md`
+severity: medium
+reason: The spec makes README the third file that must move with every pin, but the column records truncated versions (`8.10` for `8.10.1-alpine`, `1.31` for `v1.31.1`), so an exact-match check is not free. Grepping scripts/ for README finds only a comment. A bump that forgets the column passes ci and ci-stack.
+status: open
+
+### DW-8: Every image bump is verified only against empty volumes; the upgrade-over-existing-data path is exercised nowhere, and the pgvector half of bump 1 is a no-op on an existing volume.
+origin: spec-deferred 8c6b86bf23c2
+location: scripts/smoke-test.sh (PostgreSQL section) / .github/workflows/ci.yml
+source_spec: `spec-1-5-every-image-brought-current.md`
+severity: medium
+reason: CI runs ci-stack on ephemeral runners, so both stack jobs test a first boot exclusively. Moving pgvector 0.8.1 -> 0.8.6 installs the new library but leaves pg_extension.extversion at 0.8.1 until ALTER EXTENSION vector UPDATE runs, which nothing in this repository does; smoke-test.sh asserts only that the <-> operator works, which is true on both. The same blind spot covers the Keycloak three-minor jump against a 26.4.0-created database. Settling it needs a CI job that starts the stack at the previous pins and restarts it at the new ones on the same volumes, plus an extversion assertion in the smoke suite.
+status: open
+
+### DW-9: Bumps 9-11 are recorded only as operator_actions prose and `.env.example` comments, so the deferred-work sweep never sees them and nothing links the lag to story 1-6.
+origin: spec-deferred 3f25266bd1aa
+location: .env.example (# Image currency block) / operator_actions
+source_spec: `spec-1-5-every-image-brought-current.md`
+severity: high
+reason: Sibling stories 1-1 through 1-4 route carry-over through this `deferred` list, which is what populates deferred-work.md. This entry exists so the outstanding RedisInsight, Loki and Tempo+Grafana upgrades are visible to that sweep as well as to the operator.
+status: open
+
+### DW-10: The baseline artifact records only the "before" half of the comparison it was built for.
+origin: spec-deferred a05c4f669f07
+location: _bmad-output/implementation-artifacts/baseline-1-5-every-image-brought-current.md
+source_spec: `spec-1-5-every-image-brought-current.md`
+severity: low
+reason: baseline-1-5-…md captures the pre-wave pins, the 45-check smoke breakdown and the twelve named volumes, and states that no bump may add, remove or rename a volume — but no "after" section ever evidences that. The closing 45/0/0 run, the token-claims check and the unchanged volume list exist only as prose in the Spec Change Log.
+status: open
