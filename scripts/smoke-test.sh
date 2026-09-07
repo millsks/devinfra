@@ -8,13 +8,45 @@
 #   ./scripts/smoke-test.sh
 #
 # Exits non-zero if any check fails. Services belonging to a profile that is not
-# currently running are skipped rather than failed.
+# currently running are skipped rather than failed — FR-5, and what a developer
+# running a partial selection wants.
+#
+#   SMOKE_STRICT=1 ./scripts/smoke-test.sh
+#
+# Strict mode is the opposite bargain, and it is what CI runs. CI starts every
+# profile, so a service that is not running is evidence the stack did not come
+# up, not a selection the caller made. Under SMOKE_STRICT=1 a skip is recorded as
+# a failure naming the absent service; nothing else about any check changes.
 set -uo pipefail
 
-cd "$(dirname "$0")/.." || exit 1
+# shellcheck source=scripts/lib/common.sh
+source "$(dirname "$0")/lib/common.sh"
 
-# shellcheck disable=SC1091
-[[ -f .env ]] && set -a && source .env && set +a
+# Tools this suite cannot run without: curl for every HTTP check, openssl for the
+# trace and span IDs the OTLP round-trip is identified by, base64 for decoding the
+# Keycloak token whose claims the realm mappers are asserted on. A missing one
+# fails here, naming it, before a single check runs — the alternative is a run in
+# which a dozen checks fail for one reason nothing reports. This is a fail-loud
+# preflight, not a presence branch: there is no arm that passes having checked
+# nothing.
+REQUIRED_TOOLS=(curl openssl base64)
+MISSING_TOOLS=""
+for tool in "${REQUIRED_TOOLS[@]}"; do
+    type -P "$tool" >/dev/null 2>&1 || MISSING_TOOLS="${MISSING_TOOLS:+${MISSING_TOOLS}, }${tool}"
+done
+if [[ -n "${MISSING_TOOLS}" ]]; then
+    printf 'smoke-test: required tool not found on PATH: %s\n' "${MISSING_TOOLS}" >&2
+    exit 1
+fi
+
+# The runtime itself. Without this, an unreachable runtime makes every `running`
+# call answer "not running": the default suite would then exit 0 having checked
+# nothing, and the strict suite would fail a dozen checks without once naming the
+# actual cause. Compose's own diagnostic is left on stderr.
+if ! compose version >/dev/null; then
+    printf 'smoke-test: container runtime not reachable: %s\n' "${DEVINFRA_COMPOSE:-docker compose}" >&2
+    exit 1
+fi
 
 BIND="${BIND_ADDRESS:-127.0.0.1}"
 PASS=0
@@ -35,13 +67,27 @@ fail() {
     FAIL=$((FAIL + 1))
 }
 skip() {
+    # FR-5 and FR-16 disagree only about who is asking. A developer running a
+    # partial selection wants a skip; CI, which starts every profile, must treat
+    # one as evidence the stack did not come up. One branch, not a second suite.
+    if [[ "${SMOKE_STRICT:-}" == "1" ]]; then
+        fail "$1" "strict mode: nothing may be skipped"
+        return
+    fi
     printf '  %s  %s\n' "$(dim SKIP)" "$(dim "$1")"
     SKIP=$((SKIP + 1))
 }
 
 section() { printf '\n\033[1m%s\033[0m\n' "$1"; }
 
-running() { docker compose ps --services --filter status=running 2>/dev/null | grep -qx "$1"; }
+# The service list is captured before it is filtered rather than piped straight
+# into grep: shellcheck cannot see a sourced function through a pipeline, and the
+# runtime call is the one thing here that must stay on the compose seam.
+running() {
+    local names
+    names="$(compose ps --services --filter status=running 2>/dev/null)"
+    printf '%s\n' "$names" | grep -qx "$1"
+}
 
 # assert <label> <expected-substring> <actual>
 assert_contains() {
@@ -52,7 +98,7 @@ assert_contains() {
     fi
 }
 
-dc() { docker compose exec -T "$@"; }
+dc() { compose exec -T "$@"; }
 
 # ===========================================================================
 section "PostgreSQL"

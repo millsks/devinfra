@@ -1,0 +1,89 @@
+# Continuous verification for the devinfra stack.
+#
+# Every job's work is a `pixi run <task>` invocation. No tool version is named
+# here and nothing is installed with a package manager: the versions come from
+# the committed pixi.lock, so the checks that run here are byte-for-byte the
+# ones a contributor runs locally. A workflow that declared its own versions
+# would be a second, drifting definition of what CI checks.
+#
+# Both jobs are time-bounded. `timeout-minutes` enforces the 15-minute rule
+# rather than measuring it: a breach cancels the job and turns the run red,
+# which is the signal to tier the matrix — never to drop a check.
+name: CI
+
+# Neither job needs more than the checkout, so the token is read-only and is not
+# left on disk for later steps to pick up.
+permissions:
+  contents: read
+
+'on':
+  push:
+    branches: [main]
+  pull_request:
+    branches: [main]
+
+# A superseded pull-request run proves nothing about the head commit. A push to
+# main is never superseded: cancelling it would leave that commit permanently
+# unverified, which is exactly what this workflow exists to prevent.
+concurrency:
+  group: ci-${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: ${{ github.event_name == 'pull_request' }}
+
+jobs:
+  validate:
+    name: validate
+    runs-on: ubuntu-latest
+    # The static gate. It starts nothing, but lint-compose and lint-config both
+    # ask the container runtime to resolve the model, so Docker is required here
+    # too — it is the stack that is not started, not the runtime that is unused.
+    timeout-minutes: 10
+    steps:
+      - name: Check out the repository
+        uses: actions/checkout@v4
+        with:
+          persist-credentials: false
+
+      - name: Set up pixi
+        # The action is pinned; the tool versions it installs come from pixi.lock.
+        uses: prefix-dev/setup-pixi@v0.8.1
+        with:
+          cache: true
+
+      - name: Run the done-gate
+        run: pixi run ci
+
+  stack:
+    name: stack
+    runs-on: ubuntu-latest
+    # Runs in parallel with validate, so the run's wall clock is the slower job
+    # rather than the sum of both.
+    timeout-minutes: 15
+    env:
+      # Stated here rather than inherited from .env so the workflow says plainly
+      # which services this job brings up. The self-test asserts this names
+      # exactly the profiles `docker compose config --profiles` declares, so a
+      # profile added later turns the gate red until CI starts it too.
+      COMPOSE_PROFILES: admin,observability
+    steps:
+      - name: Check out the repository
+        uses: actions/checkout@v4
+        with:
+          persist-credentials: false
+
+      - name: Set up pixi
+        uses: prefix-dev/setup-pixi@v0.8.1
+        with:
+          cache: true
+
+      - name: Start the stack, wait for health, run the strict smoke suite
+        run: pixi run ci-stack
+
+      # Diagnostics, not work: they run only after the step above has already
+      # failed the job, and cannot turn a red run green.
+      - name: Container status
+        if: failure()
+        run: pixi run ps
+
+      - name: Container logs
+        if: failure()
+        run: docker compose --profile admin --profile observability logs --no-color --tail=200
