@@ -170,7 +170,9 @@ Every Service added to the Catalog ships with five things: a Healthcheck, at lea
 - The Smoke Test check exercises function, not liveness: a search Service indexes and retrieves a document; a broker Service publishes and consumes a message.
 - Every Endpoint Contract appears in the connection-string documentation (FR-12) using the same variable names an application would use.
 
-#### FR-7: Message Broker
+#### FR-7: ~~Message Broker~~ WITHDRAWN
+
+**Withdrawn after review.** Redis already brokers Celery, which is the only messaging pattern in use. A dedicated broker would add a container and model semantics nothing needs. The ID is retired and never reused.
 
 A developer can run a dedicated message broker alongside or instead of Redis-as-broker, and reach it via a documented Endpoint Contract.
 
@@ -180,7 +182,9 @@ A developer can run a dedicated message broker alongside or instead of Redis-as-
 - Redis retains its existing broker role; the new Service is additive and the two can run simultaneously without port collision.
 - The existing `maxmemory-policy noeviction` Smoke Test check still passes. If the broker role ever moves off Redis, the README rationale for `noeviction` is updated in the same change.
 
-#### FR-8: Search
+#### FR-8: ~~Search~~ WITHDRAWN
+
+**Withdrawn after review.** Postgres full-text search covers lexical search and pgvector covers vector similarity. A separate engine would buy nothing. The ID is retired and never reused.
 
 A developer can run a full-text search engine as a Module and reach it via a documented Endpoint Contract.
 
@@ -202,7 +206,9 @@ A developer can run OpenBao as a Module, pre-initialized and unsealed, with a kn
 
 *Verified feasible: the official `openbao/openbao` image defaults to dev mode, starts unsealed with a configurable root token, mounts KV v2 at `secret/` with no enable step, ships `wget` for a healthcheck, and listens on 8200 — which does not collide with any port devinfra currently allocates. Details in [addendum.md](addendum.md) §C.*
 
-#### FR-10: Cloud Service Emulation
+#### FR-10: ~~Cloud Service Emulation~~ WITHDRAWN
+
+**Withdrawn after review.** Object storage is the only AWS surface in use; no non-S3 AWS service is needed. The ID is retired and never reused. The licensing and host-access rules this FR carried survive in the catalog admission policy (AD-20), which binds every Service.
 
 A developer can run AWS service emulation beyond the S3 surface MinIO already covers, using only components under an OSI-approved license with no authentication token and no privileged host access.
 
@@ -229,6 +235,31 @@ Columnar analytics, local model inference, and durable workflow orchestration ar
 **Description:** Several things in the repository are provisioned but empty, or documented but not demonstrated. Grafana has a dashboard provider watching a directory containing only `.gitkeep`. The README lists connection strings but nothing proves them. `make backup` covers Postgres and nothing else, so a `make destroy` loses every bucket, realm change, and dashboard regardless. The Gotchas are a README section rather than an artifact. This feature closes the gap between provisioned and useful. Realizes UJ-4, UJ-6.
 
 **Functional Requirements:**
+
+#### FR-20: Image Currency
+
+The Catalog runs no image whose pinned tag is known to be superseded upstream.
+
+**Consequences (testable):**
+
+- Every pinned tag either matches the current upstream release or carries a dated written reason for lagging.
+- Currency is verified against upstream, never against what is running — a pin in `.env.example` states what runs, never what is current.
+- A tag whose upstream project is archived is treated as a replacement decision, not a bump, and admitted only under FR-10's licensing and host-access rules.
+
+*Added after epics review: Story 1.5 delivers the initial bring-current wave and previously traced to no requirement. FR-17 covers keeping tags current going forward; this covers the state of being current.*
+
+#### FR-21: Graph Queries Over Relational Data
+
+A developer can run graph traversal and path queries over the same data that pgvector indexes, inside one Postgres instance.
+
+**Consequences (testable):**
+
+- A Smoke Test check creates a graph, inserts nodes and edges, and returns the expected path from a traversal.
+- Graph, relational and vector data share one database and one transaction boundary — no second datastore, no synchronisation.
+- The extension is **not** added to `shared_preload_libraries`; sessions load it explicitly. Preloading breaks databases without the extension installed, and this stack has several.
+- The image providing it is built from the pinned upstream Postgres image plus a distribution package, with no compilation from source.
+
+*Added after review: the graph requirement is about data already in Postgres, which rules out a separate graph database — that would create two sources of truth with no JOIN and no shared transaction.*
 
 #### FR-12: Endpoint Contract Documentation
 
@@ -406,7 +437,7 @@ Personal-stakes project, so the honest metric is short:
 
 ## 8. Open Questions
 
-1. **Consumption model — how does a Consumer Project use devinfra?** Cloned standalone (today), pulled in as a reusable base via Compose `include` or a submodule, or scaffolded by a CLI. Explicitly deferred, but it constrains the Module boundary design, so the architect must at minimum avoid foreclosing paths. Cost analysis per path is in [addendum.md](addendum.md).
+1. ~~**Consumption model — how does a Consumer Project use devinfra?**~~ **RESOLVED — standalone checkout.** A project consumes the services devinfra provides; if they are not already running on the machine, the developer clones devinfra and starts them. Consuming projects are never modified to embed or vendor devinfra, and devinfra never generates files into them. The reusable-base and CLI-scaffold paths are not pursued. AD-6's closure-validity still keeps the reusable-base option reachable at no additional cost, but nothing depends on it.
 2. ~~**Does Keycloak 26.4 support non-destructive realm re-import?**~~ **RESOLVED — the database drop is unnecessary, but "non-destructive" needs qualifying.** Verified two ways: empirically against the running 26.4.0 container with a throwaway probe realm, and against the Keycloak 26.4 source.
 
    **What it means for the product.** Dropping the `keycloak` database is not required in order to re-import a realm, so `make keycloak-reimport` changes — that behavior change is owned by FR-18. But the available overwrite is *remove-and-recreate*, not merge: runtime state in the target realm that is absent from the JSON is still lost, while other realms and the database survive. Two operational caveats matter to whoever builds this — run against a live container the import **exits non-zero** on a management-port collision, and the running server **serves stale cached realm data** until restarted, so the database and the admin API disagree silently. Both become Gotcha Register entries.

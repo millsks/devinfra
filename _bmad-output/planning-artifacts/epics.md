@@ -38,7 +38,9 @@ FR-15: Backup and restore cover every stateful Service in the Selection, not Pos
 FR-16: CI starts the Stack and runs the Smoke Test on every change to the repository, and the result gates merge. No validation check may silently skip.
 FR-17: Image tag updates are proposed automatically and validated by CI before merge.
 FR-18: Documented infrastructure failure modes are a maintained artifact with a consistent shape — symptom, cause, fix, affected versions.
-FR-19: The Stack runs on container runtimes other than Docker Desktop, verified by the Smoke Test actually passing rather than by documentation alone.
+FR-19: The Stack runs under Podman, the preferred runtime, as well as Docker — verified by the Smoke Test actually passing rather than by documentation alone.
+FR-20: The Catalog runs no image whose pinned tag is known to be superseded upstream.
+FR-21: A developer can run graph traversal and path queries over the same data pgvector indexes, inside one Postgres instance.
 
 ### NonFunctional Requirements
 
@@ -115,10 +117,10 @@ Every FR maps to exactly one epic. FR-11 is reserved and intentionally unmapped.
 | FR-4 | Epic 2 | Bundles — curated sets that work together |
 | FR-5 | Epic 2 | Modular Smoke Test — checks follow the Selection |
 | FR-6 | Epic 2 | Module Completeness Contract — the five-item bar |
-| FR-7 | Epic 4 | Message broker Module |
-| FR-8 | Epic 4 | Search Module |
+| FR-7 | — | **Withdrawn** — Redis brokers Celery; no dedicated broker needed |
+| FR-8 | — | **Withdrawn** — Postgres FTS + pgvector cover search |
 | FR-9 | Epic 4 | OpenBao secrets Module |
-| FR-10 | Epic 4 | AWS service emulation beyond S3 |
+| FR-10 | — | **Withdrawn** — S3 is the only AWS surface in use |
 | FR-12 | Epic 3 | Endpoint Contract documentation, generated not hand-written |
 | FR-13 | Epic 3 | Grafana dashboards provisioned on first boot |
 | FR-14 | Epic 3 | Worked example proving the contracts end to end |
@@ -126,7 +128,9 @@ Every FR maps to exactly one epic. FR-11 is reserved and intentionally unmapped.
 | FR-16 | Epic 1 | Continuous verification that cannot silently skip |
 | FR-17 | Epic 1 | Dependency currency via Renovate |
 | FR-18 | Epic 3 | Gotcha Register as a maintained artifact |
-| FR-19 | Epic 1 | Runtime portability, proven by a passing Smoke Test |
+| FR-19 | Epic 1 | Runs under Podman, proven by a passing Smoke Test |
+| FR-20 | Epic 1 | No image pinned to a known-superseded tag |
+| FR-21 | Epic 4 | Graph traversal in the same Postgres instance as pgvector |
 
 **NFR coverage.** NFRs are cross-cutting and are enforced by acceptance criteria across epics rather than owned by one:
 NFR-1 (data durability) gates every story in Epic 2 and FR-15 in Epic 3 · NFR-2 (isolation) and NFR-4 (reproducibility) are asserted by Epic 1's CI · NFR-3 (startup) is verified by Epic 2's Selection stories · NFR-5 and NFR-6 (fail loud, configuration honesty) are Epic 1 CI assertions · NFR-7 (resource cost stated) is an Epic 2 Bundle documentation criterion · NFR-8 (security posture fixed) is an admission gate in Epic 4 and a rejection criterion everywhere.
@@ -143,7 +147,7 @@ Four epics, sequenced to match the confirmed MVP ordering: durability → modula
 
 The maintainer can change anything — an image tag, a config, a service — and know within minutes whether the stack still genuinely works, on more than one container runtime. Validation stops lying about what it checked.
 
-**FRs covered:** FR-16, FR-17, FR-19
+**FRs covered:** FR-16, FR-17, FR-19, FR-20
 **Depends on:** nothing. Delivers complete value against today's monolithic `compose.yaml`.
 
 ### Epic 2: Take only what you need
@@ -165,7 +169,7 @@ What the stack provisions, it also delivers: connection strings in one place, da
 
 The maintainer reaches for a message broker, full-text search, secrets, or AWS emulation and finds it already curated — each arriving complete, verified, and admitted under a policy rather than by whim.
 
-**FRs covered:** FR-7, FR-8, FR-9, FR-10
+**FRs covered:** FR-9, FR-21 (FR-7, FR-8 and FR-10 withdrawn)
 **Builds on:** Epic 2 — every new Service enters through the Module contract established there.
 
 ---
@@ -263,7 +267,7 @@ So that upgrading stops being a manual chore I postpone. (FR-17)
 
 As the maintainer,
 I want the eleven stale pins updated with each upgrade verified,
-So that the stack is not accumulating known-fixed bugs.
+So that the stack is not accumulating known-fixed bugs. (FR-20)
 
 **Acceptance Criteria:**
 
@@ -617,6 +621,8 @@ So that I do not discover a licensing or host-access problem after building on i
 **When** it is proposed
 **Then** it is rejected: the posture is fixed, not improved (NFR-8)
 
+*Stories 4.3, 4.4 and 4.5 were withdrawn with FR-7, FR-8 and FR-10. Their numbers are not reused.*
+
 ### Story 4.2: Secrets available locally
 
 As the maintainer,
@@ -641,74 +647,6 @@ So that I can develop against a real secrets API without an initialization ritua
 **When** it is inspected
 **Then** no HashiCorp Vault image or BUSL-licensed component appears anywhere (AD-20)
 
-### Story 4.3: A dedicated message broker
-
-As the maintainer,
-I want a real broker alongside Redis rather than only Redis-as-broker,
-So that I can develop against the messaging semantics my projects actually target. (FR-7)
-
-**Acceptance Criteria:**
-
-**Given** the Module is selected
-**When** the smoke check runs
-**Then** it publishes a message and consumes it — function, not liveness
-
-**Given** the broker and Redis running together
-**When** both are selected
-**Then** neither collides on a host port, and Redis retains its existing broker role (AD-17)
-
-**Given** the broker's data
-**When** the stack is cycled with `down` then `up`
-**Then** it persists (NFR-1)
-
-**Given** the existing `noeviction` smoke check on Redis
-**When** the suite runs
-**Then** it still passes; if the broker role ever moves off Redis, the README rationale is updated in the same change
-
-### Story 4.4: Full-text search
-
-As the maintainer,
-I want a search engine as a Module,
-So that I can build search features without standing one up per project. (FR-8)
-
-**Acceptance Criteria:**
-
-**Given** the Module is selected
-**When** the smoke check runs
-**Then** it indexes a document and retrieves it by query
-
-**Given** index data
-**When** the stack is cycled
-**Then** it persists (NFR-1)
-
-**Given** the Module
-**When** it is documented
-**Then** its relationship to the existing pgvector capability is stated — this covers lexical search, not vector similarity
-
-### Story 4.5: AWS services beyond object storage
-
-As the maintainer,
-I want emulation of the AWS services my projects use beyond S3,
-So that I can develop against them locally under an OSI license with no token and no socket mount. (FR-10)
-
-**Acceptance Criteria:**
-
-**Given** the emulation Modules
-**When** they start
-**Then** no component requires an account, token or licence key, and none mounts the host Docker socket (AD-20)
-
-**Given** at least one non-S3 AWS service
-**When** the smoke check runs
-**Then** it exercises that service's real function
-
-**Given** object storage already owning the S3 endpoint
-**When** the endpoint contract is written
-**Then** it states unambiguously which endpoint serves which service, and the contract variable has exactly one owning Module (AD-4)
-
-**Given** RDS and Cognito
-**When** scope is assessed
-**Then** they are explicitly out — Postgres already serves the RDS role and Keycloak already serves Cognito's
-
 ---
 
 ## Validation
@@ -728,3 +666,33 @@ Checks run against the completed breakdown before handing it to development.
 **File churn — overlap considered, consolidation rejected.** Three epics each touch `.env.example` and `scripts/`. The overlap is additive rather than rework: Epic 1 adds version variables and update annotations, Epic 2 adds the default Selection and the resolver, Epic 4 adds per-Service variables. Consolidation was rejected because real risk boundaries separate these epics — Epic 1's CI must exist before Epic 2's refactor so that breakage is caught, and Epic 2's Module contract must exist before Epic 4 admits Services through it. Merging them would produce a single 22-story epic with no feedback point between the refactor and its safety net.
 
 **Where a story is knowingly large.** Story 2.3 covers eight Module extractions and Story 1.5 covers eleven image bumps. Both are mechanical repetitions of a pattern proven in an earlier story, and both carry acceptance criteria requiring per-item commits so a failure stays attributable. Split either if a single dev session proves too small a container.
+
+### Story 4.6: Graph queries alongside vector search
+
+As the maintainer,
+I want graph traversal over the data already in Postgres,
+So that I can answer "what connects to this?" without standing up a second database and keeping it in sync. (FR-21)
+
+**Acceptance Criteria:**
+
+**Given** the Postgres Module
+**When** the image is built
+**Then** it derives from the pinned upstream image plus a distribution package, with no compilation from source
+**And** both the vector and graph extensions are available in the same instance
+
+**Given** a session needing graph queries
+**When** it runs
+**Then** it loads the extension explicitly per session
+**And** the extension is absent from `shared_preload_libraries` — preloading breaks `CREATE EXTENSION pg_stat_statements` and `TRUNCATE` in the extra databases this stack creates
+
+**Given** the smoke check
+**When** it runs
+**Then** it creates a graph, inserts nodes and edges, and a traversal returns the expected path
+
+**Given** relational, vector and graph data
+**When** they are queried
+**Then** they share one database and one transaction boundary (FR-21)
+
+**Given** this is the first image devinfra builds
+**When** CI runs
+**Then** it builds the image, and the base image tag stays explicitly pinned (NFR-4)
