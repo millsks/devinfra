@@ -2,7 +2,7 @@
 title: 'Every image brought current'
 type: 'chore'
 created: '2026-09-07'
-status: 'awaiting-operator'
+status: done
 baseline_revision: 'a99e27dc2baf1909ba3766b91db3de58c706dcff'
 review_loop_iteration: 0
 followup_review_recommended: true
@@ -358,3 +358,13 @@ against the current 14-reference tree and its own fixtures — no bump has been 
 - The three highest-risk bumps — RedisInsight 2→3, Loki, and Tempo 2→3 with Grafana 12→13 — are not applied. The span-metrics wiring that spans Tempo 3 and Grafana 13 remains unexercised by anything in this branch.
 - The workstation's container-runtime pull path is broken (`docker pull` hangs with no output, `hello-world` included, while the same registries answer curl in under 250 ms; a full Docker Desktop restart did not fix it). Every remaining bump is blocked behind repairing it — see `operator_actions`.
 - This run restored attempt 1's nine commits from the orchestrator's preserve ref rather than re-running eight verify-and-commit cycles. Each was smoke-verified when it was made; the restore was confirmed by a green `pixi run ci` and one strict smoke run covering bumps 1-8 collectively at the tip, not eight separate reruns.
+
+## Operator Confirmation
+
+Confirmed 2026-09-07: the external actions this story owed were carried out.
+
+- Repair this workstation's container-runtime registry transport, then apply the three remaining bumps. `docker pull` hangs indefinitely with no output — including on `hello-world:latest` — while `registry-1.docker.io` and `auth.docker.io` answer `curl` from the same host in under 250 ms. This is a daemon fault outside the repository and outside an agent's reach; no image that is not already in the local cache can be fetched until it is fixed.
+- Once pulls work, apply bump 9 (`REDISINSIGHT_VERSION` `2.70` -> `3.8.0`), then bump 10 (`LOKI_VERSION` `3.5.7` -> `3.7.7`), then bump 11 (`TEMPO_VERSION` `2.9.0` -> `3.0.3` **and** `GRAFANA_VERSION` `12.2.0` -> `13.2.1` in one commit). Each edits `.env.example`, the matching `compose.yaml` fallback and the README service table's Version column together, and is committed only after `pixi run ci` plus a green strict smoke run against a stack actually running that image. Delete the pin's entry from the `# Image currency` block in `.env.example` as it lands.
+- Do not apply these bumps statically without the smoke run. All four tags were confirmed present for `linux/amd64` and `linux/arm64` by direct registry API call on 2026-09-07, so they will resolve — but a bump that is green only in the linter and never exercised is exactly the silent-skip class of defect this epic exists to remove. Tempo 3.0 and Grafana 13 in particular both touch the span-metrics path, and the OTLP round-trip through the collector into Tempo, Loki and Prometheus is their gate.
+
+_Appended by the bmad-loop orchestrator (`bmad-loop confirm`, #335): a human confirmed these external actions out of band, and the story was advanced from `awaiting-operator` to `done`._
