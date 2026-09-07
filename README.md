@@ -27,10 +27,13 @@ network. Change `BIND_ADDRESS` in `.env` if you need otherwise.
 
 ## Requirements
 
-- **Docker** (or a compatible engine) with the Compose plugin — runs the stack.
+- **Docker** (or a compatible engine) with the Compose plugin — runs the stack,
+  and resolves the model for `pixi run lint`: `lint-compose` and `lint-config`
+  both ask Compose to render the configuration, so the lint surface needs it too.
 - **[pixi](https://pixi.sh)** — provisions the validation tooling (`shellcheck`,
-  `yamllint`, `python`, `ruff`, `mypy`) from the committed `pixi.lock`, so
-  `pixi run lint` checks the same versions on every machine.
+  `yamllint`, `python`, `ruff`, `mypy`, `pyyaml`) from the committed `pixi.lock`,
+  so `pixi run lint` checks the same versions on every machine, and CI checks
+  those same versions again.
 
 ## Quick start
 
@@ -170,6 +173,7 @@ pixi.toml / pixi.lock           validation tasks and their pinned tools
 pyproject.toml                  ruff and mypy settings (no package here)
 .yamllint.yaml                  YAML lint rules
 .gitattributes                  LF line endings on every checkout
+.github/workflows/ci.yml        CI: the static gate and the real-stack gate
 Makefile                        deprecated shims forwarding to pixi tasks
 scripts/lib/common.sh           .env loading and defaults, sourced by the rest
 scripts/wait-healthy.sh         blocks until healthy; non-zero on timeout
@@ -187,7 +191,9 @@ scripts/destroy.sh              deletes every volume; requires typing `destroy`
 scripts/keycloak-reimport.sh    drops the realm db; requires typing `reimport`
 scripts/keycloak-export.sh      live realm back over the JSON
 scripts/token.sh                mint an access token via the CLI client
-scripts/smoke-test.sh           end-to-end verification
+scripts/smoke-test.sh           end-to-end verification; SMOKE_STRICT=1 forbids skips
+scripts/lint-compose.sh         `config -q` for every combination of declared profiles
+scripts/assert_config.py        bind address, host-port collisions and image pinning
 scripts/lint_json.py            the JSON check, one file per diagnostic
 scripts/lint_selftest.py        proves the lint surface and the scripts hold
 docker/
@@ -220,6 +226,7 @@ docker/
 | `pixi run ps` | Status and health of every container | `make ps` |
 | `pixi run logs keycloak` | Tail one service (omit the name for all) | `make logs S=keycloak` |
 | `pixi run smoke` | End-to-end verification | `make smoke` |
+| `pixi run smoke-strict` | The same suite with a skip scored as a failure | — |
 | `pixi run urls` | Print every endpoint | `make urls` |
 | `pixi run psql keycloak` | psql shell against any database | `make psql DB=keycloak` |
 | `pixi run redis-cli 1` | redis-cli against the broker db | `make redis-cli N=1` |
@@ -230,12 +237,47 @@ docker/
 | `pixi run keycloak-export` | Write the live realm back over the JSON | `make keycloak-export` |
 | `pixi run token dev dev` | Mint an access token | `make token U=dev P=dev` |
 | `pixi run config` | Render the resolved compose configuration | `make config` |
-| `pixi run lint` | Validate compose, shell, YAML, JSON, Python | `make lint` |
+| `pixi run lint` | Validate compose, rendered config, shell, YAML, JSON, Python | `make lint` |
+| `pixi run lint-compose` | `config -q` for every combination of declared profiles | — |
+| `pixi run lint-config` | Assert the *rendered* config's ports and image tags | — |
 | `pixi run test` | Prove the checks and scripts hold their contracts | — |
 | `pixi run ci` | The done-gate: lint + test | — |
+| `pixi run ci-stack` | Start the stack, wait for health, run the strict smoke suite | — |
 
 Every script behind these tasks also runs standalone — `./scripts/urls.sh`,
 `./scripts/wait-healthy.sh` — so none of this logic is trapped in a task runner.
+
+## Continuous integration
+
+`.github/workflows/ci.yml` runs on every push to `main` and on every pull
+request. It declares no tool version and installs nothing: every step is a
+`pixi run <task>` invocation, so the checks that run on a hosted runner are the
+same ones you run locally, at the versions `pixi.lock` pins.
+
+Two jobs, in parallel:
+
+| Job | Runs | Bound |
+|---|---|---|
+| `validate` | `pixi run ci` — compose config for every profile combination, the rendered-config assertions, shell, YAML, JSON and Python lint, and the self-test | 10 minutes |
+| `stack` | `pixi run ci-stack` — starts every profile, blocks until every healthcheck passes, then runs the smoke suite in strict mode | 15 minutes |
+
+The time bound is enforced, not measured: `timeout-minutes` cancels a job that
+overruns and turns the run red. If the `stack` job ever breaches it, split it
+into core and full-profile jobs — never drop a check.
+
+Nothing in the workflow can report success having checked nothing. There is no
+`continue-on-error`, no `|| true` and no `if: always()`; the only conditional
+steps are `if: failure()` diagnostics that print container status and logs after
+the job has already failed. `scripts/lint_selftest.py` asserts all of that
+against the workflow file, so it holds in the gate rather than by review.
+
+### Strict smoke mode
+
+`scripts/smoke-test.sh` skips a service that is not running, which is what you
+want when you started a partial selection. CI starts *every* profile, so there a
+skip is evidence the stack did not come up. `SMOKE_STRICT=1` — what
+`pixi run smoke-strict` sets — scores every skip as a failure naming the absent
+service. Nothing else about any check changes.
 
 ## Data and persistence
 
