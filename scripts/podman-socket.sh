@@ -72,8 +72,38 @@ printf '[Socket]\nSocketGroup=docker\nSocketMode=0660\n' | "${sudo_argv[@]}" tee
 # Verified, not assumed. `systemctl restart` reports success for a unit whose
 # ListenStream it never managed to bind, and every later step would then fail with
 # a connection error naming nothing.
+#
+# Bounded wait first: `systemctl restart` returns once systemd has accepted the
+# job, not once the listener is bound, so checking the path on the very next line
+# races a socket that is about to appear. Ten tries at 0.5s is far longer than
+# binding a unix socket takes and still fails fast when the unit is genuinely not
+# going to produce one.
+for _ in $(seq 1 10); do
+    [[ -e "$socket_path" ]] && break
+    sleep 0.5
+done
+
 if [[ ! -e "$socket_path" ]]; then
     printf 'podman-socket: %s does not exist after enabling podman.socket.\n' "$socket_path" >&2
+    # A bare "it is not there" names nothing actionable, which is the failure
+    # mode this script's own checks exist to prevent. Say what systemd thinks
+    # the unit is and where it was actually told to listen.
+    #
+    # `set +e` rather than `|| true` per command: the outcome is already decided
+    # — this block ends in `exit 1` no matter what — so nothing here can mask a
+    # failure. `|| true` would read as the swallow-the-error construct the lint
+    # surface bans, and it is banned for good reason; this is not that.
+    set +e
+    printf '  --- systemctl status podman.socket ---\n' >&2
+    "${sudo_argv[@]}" systemctl status --no-pager --full podman.socket >&2 2>&1
+    printf '  --- ListenStream as configured ---\n' >&2
+    "${sudo_argv[@]}" systemctl show podman.socket -p Listen -p ListenStream -p FragmentPath >&2 2>&1
+    printf '  --- sockets systemd is actually listening on ---\n' >&2
+    "${sudo_argv[@]}" systemctl list-sockets --no-pager >&2 2>&1
+    printf '  --- podman socket paths present on this host ---\n' >&2
+    ls -la /run/podman/ "/run/user/$(id -u)/podman/" >&2 2>&1
+    set -e
+
     exit 1
 fi
 
