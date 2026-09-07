@@ -199,6 +199,15 @@ So that a check either runs and reports honestly, or fails — never quietly rep
 **When** the lint task runs
 **Then** it uses identical tool versions, resolved from a committed lockfile (NFR-4)
 
+**Given** the repository has no task manifest today
+**When** this story completes
+**Then** `pixi.toml` exists with the validation tools as pinned dependencies, and its lockfile is committed (AD-9)
+
+**Given** the project convention that a `ci` task is the done-gate
+**When** it is defined
+**Then** it chains the checks this repository actually needs — compose configuration validation, shell, YAML and JSON linting — and not a language test suite this repository does not have
+**And** it exits non-zero if any of them fails
+
 ### Story 1.2: Lifecycle logic extracted into testable scripts
 
 As the maintainer,
@@ -210,7 +219,15 @@ So that I can run and test that logic directly rather than only through a build 
 **Given** the health-wait loop, the destroy confirmation and the endpoint listing
 **When** the extraction is complete
 **Then** each lives in its own file under `scripts/`, is shellcheck-clean, and runs standalone
-**And** every former `make` target still works, forwarding to the new task surface
+**And** no non-trivial shell remains inline in a Makefile recipe (AD-9)
+
+**Given** every target the `Makefile` exposes today
+**When** the task surface is defined
+**Then** each has a working equivalent, and the five argument-taking targets translate rather than being dropped — `logs S=`, `psql DB=`, `redis-cli N=`, `restore F=` and `token U= P=` all keep their behaviour through task arguments
+
+**Given** a developer with existing muscle memory
+**When** they run a former `make` target
+**Then** it still works, forwarding to the new task surface with a deprecation notice
 
 **Given** the stack is starting
 **When** the health-wait script runs
@@ -307,6 +324,30 @@ So that upgrading stops being a manual chore I postpone. (FR-17)
 **Given** the update bot is configured
 **When** a dry run is inspected
 **Then** it reports a non-zero count of detected dependencies — proving the regex matches rather than silently matching nothing
+
+### Story 1.7: Commit-time checks run the same tasks CI does
+
+As the maintainer,
+I want the fast checks to run before a commit lands,
+So that I find a lint or format problem in seconds rather than waiting for CI. (Supports FR-16)
+
+**Acceptance Criteria:**
+
+**Given** a commit containing a shellcheck violation or malformed YAML
+**When** it is committed
+**Then** the commit is rejected and the failure names the file and rule
+
+**Given** the tool versions already pinned for the task surface
+**When** the commit-time checks are configured
+**Then** they invoke those same tasks rather than declaring their own tool versions — one source of truth for what version of a tool runs, whether locally or in CI
+
+**Given** a commit message
+**When** it does not follow Conventional Commits
+**Then** it is rejected
+
+**Given** commit-time checks are local and bypassable
+**When** the gating story is considered
+**Then** CI (Story 1.3) remains the authoritative gate; this story is fast feedback, never a substitute
 
 ---
 

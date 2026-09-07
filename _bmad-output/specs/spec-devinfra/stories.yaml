@@ -9,13 +9,20 @@
     Today `make lint` exits 0 having skipped shellcheck and YAML validation when
     those tools are absent — reproduce that before changing it, so you know the
     fix works. No task may branch on `command -v`; a missing tool must be
-    impossible rather than skipped.
+    impossible rather than skipped. Define the `ci` task for what this repo
+    actually needs — compose validation, shell, YAML, JSON — not the Python test
+    sequence the project's general convention assumes; a Stop hook treats it as
+    the done-gate the moment the manifest exists.
 
 - id: "1-2"
   title: Lifecycle logic extracted into testable scripts
   description: >-
     Move the health-wait loop, destroy confirmation and endpoint listing out of
-    Makefile recipes into scripts that run and test standalone.
+    Makefile recipes into scripts, and give every Makefile target an equivalent.
+  invoke_dev_with: >-
+    Five targets take arguments and must translate rather than be dropped:
+    `logs S=`, `psql DB=`, `redis-cli N=`, `restore F=` and `token U= P=`. This
+    is the fiddliest part of the migration and the easiest to leave half-done.
 
 - id: "1-3"
   title: CI proves the stack works on every change
@@ -59,6 +66,16 @@
     so a regex manager over `.env` with `# renovate:` annotations is required.
     Confirm a dry run reports a non-zero dependency count — a manager matching
     nothing looks identical to one with no updates available.
+
+- id: "1-7"
+  title: Commit-time checks run the same tasks CI does
+  description: >-
+    Run the fast checks before a commit lands, so a lint or format failure
+    surfaces in seconds instead of waiting for CI. Supports CAP-16.
+  invoke_dev_with: >-
+    Have the hooks invoke the existing tasks rather than declaring their own tool
+    versions — otherwise the same tool is pinned in two places and they drift.
+    These hooks are local and bypassable; CI stays the authoritative gate.
 
 - id: "2-1"
   title: The shared fragment and the first Module
