@@ -321,16 +321,29 @@ that a hosted runner does not reliably provide. It needs one thing more, because
 `podman.socket` is created `root:root` mode `0660` and a non-root user cannot
 open it: a drop-in handing it to a group you are in.
 
+The drop-in sets `DirectoryMode` as well as `SocketMode`, and both are load-bearing.
+`podman.socket`'s runtime directory is created `root:root` `0700`, and a socket
+inside a directory you cannot traverse is unreachable however permissive the socket
+itself is — worse, `test -e` on that path answers false, so the socket reads as
+absent rather than as walled off, and every later step fails naming nothing.
+`DirectoryMode` governs only a directory systemd creates, so one that already exists
+— which it does whenever `podman.socket` was active before you started — keeps the
+mode it has and has to be widened by hand.
+
 ```sh
 sudo mkdir -p /etc/systemd/system/podman.socket.d
-printf '[Socket]\nSocketGroup=docker\nSocketMode=0660\n' \
+printf '[Socket]\nSocketGroup=docker\nSocketMode=0660\nDirectoryMode=0755\n' \
   | sudo tee /etc/systemd/system/podman.socket.d/devinfra-socket-group.conf
 sudo systemctl daemon-reload
 sudo systemctl enable podman.socket
 sudo systemctl restart podman.socket   # restart, not `enable --now`: an already-active
                                        # socket ignores a new drop-in until it restarts
+sudo chmod 0755 /run/podman            # no-op if systemd just created it; the fix if
+                                       # the directory was already there at 0700
 export DOCKER_HOST=unix:///run/podman/podman.sock
 ```
+
+`scripts/podman-socket.sh` is this same sequence, and is what CI runs.
 
 **macOS.** `podman machine start` reports the connection details but does not
 export anything into your shell, so set it yourself:
