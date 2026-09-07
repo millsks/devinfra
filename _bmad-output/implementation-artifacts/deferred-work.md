@@ -77,3 +77,11 @@ source_spec: `spec-1-5-every-image-brought-current.md`
 severity: low
 reason: baseline-1-5-…md captures the pre-wave pins, the 45-check smoke breakdown and the twelve named volumes, and states that no bump may add, remove or rename a volume — but no "after" section ever evidences that. The closing 45/0/0 run, the token-claims check and the unchanged volume list exist only as prose in the Spec Change Log.
 status: open
+
+### DW-11: AGENTS.md still presents `pixi run lint` as the whole validation surface and never mentions `pixi run bootstrap`, the `precommit` task or the commit-message contract.
+origin: spec-deferred 43e69d3f7b3b
+location: AGENTS.md (Running and verifying)
+source_spec: `spec-1-7-commit-time-checks-run-the-same-tasks-ci-does.md`
+severity: low
+reason: The `bmad:context` block in AGENTS.md is managed by bmad-project-context and edits inside it are replaced on refresh, so the correction belongs either in a section outside the markers or in the next context refresh. As shipped, an agent's first commit in a bootstrapped clone is rejected by a contract nothing in its instructions described. Routed to defer because the fix edits an agent-context file.
+status: open

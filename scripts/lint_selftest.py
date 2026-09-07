@@ -56,6 +56,17 @@ SUPPLIED_TOOLS = ("shellcheck", "yamllint", "python", "python3", "ruff", "mypy")
 #: Suffix used to hide a file from a lint glob, then put it back.
 MOVED = ".selftest-moved"
 
+#: The tracked directory `pixi run bootstrap` points core.hooksPath at. Its files
+#: are extensionless, so every walk that reaches them names the directory.
+HOOKS_DIR = ".githooks"
+
+#: The checks that resolve the compose model through a container runtime, and so
+#: must stay out of the pre-commit hook: a hook that cannot run while Docker is
+#: down trains the `--no-verify` reflex that makes hooks worthless. Written out
+#: rather than derived, because a derived expectation agrees with whatever the
+#: tasks happen to say — including a `lint-compose` that quietly joined the hook.
+RUNTIME_BOUND = ("lint-compose", "lint-config")
+
 #: Every target the Makefile exposed before pixi, and the exact line each must
 #: forward with. Written out rather than derived from the file it checks: a
 #: derived expectation agrees with whatever the Makefile happens to say, so
@@ -403,6 +414,35 @@ def moved_aside(paths: list[Path]) -> Iterator[None]:
             hidden.rename(original)
 
 
+@contextlib.contextmanager
+def throwaway_repo() -> Iterator[Path]:
+    """Build a throwaway git repository holding a copy of this repository's hooks.
+
+    Created *inside* this repository rather than beside it, which is the one thing
+    that makes an end-to-end hook case possible: the pre-commit hook execs
+    `pixi run precommit`, and pixi finds a manifest by walking up from its working
+    directory, so a repository under the system temp directory would reach no tasks
+    at all. The checks therefore run over this repository's own working tree, which
+    is what lets a planted defect here be rejected by a commit made there.
+
+    It is never this repository's own `.git`. `pixi run bootstrap` writes
+    `core.hooksPath` into the config every linked worktree of this repository
+    shares, so installing here would change the environment of the run doing the
+    installing.
+
+    Yields:
+        The work tree root of a new repository with `.githooks/` copied in, an
+        identity configured and no commits yet.
+    """
+    with tempfile.TemporaryDirectory(dir=REPO, prefix="zz-selftest-repo-") as tmp:
+        work = Path(tmp)
+        shutil.copytree(REPO / HOOKS_DIR, work / HOOKS_DIR)
+        tool(["git", "init", "--quiet", "--initial-branch=main"], cwd=work)
+        tool(["git", "config", "--local", "user.name", "devinfra selftest"], cwd=work)
+        tool(["git", "config", "--local", "user.email", "selftest@example.invalid"], cwd=work)
+        yield work
+
+
 def write_stub(directory: Path, name: str) -> None:
     """Write an executable that always fails, to shadow a real tool on PATH.
 
@@ -568,7 +608,12 @@ def main() -> int:
     # logic out of task bodies and into scripts/, so a `|| true` or a `command -v`
     # branch there is the same defect one file removed. Full-line comments are
     # stripped: several scripts legitimately explain what they must not do.
-    shell_sources = sorted((REPO / "scripts").rglob("*.sh"))
+    # .githooks/ joins the walk. A hook is shell that runs on every commit, so one
+    # that is unlinted and unscanned is the same silent skip one directory over —
+    # and the files are extensionless, so no `*.sh` glob would ever reach them.
+    hook_sources = sorted(REPO.glob(f"{HOOKS_DIR}/*"))
+    expect(f"{HOOKS_DIR}/ contains hooks to scan", bool(hook_sources), f"nothing in {HOOKS_DIR}/")
+    shell_sources = sorted((REPO / "scripts").rglob("*.sh")) + hook_sources
     expect("scripts/ contains shell scripts to scan", bool(shell_sources), "found none")
     for path in shell_sources:
         code = [line for line in path.read_text(encoding="utf-8").splitlines() if not line.lstrip().startswith("#")]
@@ -592,6 +637,15 @@ def main() -> int:
         (
             "lint-shell",
             REPO / "scripts" / "lib" / "zz_selftest_defect.sh",
+            '#!/usr/bin/env bash\nv="$1"\necho $v\n',
+        ),
+        # Extensionless, in a dotted directory, reached by a literal `.githooks/*`
+        # in the task body. Nothing else here proves pixi's shell expands that
+        # pattern: the coverage assertion above compares one Python glob against
+        # another and can only ever agree with itself.
+        (
+            "lint-shell",
+            REPO / HOOKS_DIR / "zz_selftest_defect",
             '#!/usr/bin/env bash\nv="$1"\necho $v\n',
         ),
         ("lint-yaml", REPO / "docker" / "loki" / "zz_selftest_defect.yaml", "root:\n  a: 1\n      b: 2\n"),
@@ -2108,7 +2162,10 @@ def main() -> int:
     # The stock Python .gitignore excludes `lib/`, which silently swallowed
     # scripts/lib/common.sh. A helper that lints locally and is absent from a
     # clone is the same silent failure this repository keeps removing.
-    sources = sorted((REPO / "scripts").rglob("*.sh")) + sorted((REPO / "scripts").rglob("*.py"))
+    # The hooks are checked the same way: a clone whose .githooks/ arrived ignored
+    # has no hooks at all, and `pixi run bootstrap` would point core.hooksPath at
+    # a directory that is not there.
+    sources = sorted((REPO / "scripts").rglob("*.sh")) + sorted((REPO / "scripts").rglob("*.py")) + hook_sources
     expect("scripts/ has files to check for tracking", bool(sources), "no scripts found")
     ignored = subprocess.run(
         ["git", "check-ignore", "--stdin"],
@@ -2318,6 +2375,401 @@ def main() -> int:
         podman_chain[:1] == ["ci-podman-socket"] and podman_chain[-1:] == ["assert-podman"],
         f"ci-stack-podman depends on {podman_chain}",
     )
+
+    # --- Commit-time checks run the same tasks the gate runs. ---
+    # The hooks carry no logic, so what is asserted here is the wiring: the mode
+    # git needs before it will run them at all, that each reaches one declared task
+    # and nothing else, and that the task it reaches is a subset of the gate.
+    def body_of(task_name: str) -> str:
+        entry = tasks.get(task_name)
+        return str(entry.get("cmd", "")) if isinstance(entry, dict) else str(entry)
+
+    for task_name in ("bootstrap", "precommit", "commit-msg"):
+        expect(f"pixi declares the {task_name} task", task_name in tasks, "no such task")
+
+    # git ignores a hook file it cannot execute and says nothing about it: the
+    # commit lands unchecked and the developer is never told. The mode git records
+    # is what decides that, so the index is read rather than the working tree.
+    tracked_modes: dict[str, str] = {}
+    for line in tool(["git", "ls-files", "--stage", "--", HOOKS_DIR], cwd=REPO).stdout.splitlines():
+        meta, _, tracked_name = line.partition("\t")
+        fields = meta.split()
+        if len(fields) == 3:
+            tracked_modes[tracked_name] = fields[0]
+    # Driven by what git tracks rather than by what the directory holds: an editor
+    # backup or a merge .orig left in .githooks/ is not a hook git will ever run,
+    # and failing on it would say nothing a developer could act on.
+    expect(
+        f"git tracks the files in {HOOKS_DIR}/", bool(tracked_modes), f"git ls-files reports nothing under {HOOKS_DIR}/"
+    )
+    for relative, mode in sorted(tracked_modes.items()):
+        expect(
+            f"{relative} is tracked with the mode git needs to run it",
+            mode == "100755",
+            f"git ls-files reports mode {mode!r}; `git add --chmod=+x {relative}` fixes it",
+        )
+
+    hook_tasks: dict[str, str] = {}
+    for hook in hook_sources:
+        hook_body = hook.read_text(encoding="utf-8")
+        code = [line for line in hook_body.splitlines() if line.strip() and not line.lstrip().startswith("#")]
+        handoffs = [line for line in code if line.startswith("exec ")]
+        expect(f"{hook.name} hands off exactly once", len(handoffs) == 1, f"exec lines: {handoffs}")
+        if len(handoffs) != 1:
+            continue
+        expect(f"{hook.name} hands off as its last act", code[-1] == handoffs[0], f"last line: {code[-1]!r}")
+        words = handoffs[0].split()
+        expect(f"{hook.name} hands off to pixi", words[:3] == ["exec", "pixi", "run"], f"line: {handoffs[0]!r}")
+        named = words[3] if len(words) > 3 else ""
+        expect(f"{hook.name} names a task pixi.toml declares", named in tasks, f"names {named!r}")
+        hook_tasks[hook.name] = named
+        # The headline criterion: a hook that named a tool or a version would be a
+        # second declaration of what runs, drifting from pixi.lock the moment one
+        # of the two moved. Everything it reaches comes from the task it names.
+        # Comments are stripped first, as the FORBIDDEN walk above strips them: a
+        # hook that explains in prose which tool the task it names will reach is
+        # accurate, not a second declaration of anything.
+        executable = "\n".join(code)
+        named_tools = [name for name in SUPPLIED_TOOLS if name in executable]
+        expect(f"{hook.name} names no tool", not named_tools, f"names {named_tools}")
+        expect(f"{hook.name} pins no version", not re.search(r"\d+\.\d+", executable), f"body: {executable!r}")
+
+    # pre-merge-commit is not a duplicate of pre-commit: git runs it, and never
+    # pre-commit, when `git merge` creates a commit. Without it every merge commit
+    # lands with the offline checks not run.
+    for hook_name, task_run in (
+        ("pre-commit", "precommit"),
+        ("pre-merge-commit", "precommit"),
+        ("commit-msg", "commit-msg"),
+    ):
+        expect(f"the {hook_name} hook runs the {task_run} task", hook_tasks.get(hook_name) == task_run, f"{hook_tasks}")
+
+    # `chain()` reads one level of depends-on. Containment has to hold over the
+    # whole reachable set, or a member of precommit that later grew a depends-on
+    # naming lint-compose would put a container runtime back in the hook with every
+    # assertion below still green.
+    def closure(task_name: str) -> set[str]:
+        seen: set[str] = set()
+        pending = list(chain(task_name))
+        while pending:
+            current = pending.pop()
+            if current in seen:
+                continue
+            seen.add(current)
+            pending.extend(chain(current))
+        return seen
+
+    precommit_members = closure("precommit")
+    lint_members = closure("lint")
+    expect("`pixi run precommit` runs checks at all", bool(precommit_members), "precommit depends on nothing")
+    expect(
+        "every check the pre-commit hook runs is one `pixi run lint` runs",
+        precommit_members <= lint_members,
+        f"outside lint: {sorted(precommit_members - lint_members)}",
+    )
+    expect(
+        "the checks that need a container runtime stay in the gate",
+        set(RUNTIME_BOUND) <= lint_members,
+        f"lint runs {sorted(lint_members)}",
+    )
+    expect(
+        "the pre-commit hook reaches no check that needs a container runtime",
+        not (precommit_members & set(RUNTIME_BOUND)),
+        f"runtime-bound members: {sorted(precommit_members & set(RUNTIME_BOUND))}",
+    )
+    reaches_runtime = sorted(
+        name for name in precommit_members if "assert_config" in body_of(name) or "scripts/compose.sh" in body_of(name)
+    )
+    expect("no pre-commit check reaches the compose seam", not reaches_runtime, f"reaches it: {reaches_runtime}")
+
+    # And proved by running it, not only by reading it: a member that grew a call to
+    # a container runtime would pass every scan above and still make a commit
+    # impossible on a machine where nothing is running.
+    with tempfile.TemporaryDirectory() as stub_dir:
+        runtime_stubs = Path(stub_dir)
+        for name in ("docker", "podman", "docker-compose"):
+            write_stub(runtime_stubs, name)
+        no_runtime = dict(os.environ)
+        no_runtime["PATH"] = str(runtime_stubs) + os.pathsep + no_runtime.get("PATH", "")
+        r = pixi("precommit", env=no_runtime)
+        expect(
+            "precommit passes with every container runtime shadowed by a failing stub",
+            r.returncode == 0,
+            f"exit {r.returncode}: {(r.stdout + r.stderr)!r}",
+        )
+
+    # --- The message contract, row by row, driven through the task the hook runs. ---
+    with tempfile.TemporaryDirectory() as tmp:
+        messages = Path(tmp)
+
+        def judge(label: str, body_text: str) -> subprocess.CompletedProcess[str]:
+            path = messages / f"{label.replace(' ', '-')}.txt"
+            path.write_text(body_text, encoding="utf-8", newline="\n")
+            return pixi("commit-msg", str(path))
+
+        # git generates four of these itself and then runs the hook over them, so a
+        # contract that rejected any of them would break every merge and every
+        # `git commit --fixup` in this repository.
+        accepted = {
+            "a conventional subject": "feat: add the commit-time hooks\n",
+            "a scoped breaking subject": "feat(api)!: drop the v1 endpoint\n",
+            "a subject with a body": "fix: name the offending file\n\nThe diagnostic said nothing useful before.\n",
+            "a merge subject": "Merge branch 'topic' into main\n",
+            "a revert subject": 'Revert "feat: add the commit-time hooks"\n',
+            # git writes this one for a revert of a revert.
+            "a reapply subject": 'Reapply "feat: add the commit-time hooks"\n',
+            "a fixup subject": "fixup! feat: add the commit-time hooks\n",
+            "a squash subject": "squash! feat: add the commit-time hooks\n",
+            "an amend subject": "amend! feat: add the commit-time hooks\n",
+            # Everything below the scissors is the diff git appended, not the
+            # author's message. Judging it would fail on any diff whose first line
+            # happened to look like a subject — as this fixture's does.
+            "a verbose commit scissors block": (
+                "docs: explain the hook\n"
+                "\n"
+                "# Please enter the commit message for your changes.\n"
+                "# ------------------------ >8 ------------------------\n"
+                "diff --git a/x b/x\n"
+                "updated the readme\n"
+            ),
+        }
+        for label, body_text in accepted.items():
+            r = judge(label, body_text)
+            expect(f"commit-msg accepts {label}", r.returncode == 0, f"exit {r.returncode}: {(r.stdout + r.stderr)!r}")
+
+        rejected = [
+            ("a subject with no type", "updated the readme\n", "type(optional-scope)!: description"),
+            # The generated forms are matched by the prefixes git writes, not by a
+            # leading word. Without these three rows, dropping the rest of the
+            # prefix would leave every accepted row above still green.
+            ("prose beginning Merged", "Merged the two configs\n", "type(optional-scope)!: description"),
+            ("prose beginning Merge", "Merge the two configs into one\n", "type(optional-scope)!: description"),
+            ("prose beginning Reapplying", "Reapplying the change\n", "type(optional-scope)!: description"),
+            ("a subject with no colon", "feat add hooks\n", "type(optional-scope)!: description"),
+            ("an unknown type", "feature: add hooks\n", "'feature' is not a commit type"),
+            ("an empty description", "fix:\n", "empty description"),
+            ("a whitespace-only description", "fix:   \n", "empty description"),
+            ("no space after the colon", "fix:name the file\n", "no space after the colon"),
+            ("an empty scope", "feat(): add hooks\n", "empty scope"),
+            ("a message that is only comments", "\n# Please enter the commit message.\n\n", "the message is empty"),
+        ]
+        outputs: dict[str, str] = {}
+        for label, body_text, needle in rejected:
+            r = judge(label, body_text)
+            outputs[label] = r.stdout + r.stderr
+            expect(f"commit-msg rejects {label}", r.returncode != 0, "exited 0")
+            expect(
+                f"commit-msg says what was wrong with {label}", needle in outputs[label], f"said: {outputs[label]!r}"
+            )
+        # A developer told only that the message is invalid reaches for --no-verify.
+        expect(
+            "commit-msg lists the types it would have accepted",
+            "allowed types:" in outputs["an unknown type"] and "feat" in outputs["an unknown type"],
+            f"said: {outputs['an unknown type']!r}",
+        )
+
+        # Argument defects are diagnostics, never tracebacks: the hook's output is
+        # the only thing the developer sees when a commit is refused.
+        r = pixi("commit-msg")
+        expect("commit-msg with no path exits non-zero", r.returncode != 0, "exited 0")
+        expect("commit-msg with no path prints usage", "usage" in (r.stdout + r.stderr), f"said: {r.stderr!r}")
+
+        absent_message = messages / "absent.txt"
+        r = pixi("commit-msg", str(absent_message))
+        expect("commit-msg on a missing file exits non-zero", r.returncode != 0, "exited 0")
+        expect("commit-msg names the missing file", "absent.txt" in (r.stdout + r.stderr), f"said: {r.stderr!r}")
+
+        binary = messages / "binary.txt"
+        binary.write_bytes(b"feat: \xff\xfe not utf-8\n")
+        r = pixi("commit-msg", str(binary))
+        expect("commit-msg on a non-UTF-8 file exits non-zero", r.returncode != 0, "exited 0")
+        expect("commit-msg names the non-UTF-8 file", "binary.txt" in (r.stdout + r.stderr), f"said: {r.stderr!r}")
+        expect("commit-msg does not traceback on a non-UTF-8 file", "Traceback" not in r.stderr, f"said: {r.stderr!r}")
+
+    # --- The installer, and a real commit through the hooks it installs. ---
+    installer = str(REPO / "scripts" / "bootstrap.sh")
+    with tempfile.TemporaryDirectory() as outside:
+        r = tool([installer], cwd=Path(outside))
+        expect("bootstrap refuses outside a git work tree", r.returncode != 0, "exited 0")
+        expect(
+            "bootstrap names the condition it refused on",
+            "work tree" in (r.stdout + r.stderr),
+            f"said: {(r.stdout + r.stderr)!r}",
+        )
+
+    with throwaway_repo() as clone:
+        reads_back = ["git", "config", "--get", "core.hooksPath"]
+        local_reads_back = ["git", "config", "--local", "--get", "core.hooksPath"]
+
+        # An installer with nothing to install must say so rather than point
+        # core.hooksPath at a directory that is not there.
+        hidden = clone / f"{HOOKS_DIR}-hidden"
+        (clone / HOOKS_DIR).rename(hidden)
+        r = tool([installer], cwd=clone)
+        expect("bootstrap refuses a clone with no hooks directory", r.returncode != 0, "exited 0")
+        expect(
+            "bootstrap names the directory it could not find",
+            HOOKS_DIR in (r.stdout + r.stderr),
+            f"said: {(r.stdout + r.stderr)!r}",
+        )
+        (clone / HOOKS_DIR).mkdir()
+        r = tool([installer], cwd=clone)
+        expect("bootstrap refuses an empty hooks directory", r.returncode != 0, "exited 0")
+        expect("bootstrap says the directory is empty", "empty" in (r.stdout + r.stderr), f"said: {r.stderr!r}")
+        (clone / HOOKS_DIR).rmdir()
+        hidden.rename(clone / HOOKS_DIR)
+
+        # The bad-mode refusal is checked while there is still nothing to overwrite:
+        # an installer that writes the config and then refuses has left the clone
+        # pointing at hooks git will ignore.
+        (clone / HOOKS_DIR / "pre-commit").chmod(0o644)
+        r = tool([installer], cwd=clone)
+        expect("bootstrap refuses a hook it cannot execute", r.returncode != 0, "exited 0")
+        expect(
+            "bootstrap names the hook that is not executable",
+            "pre-commit" in (r.stdout + r.stderr),
+            f"said: {(r.stdout + r.stderr)!r}",
+        )
+        expect(
+            "a refused install writes no core.hooksPath",
+            tool(local_reads_back, cwd=clone).returncode != 0,
+            "core.hooksPath was set anyway",
+        )
+        (clone / HOOKS_DIR / "pre-commit").chmod(0o755)
+
+        r = tool([installer], cwd=clone)
+        expect("bootstrap installs the hooks", r.returncode == 0, f"exit {r.returncode}: {(r.stdout + r.stderr)!r}")
+        expect(
+            "core.hooksPath reads back as the tracked directory",
+            tool(reads_back, cwd=clone).stdout.strip() == HOOKS_DIR,
+            f"reads back {tool(reads_back, cwd=clone).stdout.strip()!r}",
+        )
+
+        r = tool([installer], cwd=clone)
+        expect("bootstrap is idempotent", r.returncode == 0, f"exit {r.returncode}: {(r.stdout + r.stderr)!r}")
+        expect("a rerun says the value was already set", "already" in r.stdout, f"said: {r.stdout!r}")
+
+        tool(["git", "config", "--local", "core.hooksPath", ".git/hooks"], cwd=clone)
+        r = tool([installer], cwd=clone)
+        expect(
+            "bootstrap overwrites another value", r.returncode == 0, f"exit {r.returncode}: {(r.stdout + r.stderr)!r}"
+        )
+        expect("bootstrap prints the value it overwrote", ".git/hooks" in r.stdout, f"said: {r.stdout!r}")
+        expect(
+            "core.hooksPath reads back as the tracked directory after an overwrite",
+            tool(reads_back, cwd=clone).stdout.strip() == HOOKS_DIR,
+            f"reads back {tool(reads_back, cwd=clone).stdout.strip()!r}",
+        )
+
+        # git hands commit-msg a path relative to the work tree root, and in a real
+        # clone that is also the pixi manifest root, so the task resolves it. Here
+        # the two are different directories by construction — the repository has to
+        # sit inside this one for pixi to find any tasks at all — so the fixture
+        # asks git for absolute paths instead. It changes nothing the hooks do.
+        clone_env = dict(os.environ)
+        clone_env["GIT_DIR"] = str(clone / ".git")
+        clone_env["GIT_WORK_TREE"] = str(clone)
+
+        def commit(
+            name: str,
+            message: str,
+            *flags: str,
+            env: dict[str, str] | None = None,
+            cwd: Path | None = None,
+        ) -> subprocess.CompletedProcess[str]:
+            (clone / name).write_text(f"{name}\n", encoding="utf-8", newline="\n")
+            tool(["git", "add", "--", name], cwd=clone, env=clone_env)
+            return tool(["git", "commit", *flags, "-m", message], cwd=cwd or clone, env=env or clone_env)
+
+        r = commit("clean.txt", "feat: prove a clean commit still lands")
+        expect(
+            "a clean tree and a conventional message commit",
+            r.returncode == 0,
+            f"exit {r.returncode}: {(r.stdout + r.stderr)!r}",
+        )
+
+        # githooks(5) chdirs to the work tree root before running a hook, which is
+        # the whole reason the hooks need no path handling. Proved from a
+        # subdirectory, because that is where it would stop being true.
+        (clone / "sub").mkdir()
+        r = commit("sub/nested.txt", "feat: commit from a subdirectory", cwd=clone / "sub")
+        expect(
+            "a commit issued from a subdirectory is checked the same way",
+            r.returncode == 0,
+            f"exit {r.returncode}: {(r.stdout + r.stderr)!r}",
+        )
+
+        # The defects are planted in *this* repository, because that is the tree the
+        # hook's `pixi run precommit` walks. What is proved is the whole path: git
+        # runs the hook, the hook runs the task, the task finds the defect, and the
+        # commit does not happen.
+        shell_defect = REPO / "scripts" / "zz_selftest_hook_defect.sh"
+        with planted(shell_defect, '#!/usr/bin/env bash\nv="$1"\necho $v\n'):
+            r = commit("shell.txt", "feat: this commit must not land")
+            output = r.stdout + r.stderr
+            expect("the pre-commit hook rejects a shell defect", r.returncode != 0, "the commit landed")
+            expect("the rejection names the offending script", shell_defect.name in output, f"said: {output!r}")
+            expect("the rejection names the rule that caught it", "SC2086" in output, f"said: {output!r}")
+
+        yaml_defect = REPO / "docker" / "loki" / "zz_selftest_hook_defect.yaml"
+        with planted(yaml_defect, "root:\n  a: 1\n      b: 2\n"):
+            r = commit("yaml.txt", "feat: this commit must not land either")
+            output = r.stdout + r.stderr
+            expect("the pre-commit hook rejects a YAML defect", r.returncode != 0, "the commit landed")
+            expect("the rejection names the offending document", yaml_defect.name in output, f"said: {output!r}")
+            expect("the rejection names the yamllint rule", "(syntax)" in output, f"said: {output!r}")
+
+        r = commit("message.txt", "updated the readme")
+        output = r.stdout + r.stderr
+        expect("the commit-msg hook rejects a non-conventional message", r.returncode != 0, "the commit landed")
+        expect("the rejection names the offending subject", "updated the readme" in output, f"said: {output!r}")
+
+        # The documented escape. It is not a defect: CI is the authoritative gate,
+        # and a hook a developer cannot get past is one they disable permanently.
+        r = commit("bypass.txt", "nope, not conventional at all", "--no-verify")
+        expect(
+            "--no-verify lands the commit anyway", r.returncode == 0, f"exit {r.returncode}: {(r.stdout + r.stderr)!r}"
+        )
+
+        # A merge runs pre-merge-commit and then commit-msg — never pre-commit — so
+        # both halves are proved with a real merge rather than with fixtures that
+        # look like one: the checks must still run, and the message git generated
+        # for itself must still be accepted.
+        branch = tool(["git", "rev-parse", "--abbrev-ref", "HEAD"], cwd=clone, env=clone_env).stdout.strip()
+        tool(["git", "checkout", "--quiet", "-b", "zz-selftest-merge"], cwd=clone, env=clone_env)
+        commit("branch.txt", "feat: work done on a branch", "--no-verify")
+        tool(["git", "checkout", "--quiet", branch], cwd=clone, env=clone_env)
+
+        with planted(shell_defect, '#!/usr/bin/env bash\nv="$1"\necho $v\n'):
+            r = tool(["git", "merge", "--no-ff", "--no-edit", "zz-selftest-merge"], cwd=clone, env=clone_env)
+            output = r.stdout + r.stderr
+            expect("the pre-merge-commit hook rejects a merge over a shell defect", r.returncode != 0, "it merged")
+            expect("the refused merge names the offending script", shell_defect.name in output, f"said: {output!r}")
+            tool(["git", "merge", "--abort"], cwd=clone, env=clone_env)
+
+        r = tool(["git", "merge", "--no-ff", "--no-edit", "zz-selftest-merge"], cwd=clone, env=clone_env)
+        expect(
+            "a clean merge passes both hooks on the message git generated",
+            r.returncode == 0,
+            f"exit {r.returncode}: {(r.stdout + r.stderr)!r}",
+        )
+
+        # A hook that cannot find pixi must reject the commit. Falling through to a
+        # successful commit is the silent skip this repository keeps removing, one
+        # layer further out than any lint task can see.
+        lean = os.pathsep.join(
+            entry
+            for entry in os.environ.get("PATH", "").split(os.pathsep)
+            if entry and not (Path(entry) / "pixi").exists() and not (Path(entry) / "pixi.exe").exists()
+        )
+        expect("the pixi-free PATH really has no pixi", shutil.which("pixi", path=lean) is None, "pixi still resolves")
+        expect("the pixi-free PATH still reaches git", shutil.which("git", path=lean) is not None, "git went with it")
+        stripped = dict(clone_env)
+        stripped["PATH"] = lean
+        r = commit("nopixi.txt", "feat: this must not land unchecked", env=stripped)
+        output = r.stdout + r.stderr
+        expect("a hook whose pixi is missing rejects the commit", r.returncode != 0, "the commit landed unchecked")
+        expect("the refusal names what could not be found", "pixi" in output, f"said: {output!r}")
 
     # --- The Makefile is a shim and nothing more. ---
     # Parsed rather than executed: `make` is not a pixi dependency, and the property

@@ -1,0 +1,21 @@
+#!/usr/bin/env bash
+# Check the commit message against the Conventional Commits contract.
+#
+# Installed per clone by `pixi run bootstrap`, which points core.hooksPath here.
+#
+# git chdirs to the work tree root before running a hook and hands the message
+# file as a path relative to it, so $1 resolves once the cd below has run — the
+# same directory the pixi task runs in.
+#
+# The root is captured into a variable first: `cd "$(git rev-parse ...)"` exits 0
+# on a failed substitution, leaving the check to run against whatever directory
+# happened to be current.
+#
+# git runs this hook over its own generated messages too, a merge's included, so
+# the contract the task enforces has to accept those. `git commit --no-verify`
+# bypasses this hook by design.
+set -euo pipefail
+
+toplevel="$(git rev-parse --show-toplevel)"
+cd "$toplevel"
+exec pixi run commit-msg "$1"

@@ -1,0 +1,25 @@
+#!/usr/bin/env bash
+# Run the fast half of the gate before a commit is written.
+#
+# Installed per clone by `pixi run bootstrap`, which points core.hooksPath here.
+# .git/hooks is not part of the tree, so a hook cannot be committed; a tracked
+# directory plus one line of config is the whole mechanism.
+#
+# The body is deliberately a cd and a hand-off, with no logic. Every tool this
+# reaches is resolved from pixi.lock, the same lockfile the hosted run reads, so
+# there is nothing here to drift from what CI does. A check is added to the
+# `precommit` task, never to this file, because that is where the self-test can
+# see it.
+#
+# The root is captured into a variable first: `cd "$(git rev-parse ...)"` exits 0
+# on a failed substitution, leaving the checks to run against whatever directory
+# happened to be current.
+#
+# It judges the working tree, not the index: a partial `git add` is checked
+# against files the commit does not contain. CI reads the merged tree and is the
+# answer to that. `git commit --no-verify` bypasses this hook by design.
+set -euo pipefail
+
+toplevel="$(git rev-parse --show-toplevel)"
+cd "$toplevel"
+exec pixi run precommit

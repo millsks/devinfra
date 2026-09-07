@@ -1,0 +1,15 @@
+#!/usr/bin/env bash
+# Run the fast half of the gate before a merge commit is written.
+#
+# git does not run `pre-commit` for a merge: `git merge` fires this hook instead,
+# then prepare-commit-msg and commit-msg. Without this file every merge commit
+# would land with the offline checks never run — the silent skip one layer out
+# from anything a lint task can see.
+#
+# Same shape and same task as .githooks/pre-commit, deliberately: a merge is
+# checked by exactly what a commit is checked by.
+set -euo pipefail
+
+toplevel="$(git rev-parse --show-toplevel)"
+cd "$toplevel"
+exec pixi run precommit

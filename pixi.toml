@@ -175,8 +175,8 @@ description = "Assert the Renovate configuration's own regexes still detect ever
 cmd = "python scripts/assert_renovate.py"
 
 [tasks.lint-shell]
-description = "shellcheck every shell script in the repository, at any depth"
-cmd = "shellcheck scripts/**/*.sh docker/postgres/initdb/*.sh"
+description = "shellcheck every shell script in the repository, the git hooks included"
+cmd = "shellcheck scripts/**/*.sh docker/postgres/initdb/*.sh .githooks/*"
 
 [tasks.lint-yaml]
 description = "yamllint the compose file, the CI workflow and every service YAML config"
@@ -208,6 +208,28 @@ depends-on = ["lint", "test"]
 [tasks.ci-stack]
 description = "Start the stack, wait for health and run the strict smoke suite"
 depends-on = ["init", "start", "wait", "smoke-strict"]
+
+# ---------------------------------------------------------------------------
+# Commit-time checks. The hooks in .githooks/ carry no logic and name no tool:
+# each is an `exec pixi run <task>` over a task declared here, so a commit is
+# checked by the same task definitions, at the same pinned versions, that the
+# hosted run uses. `precommit` is a strict subset of `lint` — lint-compose and
+# lint-config need a container runtime, and a hook that cannot run while Docker
+# is down trains the --no-verify reflex that makes hooks worthless.
+# See docs/adr/0011-commit-time-checks-are-git-hooks-invoking-pixi-tasks.md.
+# ---------------------------------------------------------------------------
+[tasks.bootstrap]
+description = "Install the git hooks in this clone by pointing core.hooksPath at .githooks/"
+cmd = "./scripts/bootstrap.sh"
+
+[tasks.precommit]
+description = "The offline half of lint: what the pre-commit hook runs"
+depends-on = ["lint-shell", "lint-yaml", "lint-json", "lint-pins", "lint-renovate", "lint-python"]
+
+[tasks.commit-msg]
+description = "Check a commit message file against Conventional Commits"
+args = [{ arg = "file", default = "" }]
+cmd = "python scripts/check_commit_msg.py '{{ file }}'"
 
 # ---------------------------------------------------------------------------
 # Podman. The runtime is selected by where the Docker API lives, not by a second

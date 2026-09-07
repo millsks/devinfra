@@ -45,6 +45,7 @@ network. Change `BIND_ADDRESS` in `.env` if you need otherwise.
 
 ```sh
 pixi install       # fetch the pinned tooling (once per clone)
+pixi run bootstrap # install the commit-time hooks (once per clone)
 pixi run init      # create .env from the template
 pixi run up        # start everything, wait for health, print endpoints
 pixi run smoke     # verify every service actually works
@@ -181,12 +182,16 @@ pyproject.toml                  ruff and mypy settings (no package here)
 .gitattributes                  LF line endings on every checkout
 .github/workflows/ci.yml        CI: the static gate, and the stack on Docker and Podman
 renovate.json                   what the update bot reads: one regex manager over both files above
+.githooks/pre-commit            commit-time: execs `pixi run precommit`, nothing else
+.githooks/pre-merge-commit      the same, for the merge commits pre-commit never sees
+.githooks/commit-msg            commit-time: execs `pixi run commit-msg`, nothing else
 Makefile                        deprecated shims forwarding to pixi tasks
 scripts/lib/common.sh           .env loading and defaults, sourced by the rest
 scripts/compose.sh              the container runtime, honouring DEVINFRA_COMPOSE
 scripts/wait-healthy.sh         blocks until healthy; non-zero on timeout
 scripts/urls.sh                 every service endpoint
 scripts/init-env.sh             .env from the template, never overwriting
+scripts/bootstrap.sh            points core.hooksPath at .githooks/, then reads it back
 scripts/up-core.sh              core services only, profiles cleared
 scripts/ps.sh                   container status, health and ports
 scripts/logs.sh                 tail all services or one
@@ -205,6 +210,7 @@ scripts/assert_config.py        bind address, host-port collisions and image pin
 scripts/lint_json.py            the JSON check, one file per diagnostic
 scripts/assert_pins.py          .env.example and the compose.yaml fallback must agree
 scripts/assert_renovate.py      the bot's own regexes must still detect every pin
+scripts/check_commit_msg.py     the commit-message contract, where it can be tested
 scripts/podman-socket.sh        stops Docker and enables Podman's API socket (CI)
 scripts/assert-podman.sh        proves Podman itself reports the running containers
 scripts/lint_selftest.py        proves the lint surface and the scripts hold
@@ -257,6 +263,9 @@ docker/
 | `pixi run lint-renovate` | Assert the update bot's regexes still detect every image pin | — |
 | `pixi run test` | Prove the checks and scripts hold their contracts | — |
 | `pixi run ci` | The done-gate: lint + test | — |
+| `pixi run bootstrap` | Install this clone's git hooks (`core.hooksPath`) | — |
+| `pixi run precommit` | The offline half of lint: what the pre-commit hook runs | — |
+| `pixi run commit-msg <file>` | Check a commit message file against the contract | — |
 | `pixi run ci-stack` | Start the stack, wait for health, run the strict smoke suite | — |
 | `pixi run ci-stack-podman` | The same, under Podman, proved to have run there | — |
 | `pixi run assert-podman` | Assert Podman reports every running container | — |
@@ -302,6 +311,81 @@ want when you started a partial selection. CI starts *every* profile, so there a
 skip is evidence the stack did not come up. `SMOKE_STRICT=1` — what
 `pixi run smoke-strict` sets — scores every skip as a failure naming the absent
 service. Nothing else about any check changes.
+
+## Commit-time checks
+
+The same tasks, one step earlier. `pixi run bootstrap` installs three git hooks in
+your clone by pointing `core.hooksPath` at the tracked `.githooks/` directory:
+
+```sh
+pixi run bootstrap   # once per clone
+```
+
+It is per clone because it has to be: `.git/hooks` is not part of the tree, so a
+hook cannot be committed and no clone arrives with one. The installer reads
+`core.hooksPath` back after writing it and refuses if a hook file is not
+executable — git ignores a hook it cannot run, and says nothing about it. The
+setting lands in the repository config that every linked worktree of a clone
+shares, so one run installs the hooks for all of them.
+
+| Hook | Runs | Why |
+|---|---|---|
+| `pre-commit` | `pixi run precommit` — shell, YAML, JSON, Python, pins and the update bot's regexes | The offline half of `pixi run lint`, so a commit is possible with no container runtime running |
+| `pre-merge-commit` | `pixi run precommit` | git runs this, and never `pre-commit`, when `git merge` creates a commit — without it every merge lands unchecked |
+| `commit-msg` | `pixi run commit-msg <file>` | The Conventional Commits contract |
+
+Each hook's whole body is a `cd` to the work tree root and an `exec pixi run`.
+None names a tool and none pins a version: everything they reach comes from
+`pixi.lock`, so the checks that run before your commit are the same ones, at the
+same versions, that run on the hosted runner.
+
+`precommit` is deliberately a *subset* of `lint`. `lint-compose` and
+`lint-config` resolve the compose model through a container runtime, and a hook
+that cannot run while Docker is down teaches you to reach for `--no-verify`
+permanently. They stay in the gate; `scripts/lint_selftest.py` asserts the
+containment, so the hook can never grow a check `pixi run lint` does not run.
+
+### The commit-message contract
+
+`type(optional-scope)!: description` — type from
+`build`, `chore`, `ci`, `docs`, `feat`, `fix`, `perf`, `refactor`, `revert`,
+`style`, `test`; the `!` marks a breaking change; the description may not be
+empty.
+
+```
+feat(hooks): install commit-time checks via core.hooksPath   # accepted
+feat(api)!: drop the v1 endpoint                             # accepted
+Merge branch 'topic' into main                               # accepted — git wrote it
+Revert "feat(api)!: drop the v1 endpoint"                    # accepted — git wrote it
+Reapply "feat(api)!: drop the v1 endpoint"                   # accepted — git wrote it
+fixup! feat(hooks): install commit-time checks               # accepted — git wrote it
+Merge the two collector configs into one                     # rejected: prose, not git's
+updated the readme                                           # rejected: no type
+feature: add hooks                                           # rejected: 'feature' is not a type
+fix:                                                         # rejected: empty description
+```
+
+`git merge` runs `pre-merge-commit` and then `commit-msg`, the second over the
+message git generated itself, which is why git's own forms are accepted rather
+than parsed. Comment lines and everything below `git commit --verbose`'s scissors
+line are dropped before the message is judged. Only the subject is judged: a
+`BREAKING CHANGE:` footer is neither required alongside the `!` nor validated.
+
+### Two things to know
+
+**`git commit --no-verify` bypasses the hooks, by design.** These are fast
+feedback, not the gate; CI reads the merged tree and stays authoritative. A
+check you cannot get past is one you disable permanently.
+
+**The hooks judge the working tree, not the index.** A partial `git add` is
+checked against files your commit does not contain, so an unstaged fix can hide
+a committed defect, and an unstaged defect can reject a clean commit. Stashing to
+correct that is unsafe in a repository with linked worktrees sharing one stash
+stack — CI is the answer to it.
+
+See
+[`docs/adr/0011`](docs/adr/0011-commit-time-checks-are-git-hooks-invoking-pixi-tasks.md)
+for why `core.hooksPath` rather than the `pre-commit` framework.
 
 ## Keeping images current
 
