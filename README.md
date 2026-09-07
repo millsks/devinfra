@@ -18,7 +18,7 @@ preserves your data — only an explicit `pixi run destroy` throws it away.
 | **Flower** | 2.1 | Celery task monitoring | http://localhost:5555 |
 | **OTel Collector** | 0.160 | Single OTLP ingest point | `localhost:4317` (gRPC) / `:4318` (HTTP) |
 | **Prometheus** | 3.14 | Metrics | http://localhost:9090 |
-| **Loki** | 3.5 | Logs | http://localhost:3100 |
+| **Loki** | 3.7 | Logs | http://localhost:3100 |
 | **Tempo** | 2.9 | Traces | http://localhost:3200 |
 | **Grafana** | 12.2 | Dashboards over all three signals | http://localhost:3000 |
 

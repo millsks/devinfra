@@ -346,7 +346,7 @@ services:
 
   loki:
     <<: *defaults
-    image: grafana/loki:${LOKI_VERSION:-3.5.7}
+    image: grafana/loki:${LOKI_VERSION:-3.7.7}
     container_name: devinfra-loki
     profiles: [observability]
     ports:
@@ -355,12 +355,11 @@ services:
       - loki-data:/loki
       - ./docker/loki/loki-config.yaml:/etc/loki/local-config.yaml:ro
     command: ["-config.file=/etc/loki/local-config.yaml"]
-    healthcheck:
-      test: ["CMD", "wget", "-q", "-O", "-", "http://127.0.0.1:3100/ready"]
-      interval: 15s
-      timeout: 5s
-      retries: 10
-      start_period: 30s
+    # No healthcheck: Loki 3.7 dropped the busybox layer its image used to carry,
+    # so the container holds /usr/bin/loki and nothing else — no shell, no wget,
+    # no HTTP client of any kind — and a Docker healthcheck has nothing to run.
+    # The readiness gate is not lost, it moved: smoke-test.sh polls /ready from
+    # the host, before the OTLP round-trip, and strict mode fails on it.
 
   tempo:
     <<: *defaults
