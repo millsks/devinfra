@@ -1185,10 +1185,17 @@ def main() -> int:
             "systemctl",
             "restart",
             "podman.socket",
+            # DirectoryMode only governs a directory systemd creates; an existing
+            # one keeps its mode, so the script widens it directly. Without this
+            # the socket is present and listening yet `test -e` reports false,
+            # which is exactly how the first hosted stack-podman run failed.
+            "chmod",
+            "0755",
+            str(socket_file.parent),
         ]
         # The whole unit body, not just the line that matters today: any other change
         # to what is written into /etc/systemd should be a deliberate edit here too.
-        dropin_body = "[Socket]\nSocketGroup=docker\nSocketMode=0660\n"
+        dropin_body = "[Socket]\nSocketGroup=docker\nSocketMode=0660\nDirectoryMode=0755\n"
 
         def fresh_socket(ci: str | None, allow: str | None, socket: Path) -> dict[str, str]:
             env = fresh()
@@ -1233,8 +1240,10 @@ def main() -> int:
             recorded(list_record) == privileged,
             f"recorded {recorded(list_record)}",
         )
-        # podman.socket is created root:root 0660; without this the non-root runner
-        # user cannot open it and every later step fails with a connection error.
+        # podman.socket is created root:root 0660 inside a root:root 0700 directory.
+        # SocketGroup/SocketMode make the socket openable; DirectoryMode makes the
+        # directory holding it traversable. Both are needed — a socket behind an
+        # untraversable directory is unreachable however permissive it is itself.
         expect(
             "podman-socket writes exactly the SocketGroup drop-in",
             (list_stdin.read_text(encoding="utf-8") if list_stdin.exists() else "") == dropin_body,

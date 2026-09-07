@@ -60,7 +60,12 @@ read -r -a sudo_argv <<<"${DEVINFRA_SUDO:-sudo}"
 # docker.service through a still-listening docker.socket.
 "${sudo_argv[@]}" systemctl stop docker.socket docker.service
 "${sudo_argv[@]}" mkdir -p "$dropin_dir"
-printf '[Socket]\nSocketGroup=docker\nSocketMode=0660\n' | "${sudo_argv[@]}" tee "$dropin_file" >/dev/null
+# DirectoryMode matters as much as SocketMode. podman.socket's runtime directory
+# is created root:root 0700, and a socket inside a directory the caller cannot
+# traverse is unreachable no matter how permissive the socket itself is — worse,
+# `test -e` on such a path returns false, so the socket reads as absent when it is
+# merely walled off. That is exactly how the first hosted run failed.
+printf '[Socket]\nSocketGroup=docker\nSocketMode=0660\nDirectoryMode=0755\n' | "${sudo_argv[@]}" tee "$dropin_file" >/dev/null
 "${sudo_argv[@]}" systemctl daemon-reload
 "${sudo_argv[@]}" systemctl enable podman.socket
 # `enable --now` starts an inactive unit and leaves an already-active one exactly
@@ -68,6 +73,14 @@ printf '[Socket]\nSocketGroup=docker\nSocketMode=0660\n' | "${sudo_argv[@]}" tee
 # images. `restart` both starts it and makes it re-read the drop-in, so the group
 # change actually applies instead of taking effect at the next reboot.
 "${sudo_argv[@]}" systemctl restart podman.socket
+
+# DirectoryMode only governs a directory systemd creates. When the runtime
+# directory already exists — which it does whenever podman.socket was active
+# before this script ran — systemd leaves its mode alone, so widen it directly.
+socket_dir="$(dirname "$socket_path")"
+if [[ -d "$socket_dir" ]]; then
+    "${sudo_argv[@]}" chmod 0755 "$socket_dir"
+fi
 
 # Verified, not assumed. `systemctl restart` reports success for a unit whose
 # ListenStream it never managed to bind, and every later step would then fail with
@@ -84,7 +97,15 @@ for _ in $(seq 1 10); do
 done
 
 if [[ ! -e "$socket_path" ]]; then
-    printf 'podman-socket: %s does not exist after enabling podman.socket.\n' "$socket_path" >&2
+    # Distinguish the two causes, because they read identically through `test -e`
+    # and point at completely different fixes.
+    if [[ ! -x "$socket_dir" ]]; then
+        printf 'podman-socket: %s is not traversable by %s, so %s cannot be reached.\n' \
+            "$socket_dir" "$(id -un)" "$socket_path" >&2
+        printf '  The socket may well exist; a directory mode of 0700 makes test -e report false.\n' >&2
+    else
+        printf 'podman-socket: %s does not exist after enabling podman.socket.\n' "$socket_path" >&2
+    fi
     # A bare "it is not there" names nothing actionable, which is the failure
     # mode this script's own checks exist to prevent. Say what systemd thinks
     # the unit is and where it was actually told to listen.
