@@ -1,0 +1,67 @@
+{
+  "$schema": "https://docs.renovatebot.com/renovate-schema.json",
+  "description": [
+    "Image update proposals for the devinfra stack. Comments live in `description` fields",
+    "rather than in JSON5 comments so this file stays strict JSON and stdlib parsers can",
+    "read it; scripts/assert_renovate.py is one such parser and is what proves the regexes",
+    "below still match something. See docs/adr/0010-image-updates-are-proposed-by-regex-over-the-dotenv-template.md",
+    "for why neither the Compose manager nor Dependabot is an option here.",
+    "prHourlyLimit and prConcurrentLimit are 0 (unlimited) because the weekly schedule in",
+    ".github/workflows/renovate.yml is already the rate limit. Renovate's defaults of 2 and 10",
+    "would cap a run at two proposals; story 1.5 alone left four images behind, so the default",
+    "would silently withhold half of them and the repository would look more current than it is."
+  ],
+  "enabledManagers": ["custom.regex"],
+  "dependencyDashboard": true,
+  "prHourlyLimit": 0,
+  "prConcurrentLimit": 0,
+  "semanticCommits": "enabled",
+  "semanticCommitType": "chore",
+  "semanticCommitScope": "deps",
+  "prBodyNotes": [
+    "The README service table's Version column is **not** updated by this bot: it records abbreviated versions (`8.10`, `12.2`), so no regex can maintain it. Update the row for this image by hand before merging.",
+    "Merge only on a green CI run. `pixi run lint-pins` proves `.env.example` and the `compose.yaml` fallback moved together; the stack jobs prove the new image actually starts and passes the strict smoke suite."
+  ],
+  "customManagers": [
+    {
+      "customType": "regex",
+      "description": [
+        "Every pinned tag lives in two files that must move together: the annotated",
+        "`<NAME>_VERSION=` declaration in .env.example, and the `${<NAME>_VERSION:-tag}`",
+        "fallback in compose.yaml. Both are read by this single manager, so one image at",
+        "one version resolves to one branch — and therefore one pull request carrying both",
+        "edits. Split across two managers the extractions would still share a branch name,",
+        "but nothing would keep their versioning settings in step."
+      ],
+      "managerFilePatterns": ["/^\\.env\\.example$/", "/^compose\\.yaml$/"],
+      "matchStrings": [
+        "# renovate: datasource=(?<datasource>\\S+) depName=(?<depName>\\S+?)(?: versioning=(?<versioning>\\S+))?[ \\t]*\\n(?<varName>[A-Z][A-Z0-9_]*_VERSION)=(?<currentValue>\\S+)",
+        "image:[ \\t]+(?<depName>[^\\s:]+):\\$\\{(?<varName>[A-Z][A-Z0-9_]*_VERSION):-(?<currentValue>[^}\\s]+)\\}"
+      ],
+      "matchStringsStrategy": "any",
+      "datasourceTemplate": "docker",
+      "versioningTemplate": "{{#if versioning}}{{{versioning}}}{{else}}docker{{/if}}"
+    }
+  ],
+  "packageRules": [
+    {
+      "description": [
+        "One image per pull request. Grouping would make a red run unattributable, which is",
+        "the whole reason this repository ships one commit per bump."
+      ],
+      "matchPackageNames": ["*"],
+      "groupName": null
+    },
+    {
+      "description": [
+        "Silo publishes `RELEASE.<date>T<time>Z`, which docker versioning cannot order. The",
+        "annotation in .env.example carries the same `versioning=` value; this rule states it",
+        "again for the compose.yaml half of the pair, where there is no annotation to read.",
+        "Without it the two extractions would disagree about what `newValue` is and the bot",
+        "would edit one file alone — which lint-pins rejects."
+      ],
+      "matchPackageNames": ["pgsty/silo"],
+      "versioning": "regex:^RELEASE\\.(?<major>\\d+)-(?<minor>\\d+)-(?<patch>\\d+)T(?<build>.+)$"
+    }
+  ]
+}

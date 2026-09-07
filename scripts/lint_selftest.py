@@ -44,6 +44,7 @@ import yaml
 
 LINTER = Path(__file__).with_name("lint_json.py")
 PINNER = Path(__file__).with_name("assert_pins.py")
+RENOVATOR = Path(__file__).with_name("assert_renovate.py")
 REPO = Path(__file__).resolve().parent.parent
 
 #: Constructs that turn a missing tool into a pass. None may appear in a task body.
@@ -1595,6 +1596,393 @@ def main() -> int:
             f"{image_keys} 'image:' keys, stdout: {r.stdout!r}",
         )
 
+        # --- assert_renovate: the update bot's regexes must still match something. ---
+        # Every fixture case runs the *tracked* renovate.json against planted files, so a
+        # defect proved here is proved against the configuration CI actually ships. A copy
+        # of the regexes in the fixture would pass forever after the real ones broke.
+        renovate_dir = stubs / "renovate"
+        renovate_dir.mkdir(exist_ok=True)
+        tracked_renovate = (REPO / "renovate.json").read_text(encoding="utf-8")
+        tracked_ci = (REPO / ".github" / "workflows" / "ci.yml").read_text(encoding="utf-8")
+
+        def renovate(
+            config_body: str,
+            dotenv_body: str,
+            compose_body: str,
+            workflow_body: str = tracked_ci,
+        ) -> subprocess.CompletedProcess[str]:
+            config_fixture = renovate_dir / "renovate.json"
+            dotenv_fixture = renovate_dir / ".env.example"
+            compose_fixture = renovate_dir / "compose.yaml"
+            workflow_fixture = renovate_dir / "ci.yml"
+            for fixture, body in (
+                (config_fixture, config_body),
+                (dotenv_fixture, dotenv_body),
+                (compose_fixture, compose_body),
+                (workflow_fixture, workflow_body),
+            ):
+                fixture.write_text(body, encoding="utf-8", newline="\n")
+            return tool(
+                [
+                    sys.executable,
+                    str(RENOVATOR),
+                    str(config_fixture),
+                    str(compose_fixture),
+                    str(dotenv_fixture),
+                    str(workflow_fixture),
+                ]
+            )
+
+        # The tracked configuration with one field of its first custom manager replaced —
+        # a planted defect in the real config, rather than a fixture config of its own.
+        def remanaged(**overrides: object) -> str:
+            edited = json.loads(tracked_renovate)
+            edited["customManagers"][0].update(overrides)
+            return json.dumps(edited, indent=2)
+
+        # Two variables, one of them referenced twice, and one carrying the `versioning=`
+        # suffix the annotation grammar allows — the same shape the tracked pair has.
+        # The versioning is read out of the tracked configuration rather than written again
+        # here: the property under test is that the annotation and the packageRules entry
+        # agree, and a second literal would let the fixture agree with itself while the
+        # tracked pair drifted apart.
+        silo_versioning = next(
+            str(rule["versioning"])
+            for rule in json.loads(tracked_renovate)["packageRules"]
+            if "pgsty/silo" in rule.get("matchPackageNames", [])
+        )
+        annotated_env = (
+            "# renovate: datasource=docker depName=redis\n"
+            "REDIS_VERSION=8-alpine\n"
+            f"# renovate: datasource=docker depName=pgsty/silo versioning={silo_versioning}\n"
+            "SILO_VERSION=RELEASE.2026\n"
+        )
+        annotated_compose = (
+            "services:\n"
+            "  redis:\n"
+            "    image: redis:${REDIS_VERSION:-8-alpine}\n"
+            "  minio:\n"
+            "    image: pgsty/silo:${SILO_VERSION:-RELEASE.2026}\n"
+            "  minio-init:\n"
+            "    image: pgsty/silo:${SILO_VERSION:-RELEASE.2026}\n"
+        )
+
+        r = renovate(tracked_renovate, annotated_env, annotated_compose)
+        expect(
+            "lint-renovate accepts an annotated pair",
+            r.returncode == 0,
+            f"output: {(r.stdout + r.stderr)!r}",
+        )
+        # The exact phrase, for the same reason lint-pins uses one: a bare "2" is a
+        # substring of the count it is supposed to catch a regression in.
+        expect(
+            "lint-renovate reports the dependency and reference counts",
+            "OK 2 dependencies detected over 5 references" in r.stdout,
+            f"stdout: {r.stdout!r}",
+        )
+
+        # An annotation two lines up belongs to whatever sits between it and the
+        # declaration, so adjacency — not presence — is the contract.
+        r = renovate(
+            tracked_renovate,
+            annotated_env.replace("# renovate: datasource=docker depName=redis\n", ""),
+            annotated_compose,
+        )
+        expect("lint-renovate rejects an unannotated declaration", r.returncode != 0, "exited 0")
+        expect(
+            "lint-renovate names the unannotated variable",
+            "REDIS_VERSION" in r.stderr,
+            f"stderr: {r.stderr!r}",
+        )
+
+        # The annotation is what Renovate tracks; the compose line is what it edits. If they
+        # name different repositories the bot tracks two images and updates one file alone.
+        r = renovate(
+            tracked_renovate,
+            annotated_env.replace("depName=redis\n", "depName=redis/redisinsight\n"),
+            annotated_compose,
+        )
+        expect("lint-renovate rejects a depName compose disagrees with", r.returncode != 0, "exited 0")
+        expect(
+            "lint-renovate names the variable and both repositories",
+            "REDIS_VERSION" in r.stderr and "'redis/redisinsight'" in r.stderr and "names 'redis'" in r.stderr,
+            f"stderr: {r.stderr!r}",
+        )
+
+        # A pattern that matches nothing is the silent skip in its purest form: the bot runs,
+        # proposes nothing, and reports success.
+        dead_pattern = "NOTHING_IN_THIS_REPOSITORY_MATCHES_THIS"
+        tracked_patterns = list(json.loads(tracked_renovate)["customManagers"][0]["matchStrings"])
+        r = renovate(remanaged(matchStrings=[*tracked_patterns, dead_pattern]), annotated_env, annotated_compose)
+        expect("lint-renovate rejects a pattern that matches nothing", r.returncode != 0, "exited 0")
+        expect(
+            "lint-renovate names the manager and the dead pattern",
+            "customManagers[0]" in r.stderr and dead_pattern in r.stderr,
+            f"stderr: {r.stderr!r}",
+        )
+
+        r = renovate(remanaged(matchStrings=[dead_pattern]), annotated_env, annotated_compose)
+        expect("lint-renovate rejects a configuration that detects nothing", r.returncode != 0, "exited 0")
+        expect(
+            "lint-renovate says it detected no dependencies",
+            "detected no dependencies" in r.stderr,
+            f"stderr: {r.stderr!r}",
+        )
+
+        # managerFilePatterns that select neither file leave every pattern unapplied.
+        r = renovate(remanaged(managerFilePatterns=["/^nothing$/"]), annotated_env, annotated_compose)
+        expect("lint-renovate rejects file patterns that select nothing", r.returncode != 0, "exited 0")
+
+        # The tracked configuration with one top-level field replaced or removed.
+        def reconfigured(remove: tuple[str, ...] = (), **overrides: object) -> str:
+            edited = json.loads(tracked_renovate)
+            for key in remove:
+                edited.pop(key, None)
+            edited.update(overrides)
+            return json.dumps(edited, indent=2)
+
+        # The manager's own shape. Each of these leaves a configuration that parses, looks
+        # maintained, and detects nothing.
+        r = renovate(reconfigured(remove=("customManagers",)), annotated_env, annotated_compose)
+        expect("lint-renovate rejects a configuration with no custom manager", r.returncode != 0, "exited 0")
+        expect(
+            "lint-renovate says nothing would detect a pin",
+            "customManagers is missing or empty" in r.stderr,
+            f"stderr: {r.stderr!r}",
+        )
+
+        r = renovate(remanaged(customType="jsonata"), annotated_env, annotated_compose)
+        expect("lint-renovate rejects a manager that is not a regex manager", r.returncode != 0, "exited 0")
+        expect("lint-renovate names the customType", "jsonata" in r.stderr, f"stderr: {r.stderr!r}")
+
+        r = renovate(remanaged(matchStrings=[]), annotated_env, annotated_compose)
+        expect("lint-renovate rejects a manager with no matchStrings", r.returncode != 0, "exited 0")
+
+        # `combination` and `recursive` compose the patterns rather than applying each
+        # independently, so this check would be reproducing an extraction the bot never runs.
+        for strategy in ("combination", "recursive"):
+            r = renovate(remanaged(matchStringsStrategy=strategy), annotated_env, annotated_compose)
+            expect(f"lint-renovate rejects matchStringsStrategy {strategy}", r.returncode != 0, "exited 0")
+            expect(
+                f"lint-renovate names the {strategy} strategy",
+                strategy in r.stderr,
+                f"stderr: {r.stderr!r}",
+            )
+
+        # A pattern that still matches but captures nothing. Renovate drops such a reference;
+        # counting it here would report coverage the configuration does not have.
+        nameless = [pattern.replace("(?<depName>", "(?:") for pattern in tracked_patterns]
+        r = renovate(remanaged(matchStrings=nameless), annotated_env, annotated_compose)
+        expect("lint-renovate rejects a match with no depName", r.returncode != 0, "exited 0")
+        expect(
+            "lint-renovate names the empty capture and the file",
+            "depName" in r.stderr and (".env.example" in r.stderr or "compose.yaml" in r.stderr),
+            f"stderr: {r.stderr!r}",
+        )
+
+        # Without a datasource a reference resolves to no registry; without a versioning the
+        # annotation's `versioning=` is inert and the two halves compute different updates.
+        r = renovate(
+            json.dumps(
+                {**json.loads(tracked_renovate)},
+                indent=2,
+            ).replace('"datasourceTemplate": "docker",\n', ""),
+            annotated_env,
+            annotated_compose,
+        )
+        expect("lint-renovate rejects a manager with no datasourceTemplate", r.returncode != 0, "exited 0")
+        expect("lint-renovate names the unresolvable datasource", "datasource" in r.stderr, f"stderr: {r.stderr!r}")
+
+        r = renovate(remanaged(datasourceTemplate="npm"), annotated_env, annotated_compose)
+        expect("lint-renovate rejects a datasource that is not docker", r.returncode != 0, "exited 0")
+
+        no_versioning = json.loads(tracked_renovate)
+        del no_versioning["customManagers"][0]["versioningTemplate"]
+        r = renovate(json.dumps(no_versioning, indent=2), annotated_env, annotated_compose)
+        expect("lint-renovate rejects a manager with no versioningTemplate", r.returncode != 0, "exited 0")
+
+        # A template that never reads the capture discards the annotation's value silently.
+        r = renovate(remanaged(versioningTemplate="docker"), annotated_env, annotated_compose)
+        expect("lint-renovate rejects a versioningTemplate that ignores the capture", r.returncode != 0, "exited 0")
+
+        # The compose half has no annotation to read, so a `versioning=` stated only in
+        # .env.example applies to one of the two extractions and the bot edits one file alone.
+        unrestated = json.loads(tracked_renovate)
+        unrestated["packageRules"] = [
+            rule for rule in unrestated["packageRules"] if "pgsty/silo" not in rule.get("matchPackageNames", [])
+        ]
+        r = renovate(json.dumps(unrestated, indent=2), annotated_env, annotated_compose)
+        expect("lint-renovate rejects an unrestated annotation versioning", r.returncode != 0, "exited 0")
+        expect(
+            "lint-renovate names the variable whose versioning is not restated",
+            "SILO_VERSION" in r.stderr,
+            f"stderr: {r.stderr!r}",
+        )
+
+        # Grouping is what makes a red run attributable to one image, so both ways it could
+        # come back are refused.
+        r = renovate(reconfigured(extends=["config:recommended"]), annotated_env, annotated_compose)
+        expect("lint-renovate rejects an extends preset", r.returncode != 0, "exited 0")
+
+        grouped = json.loads(tracked_renovate)
+        grouped["packageRules"][0]["groupName"] = "all images"
+        r = renovate(json.dumps(grouped, indent=2), annotated_env, annotated_compose)
+        expect("lint-renovate rejects a packageRules groupName", r.returncode != 0, "exited 0")
+        expect("lint-renovate names the group", "all images" in r.stderr, f"stderr: {r.stderr!r}")
+
+        # RE2 has neither lookaround nor backreferences, so a pattern using one matches here
+        # and extracts nothing under the bot — green check, silent bot.
+        for construct, pattern in (
+            ("lookahead", "(?=x)" + tracked_patterns[1]),
+            ("backreference", tracked_patterns[1] + r"\1"),
+        ):
+            r = renovate(remanaged(matchStrings=[tracked_patterns[0], pattern]), annotated_env, annotated_compose)
+            expect(f"lint-renovate rejects a pattern using a {construct}", r.returncode != 0, "exited 0")
+            expect(
+                f"lint-renovate names the {construct} RE2 rejects",
+                "RE2" in r.stderr,
+                f"stderr: {r.stderr!r}",
+            )
+
+        # A pin detected in one file only is exactly the one-file pull request lint-pins
+        # rejects, so it must be rejected before the bot ever opens one.
+        r = renovate(
+            tracked_renovate,
+            annotated_env,
+            "services:\n  redis:\n    image: redis:${REDIS_VERSION:-8-alpine}\n",
+        )
+        expect("lint-renovate rejects a pin compose never references", r.returncode != 0, "exited 0")
+        expect(
+            "lint-renovate names the pin missing from compose.yaml",
+            "SILO_VERSION" in r.stderr,
+            f"stderr: {r.stderr!r}",
+        )
+
+        # A commented-out interpolation is not in the model Compose renders, so it must not
+        # satisfy the match-set guard — the same exclusion assert_pins.occurrences() makes.
+        r = renovate(
+            tracked_renovate,
+            annotated_env,
+            annotated_compose.replace("    image: redis:", "    # image: redis:"),
+        )
+        expect("lint-renovate does not count a commented-out image line", r.returncode != 0, "exited 0")
+
+        # A file that is not UTF-8 must be a named diagnostic, not an interpreter traceback.
+        for target in (".env.example", "compose.yaml", "ci.yml"):
+            renovate(tracked_renovate, annotated_env, annotated_compose)
+            (renovate_dir / target).write_bytes(b"\xff\xfe not text\n")
+            r = tool(
+                [
+                    sys.executable,
+                    str(RENOVATOR),
+                    str(renovate_dir / "renovate.json"),
+                    str(renovate_dir / "compose.yaml"),
+                    str(renovate_dir / ".env.example"),
+                    str(renovate_dir / "ci.yml"),
+                ]
+            )
+            expect(f"lint-renovate rejects a {target} that is not UTF-8", r.returncode != 0, "exited 0")
+            expect(
+                f"lint-renovate names the undecodable {target} without a traceback",
+                target in r.stderr and "not valid UTF-8" in r.stderr and "Traceback" not in r.stderr,
+                f"stderr: {r.stderr!r}",
+            )
+
+        # A stock manager enabled alongside makes the detected count unattributable to these
+        # patterns, so a regex that had stopped matching would hide behind its dependencies.
+        stock = json.loads(tracked_renovate)
+        stock["enabledManagers"] = ["custom.regex", "docker-compose"]
+        r = renovate(json.dumps(stock, indent=2), annotated_env, annotated_compose)
+        expect("lint-renovate rejects a stock manager enabled alongside", r.returncode != 0, "exited 0")
+        expect(
+            "lint-renovate names the stock manager",
+            "docker-compose" in r.stderr,
+            f"stderr: {r.stderr!r}",
+        )
+
+        r = renovate('{"enabledManagers": ["custom.regex",}\n', annotated_env, annotated_compose)
+        expect("lint-renovate rejects a configuration that is not JSON", r.returncode != 0, "exited 0")
+        expect(
+            "lint-renovate names the file and the parse position",
+            "renovate.json:1:" in r.stderr and "invalid JSON" in r.stderr,
+            f"stderr: {r.stderr!r}",
+        )
+        expect(
+            "lint-renovate reports a parse failure without a traceback",
+            "Traceback" not in r.stderr,
+            f"stderr: {r.stderr!r}",
+        )
+
+        # A filtered gate cannot promise to run on a bot pull request. `paths`/`paths-ignore`
+        # let a .env.example-only diff through; `branches-ignore` can exclude main while
+        # `branches` still names it; and `types` replaces the default set, so a run that
+        # dropped `synchronize` would never re-check the branch after Renovate rebases and
+        # force-pushes it — the gate would have passed on a commit that is no longer head.
+        for filter_name in ("paths", "paths-ignore", "types", "branches-ignore"):
+            filtered = tracked_ci.replace(
+                "  pull_request:\n    branches: [main]\n",
+                f"  pull_request:\n    branches: [main]\n    {filter_name}: ['compose.yaml']\n",
+            )
+            expect(
+                f"the ci.yml fixture actually gained a {filter_name} filter",
+                filtered != tracked_ci,
+                "the pull_request trigger no longer has the expected shape",
+            )
+            r = renovate(tracked_renovate, annotated_env, annotated_compose, filtered)
+            expect(f"lint-renovate rejects a ci.yml filtered by {filter_name}", r.returncode != 0, "exited 0")
+            expect(
+                f"lint-renovate names the {filter_name} filter",
+                filter_name in r.stderr,
+                f"stderr: {r.stderr!r}",
+            )
+
+        # The trigger has to exist at all, and it has to target the branch the bot opens
+        # against — a gate on a branch nothing merges to is a gate that never runs.
+        r = renovate(
+            tracked_renovate,
+            annotated_env,
+            annotated_compose,
+            tracked_ci.replace("  pull_request:\n    branches: [main]\n", ""),
+        )
+        expect("lint-renovate rejects a ci.yml with no pull_request trigger", r.returncode != 0, "exited 0")
+        expect(
+            "lint-renovate says the gate would run no checks",
+            "pull_request" in r.stderr,
+            f"stderr: {r.stderr!r}",
+        )
+
+        r = renovate(
+            tracked_renovate,
+            annotated_env,
+            annotated_compose,
+            tracked_ci.replace("  pull_request:\n    branches: [main]\n", "  pull_request:\n    branches: [develop]\n"),
+        )
+        expect("lint-renovate rejects a pull_request trigger that misses main", r.returncode != 0, "exited 0")
+        expect("lint-renovate names the branch it targets", "develop" in r.stderr, f"stderr: {r.stderr!r}")
+
+        # The task itself, over the tracked files.
+        r = pixi("lint-renovate")
+        expect("lint-renovate passes on the tracked files", r.returncode == 0, f"output: {(r.stdout + r.stderr)!r}")
+
+        # …and coverage, for the same reason lint-pins ties its count to the `image:` keys.
+        # A regex narrowed to fewer images, or a service added without an annotation, leaves
+        # the check reporting OK over the pins it still happens to see.
+        declared_versions = sum(
+            1
+            for line in (REPO / ".env.example").read_text(encoding="utf-8").splitlines()
+            if re.match(r"^[A-Z][A-Z0-9_]*_VERSION=", line)
+        )
+        expect(
+            "lint-renovate detects one dependency for every *_VERSION declaration",
+            f"OK {declared_versions} dependencies detected" in r.stdout,
+            f"{declared_versions} declarations, stdout: {r.stdout!r}",
+        )
+        expect(
+            "lint-renovate detects every declaration and every compose reference",
+            f"over {declared_versions + image_keys} references" in r.stdout,
+            f"{declared_versions} declarations + {image_keys} 'image:' keys, stdout: {r.stdout!r}",
+        )
+
         # --- smoke-test: FR-5 by default, FR-16 under SMOKE_STRICT. ---
         # The stub answers `ps` with nothing, so no service is running. .env is
         # planted because the suite interpolates ports at shell level.
@@ -1766,8 +2154,27 @@ def main() -> int:
         triggers = parsed.get("on", parsed.get(True))
         expect(f"{path.name} declares triggers", isinstance(triggers, dict), f"on: {triggers!r}")
         if isinstance(triggers, dict):
-            for event in ("push", "pull_request"):
-                expect(f"{path.name} runs on {event}", event in triggers, f"triggers: {sorted(triggers)}")
+            if path.name == "ci.yml":
+                # The gate, and the only workflow a change is checked by. It must run on
+                # both events a change can arrive as.
+                for event in ("push", "pull_request"):
+                    expect(f"{path.name} runs on {event}", event in triggers, f"triggers: {sorted(triggers)}")
+            else:
+                # Every other workflow is scheduled or hand-started, and must be
+                # unreachable by a change. A second workflow on push or pull_request would
+                # be a second, weaker definition of what a change is checked by — and the
+                # weaker one is the one a reader would trust, because it is green sooner.
+                expect(
+                    f"{path.name} is scheduled or hand-started",
+                    bool({"schedule", "workflow_dispatch"} & set(triggers)),
+                    f"triggers: {sorted(triggers)}",
+                )
+                reachable = sorted({"push", "pull_request"} & set(triggers))
+                expect(
+                    f"{path.name} is not reachable by a change",
+                    not reachable,
+                    f"also runs on {reachable}",
+                )
 
         jobs = parsed.get("jobs")
         expect(f"{path.name} declares jobs", isinstance(jobs, dict) and bool(jobs), "no jobs found")
@@ -1835,6 +2242,56 @@ def main() -> int:
             f"the {job_name} job starts exactly the profiles the model declares",
             {name.strip() for name in job_profiles.split(",") if name.strip()} == model_profiles,
             f"workflow: {job_profiles!r}; model: {sorted(model_profiles)}",
+        )
+
+    # --- The update bot is something the repository runs, not something someone remembers. ---
+    # Every assertion here is about how the bot's pull requests reach the gate above. A bot
+    # that runs and opens pull requests nothing checks is worse than no bot: the proposals
+    # look validated because the repository has CI, and they are not.
+    bot_name = "renovate.yml"
+    bot = workflows.get(bot_name)
+    expect("the repository ships the update-bot workflow", bot is not None, f"no {bot_name} in {workflow_dir}")
+    if bot is not None:
+        bot_text = (workflow_dir / bot_name).read_text(encoding="utf-8")
+        bot_steps = [step for job in (bot.get("jobs") or {}).values() for step in job.get("steps") or []]
+        uses = [str(step.get("uses")) for step in bot_steps if step.get("uses") is not None]
+        actions = [ref for ref in uses if ref.split("@")[0] == "renovatebot/github-action"]
+        expect(f"{bot_name} runs the Renovate action", bool(actions), f"uses: {uses}")
+        # A floating ref would silently change what the bot does between runs, which is the
+        # same class of drift the image pins themselves exist to remove.
+        expect(
+            f"{bot_name} pins the Renovate action",
+            all(re.fullmatch(r"renovatebot/github-action@(v\d+(?:\.\d+)*|[0-9a-f]{40})", ref) for ref in actions),
+            f"uses: {actions}",
+        )
+        # The token is the whole mechanism. A pull request opened with GITHUB_TOKEN triggers
+        # no `pull_request` workflow, so the bot's own proposals would arrive with no checks
+        # at all — pinned here rather than left to whoever configures the secret.
+        secret_names = set(re.findall(r"\$\{\{\s*secrets\.([A-Za-z0-9_]+)\s*\}\}", bot_text))
+        expect(
+            f"{bot_name} authenticates with a repository secret",
+            bool(secret_names),
+            "no secrets.* reference found",
+        )
+        expect(
+            f"{bot_name} does not authenticate with GITHUB_TOKEN",
+            "GITHUB_TOKEN" not in secret_names and "github.token" not in bot_text,
+            f"secrets referenced: {sorted(secret_names)}",
+        )
+        # Restated on the parsed model as well as in the universal loop above: this is the
+        # property that keeps the bot from becoming a second gate.
+        bot_triggers = bot.get("on", bot.get(True))
+        expect(
+            f"{bot_name} is scheduled or hand-started only",
+            isinstance(bot_triggers, dict)
+            and bool({"schedule", "workflow_dispatch"} & set(bot_triggers))
+            and not {"push", "pull_request"} & set(bot_triggers),
+            f"on: {bot_triggers!r}",
+        )
+        expect(
+            f"{bot_name} names the configuration lint-renovate checks",
+            "renovate.json" in bot_text,
+            "the workflow names no configuration file",
         )
 
     # The Podman job's runtime switch is one environment variable. Without it the job
