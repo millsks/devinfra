@@ -34,7 +34,7 @@ services:
       service: defaults
     image: grafana/grafana:${GRAFANA_VERSION:-13.2.1}
     container_name: devinfra-grafana
-    profiles: [observability]
+    profiles: [grafana, observability]
     depends_on:
       - prometheus
       - loki

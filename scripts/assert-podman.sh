@@ -21,6 +21,9 @@ set -euo pipefail
 # shellcheck source=scripts/lib/common.sh
 source "$(dirname "$0")/lib/common.sh"
 
+# The ambient Selection, resolved to its dependency closure before Compose sees it.
+select_ambient
+
 # DOCKER_HOST is what the rest of the job already points at the socket, so it is
 # the natural default; DEVINFRA_PODMAN_URL exists for a run that wants to check a
 # different endpoint than the one Compose used.

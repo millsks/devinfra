@@ -10,7 +10,12 @@ set -euo pipefail
 # shellcheck source=scripts/lib/common.sh
 source "$(dirname "$0")/lib/common.sh"
 
+# Every Module, not the ambient Selection: a destroy that honoured a narrowed Selection
+# would leave the volumes it was not asked about behind while reporting that it removed
+# every one. The all-Modules request is what the hard-coded --profile flags used to say.
+select_profiles --all
+
 echo "This permanently deletes every devinfra volume (databases, objects, telemetry)."
 confirm_word destroy
 
-compose --profile admin --profile observability down -v
+compose down -v

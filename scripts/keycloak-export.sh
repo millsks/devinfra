@@ -7,6 +7,9 @@ set -euo pipefail
 # shellcheck source=scripts/lib/common.sh
 source "$(dirname "$0")/lib/common.sh"
 
+# The ambient Selection, resolved to its dependency closure before Compose sees it.
+select_ambient
+
 compose exec keycloak /opt/keycloak/bin/kc.sh export \
     --dir /tmp/kc-export --realm "$KEYCLOAK_REALM" --users realm_file
 compose cp "keycloak:/tmp/kc-export/${KEYCLOAK_REALM}-realm.json" \

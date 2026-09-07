@@ -58,23 +58,68 @@ Keycloak booting and importing its realm.
 to its pixi task and prints a deprecation notice on stderr — but they are going
 away, so prefer `pixi run`.
 
-### Profiles
+### Selection
 
-Core services (Postgres, Redis, Keycloak, Silo, Mailpit) always start. The rest
-are grouped into profiles, selected via `COMPOSE_PROFILES` in `.env`:
+`COMPOSE_PROFILES` in `.env` is a **Selection**: the Modules and groups you want.
+Every service carries its own Module name in `profiles:`, so nothing starts unless
+the Selection asks for it — there is no set of core services that always start any
+more. An empty Selection is refused, not started as nothing: the scripts exit 1
+naming the variable rather than reporting success over an empty stack.
 
-| Profile | Services |
+A Selection is expanded to its transitive `depends_on` closure before Compose sees
+it, so you name what you want and the resolver adds what it needs:
+
+```sh
+pixi run select keycloak        # keycloak,mailpit,postgres
+pixi run select postgres,redis  # postgres,redis — two containers, nothing else
+pixi run select admin           # flower,pgadmin,postgres,redis,redisinsight
+pixi run select                 # what your current .env asks for
+```
+
+Several names travel as one comma-separated argument — the same spelling
+`COMPOSE_PROFILES` uses. `./scripts/select.sh postgres redis` takes them
+separately if you prefer.
+
+The resolver reads the module files with PyYAML, which the pixi environment
+supplies. Reaching `scripts/select.sh` — or any lifecycle script, since they all
+resolve now — outside `pixi run` therefore needs an interpreter that has it;
+`DEVINFRA_PYTHON` names one (default `python3`), following the same
+`DEVINFRA_<TOOL>` convention as `DEVINFRA_COMPOSE`.
+
+Module names are the thirteen directories under `services/`. Two group names exist:
+
+| Group | Services |
 |---|---|
 | `admin` | pgAdmin, RedisInsight, Flower |
 | `observability` | OTel Collector, Prometheus, Loki, Tempo, Grafana |
 
 ```sh
-pixi run up-core                          # just the essentials
-COMPOSE_PROFILES=admin pixi run up        # essentials + admin UIs
+COMPOSE_PROFILES=postgres,redis pixi run up   # exactly two containers
+COMPOSE_PROFILES=keycloak pixi run up         # keycloak, and what it needs
+pixi run up-core                              # the five core Modules, by name
 ```
 
-The observability profile is the expensive one — five containers and roughly a
-gigabyte of RAM. Turn it off when you are not using it.
+A one-shot prefix like that is resolved for the task it runs, but it leaves the
+*unresolved* value in your environment. `pixi run smoke` is the one task that
+reads the runtime rather than the resolver (ADR 0013 exempts it), and loading the
+project with an unresolved Selection fails — so it exits 1 naming the variable
+rather than skipping every Module and reporting a clean pass. Export a resolved
+value if you want both: `export COMPOSE_PROFILES="$(./scripts/select.sh keycloak)"`.
+
+The `observability` group is the expensive one — five containers and roughly a
+gigabyte of RAM. Leave it out of your Selection when you are not using it.
+
+The shipped `.env.example` default resolves to every Module, so a fresh checkout
+starts the whole stack. **If your `.env` predates Selection, check it.** With no
+`COMPOSE_PROFILES` line at all, add one — the scripts refuse an empty Selection
+rather than starting nothing and reporting success. With the old
+`COMPOSE_PROFILES=admin,observability`, the value is still legal but no longer
+means what it did: `admin` and `observability` used to run *alongside* the core
+services, and now they resolve to ten Modules, silently leaving out Keycloak,
+MinIO and Mailpit at exit 0. Run `pixi run select` to see what your value
+actually starts, and copy `.env.example`'s default if you want the whole stack. `docker compose --profile keycloak`
+run by hand, bypassing the resolver, is expected to fail on the dependency it did
+not select; use `pixi run` tasks, or `scripts/select.sh`, instead (ADR 0013).
 
 ## Connecting your application
 
@@ -191,13 +236,19 @@ renovate.json                   what the update bot reads: one regex manager ove
 .githooks/pre-merge-commit      the same, for the merge commits pre-commit never sees
 .githooks/commit-msg            commit-time: execs `pixi run commit-msg`, nothing else
 Makefile                        deprecated shims forwarding to pixi tasks
-scripts/lib/common.sh           .env loading and defaults, sourced by the rest
-scripts/compose.sh              the container runtime, honouring DEVINFRA_COMPOSE
+scripts/lib/common.sh           .env loading, defaults and Selection resolution, sourced
+                                by the rest
+scripts/compose.sh              the container runtime, honouring DEVINFRA_COMPOSE, over a
+                                resolved Selection
+scripts/select.sh               a Selection expanded to its depends_on closure; the
+                                supported way to reach Compose (ADR 0013)
+scripts/resolve_selection.py    the closure itself: the Module graph, the profile index
+                                and the Selections lint-compose and lint-config validate
 scripts/wait-healthy.sh         blocks until healthy; non-zero on timeout
 scripts/urls.sh                 every service endpoint
 scripts/init-env.sh             .env from the template, never overwriting
 scripts/bootstrap.sh            points core.hooksPath at .githooks/, then reads it back
-scripts/up-core.sh              core services only, profiles cleared
+scripts/up-core.sh              the five core Modules, requested by name
 scripts/ps.sh                   container status, health and ports
 scripts/logs.sh                 tail all services or one
 scripts/psql.sh                 psql shell in the postgres container
@@ -211,15 +262,17 @@ scripts/keycloak-export.sh      live realm back over the JSON
 scripts/token.sh                mint an access token via the CLI client
 scripts/smoke-test.sh           the smoke driver: preflights, counters, helpers, then a
                                 glob over services/*/smoke.sh; SMOKE_STRICT=1 forbids skips
-scripts/lint-compose.sh         `config -q` for every combination of declared profiles
+scripts/lint-compose.sh         `config -q` for every Selection: each Module, each group,
+                                and every Module at once
 scripts/assert_config.py        bind address, host-port collisions, image pinning,
                                 identifier-only module volume/network stanzas, and the
                                 Module contract: a healthcheck or a justified
                                 healthcheck.none, a smoke.sh, a gotchas.md, seed/ or a
                                 justified seed.none, an x-endpoints: block naming every
                                 published port, x-requires: reconciled against the
-                                provider's endpoints and depends_on, and no service a
-                                module directory does not own (ADR 0012)
+                                provider's endpoints and depends_on, its own Module name
+                                in every owned service's profiles:, and no service a
+                                module directory does not own (ADR 0012, 0013)
 scripts/lint_json.py            the JSON check, one file per diagnostic
 scripts/assert_pins.py          .env.example and every compose fallback must agree
 scripts/assert_renovate.py      the bot's own regexes must still detect every pin
@@ -294,7 +347,8 @@ services/                       one directory per Module, listed in the order
 | `pixi run token dev dev` | Mint an access token | `make token U=dev P=dev` |
 | `pixi run config` | Render the resolved compose configuration | `make config` |
 | `pixi run lint` | Validate compose, rendered config, pins, the update bot, shell, YAML, JSON, Python | `make lint` |
-| `pixi run lint-compose` | `config -q` for every combination of declared profiles | — |
+| `pixi run select keycloak` | Print the Modules a Selection resolves to | — |
+| `pixi run lint-compose` | `config -q` for every Selection: each Module, each group, and every Module at once | — |
 | `pixi run lint-config` | Assert the *rendered* config's ports and image tags, and each module's identifier-only volume and network stanzas | — |
 | `pixi run lint-pins` | Assert every pin agrees between `.env.example` and the compose files | — |
 | `pixi run lint-renovate` | Assert the update bot's regexes still detect every image pin | — |
@@ -322,9 +376,9 @@ Three jobs, in parallel:
 
 | Job | Runs | Bound |
 |---|---|---|
-| `validate` | `pixi run ci` — compose config for every profile combination, the rendered-config assertions, shell, YAML, JSON and Python lint, and the self-test | 10 minutes |
-| `stack` | `pixi run ci-stack` — starts every profile, blocks until every healthcheck passes, then runs the smoke suite in strict mode | 15 minutes |
-| `stack-podman` | `pixi run ci-stack-podman` — the same tasks with the same profiles against Podman, then asserts Podman itself is running the containers | 15 minutes |
+| `validate` | `pixi run ci` — compose config for every Selection, the rendered-config assertions, shell, YAML, JSON and Python lint, and the self-test | 10 minutes |
+| `stack` | `pixi run ci-stack` — starts a Selection resolving to every Module, blocks until every healthcheck passes, then runs the smoke suite in strict mode | 15 minutes |
+| `stack-podman` | `pixi run ci-stack-podman` — the same tasks over the same Selection against Podman, then asserts Podman itself is running the containers | 15 minutes |
 
 The two stack jobs share their task list exactly; only the API the Compose client
 talks to differs. `stack-podman` pins `ubuntu-24.04` rather than `ubuntu-latest`,
@@ -354,7 +408,7 @@ and that the glob reaches exactly one script per Module.
 ### Strict smoke mode
 
 `scripts/smoke-test.sh` skips a service that is not running, which is what you
-want when you started a partial selection. CI starts *every* profile, so there a
+want when you started a partial Selection. CI starts every Module, so there a
 skip is evidence the stack did not come up. `SMOKE_STRICT=1` — what
 `pixi run smoke-strict` sets — scores every skip as a failure naming the absent
 service. Nothing else about any check changes.
@@ -578,18 +632,16 @@ DEVINFRA_COMPOSE="podman compose" pixi run up
 ### No service is excluded
 
 No service is excluded from the Podman run, and there is no quiet way to exclude
-one. The self-test pins the `stack-podman` job's `COMPOSE_PROFILES` to the
-profile set the model declares, so dropping a profile from that job reds the
-gate; the five core services carry no profile at all, so they cannot be dropped
-that way even in principle; and `smoke-strict` scores an absent service as a
-failure regardless.
+one. The self-test pins the `stack-podman` job's `COMPOSE_PROFILES` to a Selection
+that *resolves to every Module*, so narrowing that job's Selection reds the gate
+whichever name is dropped — a Module name or a group's; and `smoke-strict` scores
+an absent service as a failure regardless.
 
 So excluding a service is a reviewed change, not a configuration tweak. The route
-the gate permits, in one commit: give the service its own profile in
-`compose.yaml`, leave that profile out of the `stack-podman` job's
-`COMPOSE_PROFILES`, update the self-test's profile-set assertion and the strict
-smoke suite so both expect the exclusion, and record the service and the reason
-here. Never remove it from the Docker job.
+the gate permits, in one commit: narrow the `stack-podman` job's
+`COMPOSE_PROFILES`, update the self-test's resolves-to-every-Module assertion and
+the strict smoke suite so both expect the exclusion, and record the service and the
+reason here. Never remove it from the Docker job.
 
 Whether every service passes is the job's answer, not this file's: it starts the
 whole stack, blocks on health and runs the strict smoke suite, so a service that

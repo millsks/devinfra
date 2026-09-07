@@ -187,6 +187,7 @@ case "$sub" in
       *) printf '%s' "${STUB_SERVICES:-}" ;;
     esac ;;
   ps)
+    code="${STUB_PS_EXIT:-${STUB_EXIT:-0}}"
     case " $* " in
       *" --all "*) printf '%s' "${STUB_ALL:-}" ;;
       *) printf '%s' "${STUB_STDOUT:-}" ;;
@@ -240,7 +241,10 @@ def write_recorder(directory: Path, name: str) -> Path:
     per line to STUB_RECORD and one environment observation to STUB_ENV_RECORD.
     `config --profiles` answers with STUB_PROFILES, `config --format` with STUB_JSON,
     any other `config` with STUB_SERVICES, `ps --all` with STUB_ALL and everything
-    else with STUB_STDOUT — the health wait asks for the expected service set, the
+    else with STUB_STDOUT. `ps` exits with STUB_PS_EXIT when that is set, which is
+    how a project that fails to load is expressed: `ps` ignores active profiles but
+    still has to resolve the model, so an unresolved Selection fails there while
+    `version` succeeds — the health wait asks for the expected service set, the
     running containers and the exited ones in the same run and must be able to see
     all three disagree, and the compose lint asks for the profiles and then for each
     combination's resolved model.
@@ -298,6 +302,9 @@ def stub_env(
     # told to fail: a case that wants every combination to fail must still be able
     # to read the combinations.
     env["STUB_PROFILES_EXIT"] = "0"
+    # `ps` follows STUB_EXIT unless a case says otherwise. Defined-but-empty rather
+    # than absent, so a value in this process's own environment cannot leak in.
+    env["STUB_PS_EXIT"] = ""
     return env
 
 
@@ -917,13 +924,37 @@ def main() -> int:
             exit_code: str = "0",
             profiles: str = "",
             document: str = "",
+            request: str | None = "postgres,redis",
         ) -> dict[str, str]:
             record.unlink(missing_ok=True)
             record.with_name(record.name + ".env").unlink(missing_ok=True)
-            return stub_env(compose_stub, record, stdout, services, exit_code, profiles, document)
+            env = stub_env(compose_stub, record, stdout, services, exit_code, profiles, document)
+            # Every script now resolves a Selection before it reaches the runtime, and an
+            # empty one is refused rather than proceeded with (AD-18). So the ambient
+            # request is stated here rather than inherited from whatever the developer
+            # running the self-test happens to export — which also makes every recorded
+            # COMPOSE_PROFILES value deterministic, because the resolver reads the real
+            # services/*/compose.yaml and needs no stub of its own. `request=None` is for
+            # the cases that must let a planted .env supply the value instead.
+            env.pop("COMPOSE_PROFILES", None)
+            if request is not None:
+                env["COMPOSE_PROFILES"] = request
+            return env
 
         core = "postgres\nredis\n"
         healthy = "postgres|devinfra-postgres|running|healthy|0\nredis|devinfra-redis|running|healthy|0\n"
+
+        # The catalog, read straight off the filesystem — the independent expectation every
+        # resolved-Selection assertion below is measured against. Not the resolver's own
+        # answer: an expectation derived from the thing under test agrees with whatever it
+        # happens to say, including a Selection list that quietly dropped a Module.
+        every_module = sorted(path.parent.name for path in (REPO / "services").glob("*/compose.yaml"))
+        expect("there are module directories to resolve", bool(every_module), "found no services/*/compose.yaml")
+        all_modules = ",".join(every_module)
+        # up-core requests the five core Modules by name; none of them depends on anything
+        # outside the five, so the closure is the five.
+        core_request = ["postgres", "redis", "keycloak", "minio", "mailpit"]
+        core_modules = ",".join(sorted(core_request))
 
         # wait-healthy: every expected service up and healthy.
         env = fresh(healthy, core)
@@ -1000,9 +1031,17 @@ def main() -> int:
         r = run_script("destroy.sh", env=fresh(), stdin="destroy\n")
         expect("destroy.sh accepts its exact word", r.returncode == 0, f"exit {r.returncode}: {r.stderr!r}")
         expect(
-            "destroy.sh removes volumes for both profiles",
-            recorded(record) == ["--profile", "admin", "--profile", "observability", "down", "-v"],
+            "destroy.sh removes volumes with no --profile flag of its own",
+            recorded(record) == ["down", "-v"],
             f"recorded {recorded(record)}",
+        )
+        # The flags left; the assertion surface moved to the environment. A destroy that
+        # honoured a narrowed Selection would leave the volumes it was not asked about
+        # behind while reporting that it removed every one.
+        expect(
+            "destroy.sh requests every Module",
+            recorded_env(record) == [f"COMPOSE_PROFILES={all_modules}"],
+            f"observed {recorded_env(record)}; expected every module: {every_module}",
         )
 
         env = fresh(healthy, core)
@@ -1240,37 +1279,87 @@ def main() -> int:
             "COMPOSE_PROFILES=admin,observability\n"
         )
         with planted(REPO / ".env", dotenv):
-            r = pixi("psql", env=fresh())
+            r = pixi("psql", env=fresh(request=None))
             expect(
                 "psql uses the user and database .env declares",
                 recorded(record) == ["exec", "postgres", "psql", "-U", "zzuser", "-d", "zzdb"],
                 f"recorded {recorded(record)}",
             )
-            r = pixi("redis-cli", env=fresh())
+            # The argv above is identical whether or not psql.sh resolved anything, so the
+            # ambient resolution is asserted on the environment the stub actually saw. The
+            # planted request is `admin,observability`, whose closure is ten Modules and so
+            # differs from itself: deleting `select_ambient` from psql.sh reds this, where a
+            # request whose closure were its own name would not.
+            expect(
+                "psql resolves the ambient Selection before reaching the runtime",
+                recorded_env(record)
+                == [
+                    "COMPOSE_PROFILES=flower,grafana,loki,otel-collector,pgadmin,"
+                    "postgres,prometheus,redis,redisinsight,tempo"
+                ],
+                f"observed {recorded_env(record)}",
+            )
+            r = pixi("redis-cli", env=fresh(request=None))
             expect(
                 "redis-cli uses the password .env declares",
                 recorded(record) == ["exec", "redis", "redis-cli", "-a", "zzpass", "--no-auth-warning"],
                 f"recorded {recorded(record)}",
             )
-            r = pixi("urls", env=fresh())
+            r = pixi("urls", env=fresh(request=None))
             expect("urls prints the port .env declares", "31337" in r.stdout, f"stdout: {r.stdout!r}")
             expect("urls prints the user .env declares", "zzuser" in r.stdout, f"stdout: {r.stdout!r}")
             expect("urls prints the realm .env declares", "zzrealm" in r.stdout, f"stdout: {r.stdout!r}")
 
             # The stub is a child process, so what it observes is what .env
             # actually exported. Without `set -a` around the source these values
-            # would stay shell-local and every child would see nothing.
-            r = pixi("ps", env=fresh())
+            # would stay shell-local and every child would see nothing — and with a
+            # profile on every service, the Selection would then be empty and the
+            # script would refuse rather than reach the runtime at all. What the stub
+            # sees is .env's request `admin` *resolved*: the three admin services plus
+            # the Postgres and Redis they talk to, which is the whole point of the
+            # resolver and is pinned literally here rather than recomputed: `admin` and
+            # `observability` between them pull in Postgres and Redis, and nothing else.
+            r = pixi("ps", env=fresh(request=None))
             expect(
-                "values from .env are exported to child processes",
-                recorded_env(record) == ["COMPOSE_PROFILES=admin,observability"],
+                "values from .env are exported to child processes, resolved",
+                recorded_env(record)
+                == [
+                    "COMPOSE_PROFILES=flower,grafana,loki,otel-collector,pgadmin,"
+                    "postgres,prometheus,redis,redisinsight,tempo"
+                ],
                 f"observed {recorded_env(record)}",
             )
 
-            # up-core clears COMPOSE_PROFILES and then execs the health wait, which
-            # re-reads .env. If .env won, the wait would cover the very containers
-            # up-core excluded.
-            env = fresh(healthy, core)
+            # An environment may carry a name that is not a valid shell identifier — a
+            # pixi task with an `env` table leaves one called `?` behind — and the
+            # export/replay above is where that bites: `declare -x ?="0"` makes `declare`
+            # fail, and under `set -e` every script that sources common.sh dies before it
+            # reaches the runtime. The five lifecycle tasks with an `env` table hit this
+            # for real; this states it directly so the filter cannot be deleted.
+            env = fresh(request=None)
+            env["?"] = "0"
+            r = pixi("ps", env=env)
+            expect(
+                "a script survives an environment carrying an invalid identifier",
+                r.returncode == 0 and "not a valid identifier" not in r.stderr,
+                f"exit {r.returncode}: {(r.stdout + r.stderr)!r}",
+            )
+            expect(
+                "the .env value still wins after the replay skips the invalid name",
+                recorded_env(record)
+                == [
+                    "COMPOSE_PROFILES=flower,grafana,loki,otel-collector,pgadmin,"
+                    "postgres,prometheus,redis,redisinsight,tempo"
+                ],
+                f"observed {recorded_env(record)}",
+            )
+
+            # up-core requests the five core Modules by name and then execs the health
+            # wait, which re-reads .env. If .env won, the wait would cover the very
+            # containers up-core excluded. Clearing COMPOSE_PROFILES used to do this job
+            # and no longer can: with a profile on every service an empty value selects
+            # nothing, which is the breaking change ADR 0013 records.
+            env = fresh(healthy, core, request=None)
             env["WAIT_ATTEMPTS"], env["WAIT_INTERVAL"] = "1", "0"
             r = run_script("up-core.sh", env=env)
             profiles = recorded_env(record)
@@ -1278,10 +1367,65 @@ def main() -> int:
             expect("up-core.sh starts the stack", recorded(record)[:2] == ["up", "-d"], f"recorded {recorded(record)}")
             expect("up-core.sh made more than one runtime call", len(profiles) > 1, f"observed {profiles}")
             expect(
-                "every up-core.sh runtime call sees COMPOSE_PROFILES empty",
-                set(profiles) == {"COMPOSE_PROFILES="},
+                "every up-core.sh runtime call sees exactly the five core Modules",
+                set(profiles) == {f"COMPOSE_PROFILES={core_modules}"},
+                f"observed {profiles}; expected {core_modules}",
+            )
+            expect(
+                "up-core.sh does not drag in the admin services .env asks for",
+                all("pgadmin" not in line for line in profiles),
                 f"observed {profiles}",
             )
+
+        # --- An empty Selection is refused, and the runtime is never reached. ---
+        # One of the two mitigations ADR 0013 leans on: a .env predating Selection, or one
+        # that lost the line, fails loudly instead of starting nothing and reporting
+        # success. Asserted on behaviour rather than on the source text, because the way
+        # this regresses is invisible to a grep — `select_profiles` written as
+        # `local x="$(...)"` takes `local`'s exit status, swallows the refusal and runs on
+        # with an empty COMPOSE_PROFILES. Every other case here supplies a non-empty
+        # request, so all of them stay green through exactly that mutation.
+        r = pixi("ps", env=fresh(request=None))
+        expect("a script refuses an empty ambient Selection", r.returncode != 0, "exited 0 with nothing selected")
+        expect("the refusal names the variable to fix", "COMPOSE_PROFILES" in r.stderr, f"stderr: {r.stderr!r}")
+        expect("a refused Selection never reaches the runtime", not recorded(record), f"recorded {recorded(record)}")
+
+        # --- The resolver's interpreter is a seam, and a missing PyYAML is a diagnostic. ---
+        # Every lifecycle script runs Python now, where none did before, so the two ways
+        # that can fail outside pixi are pinned: the DEVINFRA_PYTHON escape hatch the
+        # refusal itself tells the reader to reach for, and the named refusal that
+        # replaced a raw ModuleNotFoundError traceback.
+        python_stub = stubs / "python-stub"
+        python_stub.write_text(
+            '#!/usr/bin/env bash\necho "zz-stub-interpreter $1"\n',
+            encoding="utf-8",
+            newline="\n",
+        )
+        python_stub.chmod(0o755)
+        env = fresh()
+        env["DEVINFRA_PYTHON"] = str(python_stub)
+        r = run_script("select.sh", "postgres", env=env)
+        expect(
+            "select.sh runs the interpreter DEVINFRA_PYTHON names",
+            r.stdout.strip() == "zz-stub-interpreter scripts/resolve_selection.py",
+            f"exit {r.returncode}: {r.stdout!r} {r.stderr!r}",
+        )
+
+        # An interpreter that cannot import PyYAML, expressed as a shim ahead of it on
+        # PYTHONPATH rather than by building an environment without the package.
+        shim = stubs / "noyaml"
+        shim.mkdir(exist_ok=True)
+        (shim / "yaml.py").write_text(
+            'raise ModuleNotFoundError("No module named yaml")\n', encoding="utf-8", newline="\n"
+        )
+        env = fresh()
+        env["PYTHONPATH"] = str(shim)
+        r = run_script("select.sh", "postgres", env=env)
+        expect("select.sh refuses an interpreter without PyYAML", r.returncode != 0, "exited 0")
+        expect("the refusal names PyYAML", "PyYAML" in r.stderr, f"stderr: {r.stderr!r}")
+        expect("the refusal names the interpreter seam", "DEVINFRA_PYTHON" in r.stderr, f"stderr: {r.stderr!r}")
+        expect("the refusal is a diagnostic, not a traceback", "Traceback" not in r.stderr, f"stderr: {r.stderr!r}")
+        expect("a refused resolver prints nothing on stdout", not r.stdout, f"stdout: {r.stdout!r}")
 
         # --- Every lifecycle task reaches the runtime through the DEVINFRA_COMPOSE seam. ---
         # Five task bodies used to name `docker compose` directly. pixi.toml has no
@@ -1289,28 +1433,33 @@ def main() -> int:
         # contributor who set it started the stack under Docker regardless — the
         # setting appeared to work and did not. These cases run the tasks themselves,
         # so a body repointed back at a runtime fails here rather than at review.
+        #
+        # No task body names a profile either, for the same reason. Five of them used to
+        # carry `--profile admin --profile observability`, which is a second, drifting
+        # statement of what the stack contains and one a thirteenth Module would have
+        # escaped. The flags are gone; the assertion surface is the Selection each task
+        # exports, which is what Compose actually acts on.
         seam_tasks = {
-            "start": ["up", "-d"],
-            "down": ["--profile", "admin", "--profile", "observability", "down"],
-            "stop": ["--profile", "admin", "--profile", "observability", "stop"],
-            "pull": ["--profile", "admin", "--profile", "observability", "pull"],
-            "config": ["--profile", "admin", "--profile", "observability", "config"],
-            "dump-logs": [
-                "--profile",
-                "admin",
-                "--profile",
-                "observability",
-                "logs",
-                # Uncoloured because the destination is a CI log, and bounded because
-                # an unbounded dump of fourteen services buries the failure it exists
-                # to explain. `logs.sh` cannot be reused: it hard-codes -f and hangs.
-                "--no-color",
-                "--tail=200",
-            ],
+            "start": (["up", "-d"], "postgres,redis"),
+            "down": (["down"], all_modules),
+            "stop": (["stop"], all_modules),
+            "pull": (["pull"], all_modules),
+            "config": (["config"], all_modules),
+            "dump-logs": (
+                [
+                    "logs",
+                    # Uncoloured because the destination is a CI log, and bounded because
+                    # an unbounded dump of fourteen services buries the failure it exists
+                    # to explain. `logs.sh` cannot be reused: it hard-codes -f and hangs.
+                    "--no-color",
+                    "--tail=200",
+                ],
+                all_modules,
+            ),
         }
         # `start` depends on init, which would otherwise create a .env and leave it.
         with planted(REPO / ".env", (REPO / ".env.example").read_text(encoding="utf-8")):
-            for task_name, expected_argv in seam_tasks.items():
+            for task_name, (expected_argv, expected_selection) in seam_tasks.items():
                 r = pixi(task_name, env=fresh())
                 expect(
                     f"{task_name} exits 0 through the seam",
@@ -1322,6 +1471,49 @@ def main() -> int:
                     recorded(record) == expected_argv,
                     f"recorded {recorded(record)}",
                 )
+                expect(
+                    f"{task_name} acts on the {'all-Modules' if expected_selection == all_modules else 'ambient'} "
+                    f"Selection",
+                    recorded_env(record) == [f"COMPOSE_PROFILES={expected_selection}"],
+                    f"observed {recorded_env(record)}; expected {expected_selection}",
+                )
+
+        # The `select` task, at the surface a developer reaches. Its argument list is one
+        # `names` value, so several names travel comma-joined — the form the README
+        # documents — and with no argument at all the empty value falls through to
+        # COMPOSE_PROFILES, which is what makes a bare `pixi run select` print what the
+        # current .env asks for. Nothing else executes that fallback.
+        r = pixi("select", "keycloak", env=fresh())
+        expect("the select task exits 0 for a Module name", r.returncode == 0, f"stderr: {r.stderr!r}")
+        expect(
+            "the select task prints the closure, not the request",
+            "keycloak,mailpit,postgres" in r.stdout,
+            f"stdout: {r.stdout!r}",
+        )
+        r = pixi("select", "postgres,redis", env=fresh())
+        expect(
+            "the select task takes several names comma-joined, as the README documents",
+            r.returncode == 0 and "postgres,redis" in r.stdout,
+            f"exit {r.returncode}: {(r.stdout + r.stderr)!r}",
+        )
+        with planted(REPO / ".env", dotenv):
+            r = pixi("select", env=fresh(request=None))
+            expect(
+                "the select task with no argument reads the Selection from .env",
+                r.returncode == 0
+                and "flower,grafana,loki,otel-collector,pgadmin,postgres,prometheus,redis,redisinsight,tempo"
+                in r.stdout,
+                f"exit {r.returncode}: {(r.stdout + r.stderr)!r}",
+            )
+        # …and with neither an argument nor a .env there is no Selection to print, which is
+        # the refusal rather than an empty line at exit 0.
+        r = pixi("select", env=fresh(request=None))
+        expect("the select task refuses an empty Selection", r.returncode != 0, "exited 0")
+        expect(
+            "the select task names COMPOSE_PROFILES when it refuses",
+            "COMPOSE_PROFILES" in r.stderr,
+            f"stderr: {r.stderr!r}",
+        )
 
         # The seam's default, against the real runtime: only it can say what an
         # unset DEVINFRA_COMPOSE actually reaches. An exported-but-empty value must
@@ -1331,6 +1523,9 @@ def main() -> int:
         # changes where the API lives, not what this falls back to.
         for value in (None, ""):
             env = dict(os.environ)
+            # compose.sh resolves a Selection before it reaches the runtime, and an empty
+            # one is refused, so the request is stated rather than inherited.
+            env["COMPOSE_PROFILES"] = "postgres"
             if value is None:
                 env.pop("DEVINFRA_COMPOSE", None)
             else:
@@ -1536,62 +1731,94 @@ def main() -> int:
         finally:
             unreadable.chmod(0o644)
 
-        # --- lint-compose: one `config -q` per combination of declared profiles. ---
-        # The profiles are read back from the model, so a profile added to
-        # compose.yaml later is validated without anyone remembering to add it here.
+        # --- lint-compose: one `config -q` per Selection this repository can name. ---
+        # Every Module's own closure, every group profile's closure, and every Module at
+        # once (ADR 0013). The power set that used to stand here is gone: with a profile
+        # on every service it is 2^15 renders, which would never finish.
+        #
+        # The resolver needs no stub of its own — it parses the real
+        # services/*/compose.yaml — so the Selections and the value each one exports are
+        # deterministic and can be pinned exactly.
         two = "admin\nobservability\n"
-        every_combination = [
-            "config",
-            "--profiles",
-            "config",
-            "-q",
-            "--profile",
-            "admin",
-            "config",
-            "-q",
-            "--profile",
-            "observability",
-            "config",
-            "-q",
-            "--profile",
-            "admin",
-            "--profile",
-            "observability",
-            "config",
-            "-q",
-        ]
+        groups = ["admin", "observability"]
+        expected_requests = [*every_module, *groups, "--all"]
+        # One `config --profiles` to read the declared groups, then one `config -q` per
+        # Selection. No --profile flag anywhere: the Selection travels in the environment.
+        every_selection = ["config", "--profiles"] + ["config", "-q"] * len(expected_requests)
         r = pixi("lint-compose", env=fresh(profiles=two))
-        expect("lint-compose exits 0 when every combination validates", r.returncode == 0, f"exit {r.returncode}")
         expect(
-            "lint-compose validates every combination of the declared profiles",
-            recorded(record) == every_combination,
-            f"recorded {recorded(record)}",
+            "lint-compose exits 0 when every Selection validates",
+            r.returncode == 0,
+            f"exit {r.returncode}: {(r.stdout + r.stderr)!r}",
         )
         expect(
-            "lint-compose clears COMPOSE_PROFILES so each combination is exactly its flags",
-            set(recorded_env(record)) == {"COMPOSE_PROFILES="},
-            f"observed {recorded_env(record)}",
+            "lint-compose validates one Selection per Module, per group and one for every Module",
+            recorded(record) == every_selection,
+            f"recorded {recorded(record)}; expected {len(expected_requests)} Selections",
+        )
+        # The enumeration itself, proved load-bearing: a Selection list that dropped a
+        # Module would fail here naming the Module, because the expectation is built from
+        # the services/ directory listing rather than from the resolver's own answer.
+        printed = {
+            line.split("lint-compose: Selection ", 1)[1].split(" -> ", 1)[0]
+            for line in r.stdout.splitlines()
+            if line.startswith("lint-compose: Selection ")
+        }
+        expect(
+            "lint-compose names every Module, every group and the all-Modules request",
+            printed == set(expected_requests),
+            f"missing {sorted(set(expected_requests) - printed)}, unexpected {sorted(printed - set(expected_requests))}",
+        )
+        # …and the value each one exports is the resolved closure, never the raw request.
+        # `COMPOSE_PROFILES=admin` reaching Compose would select the three admin services
+        # without the Postgres and Redis they talk to, which is the failure AD-16 exists
+        # to prevent.
+        exported = recorded_env(record)
+        expect(
+            "lint-compose exports a resolved Selection for every render",
+            exported[0] == "COMPOSE_PROFILES=" and len(exported) == len(expected_requests) + 1,
+            f"observed {exported}",
+        )
+        expect(
+            "lint-compose expands the admin group to its closure, not to 'admin'",
+            "COMPOSE_PROFILES=flower,pgadmin,postgres,redis,redisinsight" in exported,
+            f"observed {exported}",
+        )
+        expect(
+            "lint-compose validates every Module at once as its last Selection",
+            exported[-1] == f"COMPOSE_PROFILES={all_modules}",
+            f"observed {exported[-1]!r}; expected every module: {all_modules}",
         )
 
+        # A profile list that was read successfully and is empty is a failure in its own
+        # right: with a Module profile on every service the model declares at least one
+        # profile per Module, so an empty answer means the enumeration found nothing.
+        # Reported as a pass over one combination is what this used to do (DW-32).
         r = pixi("lint-compose", env=fresh(profiles=""))
+        expect("lint-compose fails when the model declares no profile at all", r.returncode != 0, "exited 0")
         expect(
-            "lint-compose still validates one combination when no profile is declared",
-            recorded(record) == ["config", "--profiles", "config", "-q"],
+            "lint-compose says the empty profile list cannot be right",
+            "declares no profiles at all" in r.stderr,
+            f"stderr: {r.stderr!r}",
+        )
+        expect(
+            "lint-compose validated no Selection it could not trust the enumeration for",
+            recorded(record) == ["config", "--profiles"],
             f"recorded {recorded(record)}",
         )
 
-        # A failure in one combination must not hide the others.
+        # A failure in one Selection must not hide the others.
         r = pixi("lint-compose", env=fresh(profiles=two, exit_code="1"))
         listed = {line.strip() for line in r.stderr.splitlines() if line.startswith("  ")}
-        expect("lint-compose fails when a combination fails", r.returncode != 0, "exited 0")
+        expect("lint-compose fails when a Selection fails", r.returncode != 0, "exited 0")
         expect(
-            "lint-compose names every failing combination",
-            listed == {"(none)", "admin", "observability", "admin,observability"},
+            "lint-compose names every failing Selection",
+            listed == set(expected_requests),
             f"listed {listed}; stderr: {r.stderr!r}",
         )
 
         # An enumeration that could not be read must never be treated as "no
-        # profiles": that would validate one combination and report success.
+        # profiles": that would skip the group Selections and report success.
         env = fresh(profiles=two)
         env["STUB_PROFILES_EXIT"] = "1"
         r = pixi("lint-compose", env=env)
@@ -1679,6 +1906,10 @@ def main() -> int:
             "services:\n"
             "  zz-selftest-defect:\n"
             "    image: alpine:3.22\n"
+            # Its own Module name, the leg ADR 0013 adds — these cases are about the
+            # volume and network stanzas, and a fixture failing the profile leg instead
+            # would say nothing about either.
+            "    profiles: [zz-selftest-defect]\n"
             '    healthcheck:\n      test: ["CMD", "true"]\n'
             '    ports:\n      - "127.0.0.1:${ZZ_SELFTEST_PORT:-19990}:1"\n'
         )
@@ -1805,11 +2036,15 @@ def main() -> int:
         endpoints_block = (
             "x-endpoints:\n  ZZ_SELFTEST_PORT:\n    url: http://localhost:1\n    description: a fixture endpoint\n"
         )
+        # Every service a Module owns declares its own Module name in `profiles:` — the
+        # leg ADR 0013 adds — so the fixture bodies carry it too. Without it every case
+        # below would fail for that reason as well, and the four sanctioned shapes would
+        # stop being sanctioned.
+        own_profile = "    profiles: [zz-selftest-contract]\n"
         primary_block = (
             "services:\n"
             "  zz-selftest-contract:\n"
-            "    image: alpine:3.22\n"
-            '    healthcheck:\n      test: ["CMD", "true"]\n'
+            "    image: alpine:3.22\n" + own_profile + '    healthcheck:\n      test: ["CMD", "true"]\n'
             '    ports:\n      - "127.0.0.1:${ZZ_SELFTEST_PORT:-19991}:1"\n'
         )
         # The same service with the probe declared only to be cancelled, and with no probe
@@ -1818,8 +2053,7 @@ def main() -> int:
         no_probe_block = (
             "services:\n"
             "  zz-selftest-contract:\n"
-            "    image: alpine:3.22\n"
-            '    ports:\n      - "127.0.0.1:${ZZ_SELFTEST_PORT:-19991}:1"\n'
+            "    image: alpine:3.22\n" + own_profile + '    ports:\n      - "127.0.0.1:${ZZ_SELFTEST_PORT:-19991}:1"\n'
         )
         disabled_probe_block = no_probe_block + "    healthcheck:\n      disable: true\n"
         cancelled_probe_block = no_probe_block + '    healthcheck:\n      test: ["NONE"]\n'
@@ -1828,8 +2062,7 @@ def main() -> int:
         probe_no_ports_block = (
             "services:\n"
             "  zz-selftest-contract:\n"
-            "    image: alpine:3.22\n"
-            '    healthcheck:\n      test: ["CMD", "true"]\n'
+            "    image: alpine:3.22\n" + own_profile + '    healthcheck:\n      test: ["CMD", "true"]\n'
         )
         complete_body = endpoints_block + primary_block
 
@@ -1976,6 +2209,47 @@ def main() -> int:
                 complete_siblings,
                 ["zz-selftest-contract", "postgres", "depends_on"],
             ),
+            # ADR 0013's leg. A service with no `profiles:` key joins *every* Selection:
+            # it starts whatever was asked for and no Selection can leave it out, while
+            # `config -q` passes and every other check here stays green. This is the
+            # state the whole stack was in before Selection existed.
+            (
+                "a service with no profiles: key of its own",
+                complete_body.replace(own_profile, ""),
+                complete_siblings,
+                ["zz-selftest-contract", "profiles"],
+            ),
+            # …and one carrying a profile that is not its Module's. `select.sh <module>`
+            # would then resolve to a Module whose service the request does not select.
+            (
+                "a service whose profiles: omits its own Module name",
+                complete_body.replace(own_profile, "    profiles: [admin]\n"),
+                complete_siblings,
+                ["zz-selftest-contract", "admin"],
+            ),
+            # The reverse direction, and the one that breaks the headline property while
+            # every gate stays green. A service carrying *another* Module's name joins that
+            # Module's Selection: `select.sh postgres` would then emit two Modules, so
+            # "two names, two containers" stops holding and one Module has reached into
+            # another Module's Selection (AD-15).
+            (
+                "a service carrying another Module's name in profiles:",
+                complete_body.replace(own_profile, "    profiles: [zz-selftest-contract, postgres]\n"),
+                complete_siblings,
+                ["zz-selftest-contract", "postgres"],
+            ),
+            # The helper half. `minio-init` takes `[minio]`, identical to its primary:
+            # a helper selected by a different set either starts without the service it
+            # exists to serve, or is left behind when that service is selected. The
+            # helper here carries its Module name, so only the equality leg can catch it.
+            (
+                "a helper whose profile set differs from its primary's",
+                complete_body
+                + "  zz-selftest-contract-init:\n    image: alpine:3.22\n"
+                + "    profiles: [zz-selftest-contract, admin]\n",
+                complete_siblings,
+                ["zz-selftest-contract", "zz-selftest-contract-init"],
+            ),
         ]
         for case, body, siblings, needles in contract_cases:
             with contract_fixture(body, siblings):
@@ -1998,7 +2272,10 @@ def main() -> int:
         # healthcheck leg is asserted on the primary only, because a helper that exits 0
         # has nothing to keep healthy. A rule that rejected either would reject the stack.
         with contract_fixture(
-            complete_body + '  zz-selftest-contract-init:\n    image: alpine:3.22\n    restart: "no"\n',
+            complete_body
+            + "  zz-selftest-contract-init:\n    image: alpine:3.22\n"
+            + own_profile
+            + '    restart: "no"\n',
             complete_siblings,
         ):
             r = pixi("lint-config", env=fresh(document=clean_doc))
@@ -2028,7 +2305,9 @@ def main() -> int:
         with contract_fixture(
             endpoints_block
             + primary_block
-            + "  zz-selftest-contract-init:\n    image: alpine:3.22\n    depends_on:\n      - minio-init\n"
+            + "  zz-selftest-contract-init:\n    image: alpine:3.22\n"
+            + own_profile
+            + "    depends_on:\n      - minio-init\n"
             + "x-requires:\n  minio:\n    - MINIO_API_PORT\n",
             complete_siblings,
         ):
@@ -2168,22 +2447,51 @@ def main() -> int:
         env["COMPOSE_PROFILES"] = "admin,observability"
         r = pixi("lint-config", env=env)
         expect(
-            "lint-config renders every profile combination",
-            recorded(record).count("--format") == 4,
-            f"recorded {recorded(record)}",
+            "lint-config renders one document per Selection, not per profile subset",
+            recorded(record).count("--format") == len(every_module) + len(groups) + 1,
+            f"recorded {recorded(record).count('--format')} renders; expected "
+            f"{len(every_module)} Modules + {len(groups)} groups + the all-Modules Selection",
         )
         expect(
-            "lint-config clears COMPOSE_PROFILES so each combination is exactly its flags",
+            "lint-config clears COMPOSE_PROFILES so each Selection is exactly its flags",
             set(recorded_env(record)) == {"COMPOSE_PROFILES="},
             f"observed {recorded_env(record)}",
         )
+        # The enumeration proved load-bearing, the same way lint-compose's is: the
+        # expectation is built from the services/ directory listing, so a Selection list
+        # that dropped a Module fails here naming the Module rather than passing quietly
+        # over a shorter list. Every Module must appear as its own --profile flag at
+        # least once, because every Module is its own Selection.
+        flagged = {
+            argument
+            for previous, argument in zip(recorded(record), recorded(record)[1:], strict=False)
+            if previous == "--profile"
+        }
+        expect(
+            "lint-config renders a Selection for every Module in the catalog",
+            set(every_module) <= flagged,
+            f"never rendered {sorted(set(every_module) - flagged)}",
+        )
 
         # An enumeration that could not be read must never be treated as "no
-        # profiles": that would assert against one combination and report success.
+        # profiles": that would leave the model's own profile list unreconciled against
+        # the resolver's, and report success.
         env = fresh(profiles=two, document=clean_doc)
         env["STUB_PROFILES_EXIT"] = "1"
         r = pixi("lint-config", env=env)
         expect("lint-config fails when the profiles cannot be enumerated", r.returncode != 0, "exited 0")
+
+        # …and a profile the model declares that the resolver cannot name is a Selection
+        # nothing would ever validate. Without this the reconciliation could be deleted
+        # and every case here would still pass.
+        env = fresh(profiles=two + "zz-unresolvable-profile\n", document=clean_doc)
+        r = pixi("lint-config", env=env)
+        expect("lint-config rejects a declared profile the resolver cannot name", r.returncode != 0, "exited 0")
+        expect(
+            "lint-config names the profile no Selection covers",
+            "zz-unresolvable-profile" in r.stderr,
+            f"stderr: {r.stderr!r}",
+        )
 
         # A digest is a stricter pin than a tag, so it is accepted.
         digest = rendered({"redis": {"image": "redis@sha256:" + "a" * 64, "ports": []}})
@@ -3161,6 +3469,47 @@ def main() -> int:
                 f"stdout: {r.stdout!r}",
             )
 
+            # …and a runtime that answers `version` but cannot load the project. `ps`
+            # ignores active profiles, but it still has to resolve the model, so an
+            # unresolved Selection — COMPOSE_PROFILES naming a Module without its
+            # dependencies — fails there and nowhere else. Discarding that status read as
+            # "nothing is running": every Module skipped, and the default suite exited 0
+            # having verified nothing. The three preflights above cannot see it, because
+            # each of them passes.
+            env = fresh()
+            env["STUB_PS_EXIT"] = "1"
+            r = run_script("smoke-test.sh", env=env)
+            expect(
+                "smoke-test fails when the compose project does not load",
+                r.returncode != 0,
+                "exited 0 having skipped every Module — the oracle read a broken project as an empty stack",
+            )
+            expect(
+                "smoke-test says the project did not load and names the variable",
+                "did not load" in r.stderr and "COMPOSE_PROFILES" in r.stderr,
+                f"stderr: {r.stderr!r}",
+            )
+            expect(
+                "smoke-test reports no clean pass when the project does not load",
+                "PASS" not in r.stdout and "0 failed" not in r.stdout,
+                f"stdout: {r.stdout!r}",
+            )
+            # The diagnostic is the whole value of the branch, so it is read rather than
+            # merely searched for a substring: `${V:+'$V'}${V:-unset}` fires both arms for
+            # a set value and printed it twice, with literal backslashes, while a
+            # `"COMPOSE_PROFILES" in stderr` assertion stayed green.
+            shown = [line for line in r.stderr.splitlines() if line.strip().startswith("COMPOSE_PROFILES is ")]
+            expect(
+                "smoke-test prints one COMPOSE_PROFILES line when the project does not load",
+                len(shown) == 1,
+                f"stderr lines: {shown!r}",
+            )
+            expect(
+                "smoke-test shows the Selection once, unmangled",
+                bool(shown) and shown[0].strip() == "COMPOSE_PROFILES is 'postgres,redis'.",
+                f"line: {shown[0]!r}" if shown else "no line",
+            )
+
             # The strict TASK, not just the script with the variable injected by
             # hand: deleting `env = { SMOKE_STRICT = "1" }` from pixi.toml would
             # otherwise leave CI silently running the skip-tolerant suite.
@@ -3168,61 +3517,192 @@ def main() -> int:
             expect("the smoke-strict task fails on an absent service", r.returncode != 0, "exited 0")
             expect("the smoke-strict task prints no SKIP line", "SKIP" not in r.stdout, f"stdout: {r.stdout!r}")
 
-            # --- Profile precedence, against the real runtime. ---
-            # Everything above proves lint-compose *passes* COMPOSE_PROFILES=""; the
-            # stub has no precedence rules, so only Compose itself can show that the
-            # empty value beats the .env selecting both profiles. Without that, every
-            # combination would resolve to the same superset.
+            # --- Selection, against the real runtime. ---
+            # The stub has no profile semantics at all, so only Compose itself can say
+            # what a Selection actually renders. Three things are asserted here and
+            # nowhere else: that the empty Selection now renders *nothing* — the breaking
+            # change ADR 0013 records, and the reason the resolver refuses it — that each
+            # Module's resolved closure renders exactly the services that Module and its
+            # dependencies own, and that each group's closure does the same.
             real = dict(os.environ)
             real["COMPOSE_PROFILES"] = ""
-            empty_combination = tool(["docker", "compose", "config", "--services"], cwd=REPO, env=real)
-            full_combination = tool(
-                ["docker", "compose", "--profile", "admin", "--profile", "observability", "config", "--services"],
-                cwd=REPO,
-                env=real,
-            )
-            core_services = {line.strip() for line in empty_combination.stdout.splitlines() if line.strip()}
-            all_services = {line.strip() for line in full_combination.stdout.splitlines() if line.strip()}
-            expect("the real runtime rendered the core selection", bool(core_services), "no services")
+            empty_selection = tool(["docker", "compose", "config", "--services"], cwd=REPO, env=real)
+            empty_services = {line.strip() for line in empty_selection.stdout.splitlines() if line.strip()}
             expect(
-                "an empty COMPOSE_PROFILES beats the .env that selects every profile",
-                core_services < all_services,
-                f"core {sorted(core_services)} vs all {sorted(all_services)}",
+                "the empty Selection renders no service at all",
+                empty_selection.returncode == 0 and not empty_services,
+                f"exit {empty_selection.returncode}, rendered {sorted(empty_services)} — with a Module profile on "
+                f"every service an unset COMPOSE_PROFILES must select nothing, which is exactly why "
+                f"scripts/select.sh refuses it (AD-18)",
             )
 
-            # A proper subset is not enough. `profiles:` is one key per service, and a
-            # service that lost it joins the *default* selection — the one `pixi run
-            # up-core` starts — while every check here stays green and the subset above
-            # still holds. So membership is pinned literally, against the real runtime,
-            # the way the ci.yml profile list is. These are an independent list, not a
-            # reading of compose.yaml's header: the header stays prose nothing verifies,
-            # and it is one member shorter than this set — it names the services a reader
-            # starts, while `minio-init` is the one-shot helper minio pulls in behind
-            # them, carrying no `profiles:` key and so landing in this selection.
-            expected_core = {"postgres", "redis", "keycloak", "minio", "minio-init", "mailpit"}
-            expected_admin = {"pgadmin", "redisinsight", "flower"}
-            expected_observability = {"otel-collector", "prometheus", "loki", "tempo", "grafana"}
-            expect(
-                "the default selection is exactly the core services",
-                core_services == expected_core,
-                f"unexpected {sorted(core_services - expected_core)}, missing {sorted(expected_core - core_services)} "
-                f"— a service that lost its `profiles:` key joins the stack `pixi run up-core` starts",
-            )
-            expect(
-                "admin and observability together add exactly their documented members",
-                all_services == expected_core | expected_admin | expected_observability,
-                f"unexpected {sorted(all_services - (expected_core | expected_admin | expected_observability))}, "
-                f"missing {sorted((expected_core | expected_admin | expected_observability) - all_services)}",
-            )
-            for profile, members in (("admin", expected_admin), ("observability", expected_observability)):
-                one = tool(["docker", "compose", "--profile", profile, "config", "--services"], cwd=REPO, env=real)
-                selected = {line.strip() for line in one.stdout.splitlines() if line.strip()}
+            def resolve_names(*names: str) -> str:
+                answer = run_script("select.sh", *names, env=real)
                 expect(
-                    f"the {profile} profile holds exactly the services compose.yaml's header lists",
-                    selected == expected_core | members,
-                    f"unexpected {sorted(selected - (expected_core | members))}, "
-                    f"missing {sorted((expected_core | members) - selected)}",
+                    f"select.sh resolves {' '.join(names)}",
+                    answer.returncode == 0,
+                    f"exit {answer.returncode}: {answer.stderr!r}",
                 )
+                return answer.stdout.strip()
+
+            def selects(selection: str) -> set[str]:
+                one = dict(real)
+                one["COMPOSE_PROFILES"] = selection
+                rendered_services = tool(["docker", "compose", "config", "--services"], cwd=REPO, env=one)
+                return {line.strip() for line in rendered_services.stdout.splitlines() if line.strip()}
+
+            # Membership pinned literally, service by service, against the real runtime —
+            # an independent list, not a reading of any file the check also reads. A
+            # service that lost its own `profiles:` key would join every Selection at
+            # once, and a Module that gained a service nobody expected would show up here.
+            expected_members = {
+                "postgres": {"postgres"},
+                "redis": {"redis"},
+                "keycloak": {"keycloak", "postgres", "mailpit"},
+                "minio": {"minio", "minio-init"},
+                "mailpit": {"mailpit"},
+                "pgadmin": {"pgadmin", "postgres"},
+                "redisinsight": {"redisinsight", "redis"},
+                "flower": {"flower", "redis"},
+                "prometheus": {"prometheus"},
+                "loki": {"loki"},
+                "tempo": {"tempo"},
+                "otel-collector": {"otel-collector", "loki", "tempo"},
+                "grafana": {"grafana", "prometheus", "loki", "tempo"},
+                "admin": {"pgadmin", "redisinsight", "flower", "postgres", "redis"},
+                "observability": {"otel-collector", "prometheus", "loki", "tempo", "grafana"},
+            }
+            expect(
+                "every Module has a membership expectation of its own",
+                set(every_module) <= set(expected_members),
+                f"unlisted: {sorted(set(every_module) - set(expected_members))}",
+            )
+            for request, members in expected_members.items():
+                selected = selects(resolve_names(request))
+                expect(
+                    f"the {request} Selection renders exactly {sorted(members)}",
+                    selected == members,
+                    f"unexpected {sorted(selected - members)}, missing {sorted(members - selected)}",
+                )
+
+            # The headline case, end to end: two Modules, two containers, and none of the
+            # eleven services a bare `up` used to start alongside them.
+            two_modules = selects(resolve_names("postgres", "redis"))
+            expect(
+                "a Selection of postgres and redis renders exactly those two services",
+                two_modules == {"postgres", "redis"},
+                f"rendered {sorted(two_modules)}",
+            )
+
+            # …and the all-Modules request renders every service the stack has, which is
+            # what `down`, `stop`, `pull`, `dump-logs`, `config` and `destroy` act on.
+            everything = selects(resolve_names("--all"))
+            expect(
+                "the all-Modules Selection renders every service",
+                everything == set().union(*expected_members.values()),
+                f"missing {sorted(set().union(*expected_members.values()) - everything)}",
+            )
+
+            # An unresolved Selection reaching Compose fails, and that is correct
+            # behaviour rather than a defect (AD-16): Postgres cannot carry the `keycloak`
+            # profile without Keycloak editing Postgres's file, which AD-15 forbids.
+            raw = dict(real)
+            raw["COMPOSE_PROFILES"] = "keycloak"
+            bypassed = tool(["docker", "compose", "config", "-q"], cwd=REPO, env=raw)
+            expect(
+                "an unresolved Selection is refused by Compose itself",
+                bypassed.returncode != 0 and "undefined service" in bypassed.stderr,
+                f"exit {bypassed.returncode}: {bypassed.stderr!r}",
+            )
+            # …and the resolved one is not.
+            keycloak_ok = dict(real)
+            keycloak_ok["COMPOSE_PROFILES"] = resolve_names("keycloak")
+            validated = tool(["docker", "compose", "config", "-q"], cwd=REPO, env=keycloak_ok)
+            expect(
+                "the resolved Selection validates",
+                validated.returncode == 0,
+                f"exit {validated.returncode}: {validated.stderr!r}",
+            )
+
+            # --- The shipped defaults must resolve to every Module. ---
+            # A fresh checkout, and both CI stack jobs, start exactly what the stack
+            # started before Selection existed (AD-18). Asserted, not stated.
+            dotenv_default = ""
+            for line in (REPO / ".env.example").read_text(encoding="utf-8").splitlines():
+                if line.startswith("COMPOSE_PROFILES="):
+                    dotenv_default = line.split("=", 1)[1].strip()
+            expect(".env.example ships a COMPOSE_PROFILES line", bool(dotenv_default), "no COMPOSE_PROFILES= found")
+            expect(
+                ".env.example's Selection resolves to every Module",
+                resolve_names(dotenv_default) == all_modules,
+                f"{dotenv_default!r} resolves to {resolve_names(dotenv_default)!r}, not {all_modules!r}",
+            )
+
+            # The resolver's own refusals, at the seam a contributor reaches (AD-21).
+            # Each must exit non-zero, explain itself on stderr, and print nothing at all
+            # on stdout — a caller substituting this command must never get a partial
+            # Selection.
+            for names, needle, case in (
+                ([""], "COMPOSE_PROFILES", "an empty request"),
+                (["zz-nosuch-module"], "zz-nosuch-module", "an unknown name"),
+            ):
+                refused = run_script("select.sh", *names, env=real)
+                expect(f"select.sh refuses {case}", refused.returncode != 0, "exited 0")
+                expect(f"select.sh explains {case}", needle in refused.stderr, f"stderr: {refused.stderr!r}")
+                expect(f"select.sh prints nothing on stdout for {case}", not refused.stdout, f"{refused.stdout!r}")
+            unknown = run_script("select.sh", "zz-nosuch-module", env=real)
+            expect(
+                "select.sh lists the valid names when it refuses one",
+                all(name in unknown.stderr for name in every_module),
+                f"stderr: {unknown.stderr!r}",
+            )
+
+            # Resolving an already-resolved Selection returns the same set, which is what
+            # lets a resolved value survive a script that re-sources .env.
+            once = resolve_names("keycloak")
+            expect(
+                "select.sh is idempotent",
+                resolve_names(once) == once,
+                f"{once!r} resolved again to {resolve_names(once)!r}",
+            )
+
+            # And a request taken from the environment is the same as one given as
+            # arguments — the path every script that resolves the ambient Selection uses.
+            ambient = dict(real)
+            ambient["COMPOSE_PROFILES"] = "keycloak"
+            from_env = run_script("select.sh", env=ambient)
+            expect(
+                "select.sh reads the request from COMPOSE_PROFILES when given no arguments",
+                from_env.returncode == 0 and from_env.stdout.strip() == once,
+                f"exit {from_env.returncode}: {from_env.stdout!r} vs {once!r}",
+            )
+
+            # A depends_on edge no Module owns is refused rather than silently dropped
+            # from the closure: a resolver that dropped it would start a stack missing
+            # the service the edge exists for, and nothing else would notice.
+            orphan_module = REPO / "services" / "zz-selftest-orphan"
+            orphan_module.mkdir(exist_ok=True)
+            try:
+                with planted(
+                    orphan_module / "compose.yaml",
+                    "services:\n  zz-selftest-orphan:\n    image: alpine:3.22\n"
+                    "    profiles: [zz-selftest-orphan]\n"
+                    "    depends_on:\n      - zz-absent-service\n",
+                ):
+                    orphan_result = run_script("select.sh", "postgres", env=real)
+                    expect("select.sh refuses a depends_on no Module owns", orphan_result.returncode != 0, "exited 0")
+                    expect(
+                        "select.sh names the edge it cannot resolve",
+                        "zz-absent-service" in orphan_result.stderr,
+                        f"stderr: {orphan_result.stderr!r}",
+                    )
+                    expect(
+                        "select.sh prints nothing on stdout for an unownable edge",
+                        not orphan_result.stdout,
+                        f"stdout: {orphan_result.stdout!r}",
+                    )
+            finally:
+                shutil.rmtree(orphan_module, ignore_errors=True)
 
     # --- An enumeration that cannot be read is a failure, never "no profiles". ---
     # `config --profiles` resolves the whole model, so a real structural defect
@@ -3269,6 +3749,47 @@ def main() -> int:
         "no script is excluded by .gitignore",
         not ignored.stdout.strip(),
         f"ignored: {ignored.stdout.split()}",
+    )
+
+    # --- Every script that reaches Compose resolves its Selection first. ---
+    # AD-16 is a rule about every path to the runtime, not about the six that happened
+    # to be rewritten. A script added later that calls `compose` without resolving would
+    # act on whatever COMPOSE_PROFILES literally says — `admin` alone, selecting the
+    # three admin services without the Postgres and Redis they talk to — and every other
+    # check here would pass. The two exceptions are named, so removing a resolver call
+    # from a third script fails this rather than joining a category.
+    #
+    #   lint-compose.sh drives the Selection under test itself, one per iteration.
+    #   smoke-test.sh's oracle is observational by contract: `ps`, `exec` and `version`
+    #   ignore active profiles entirely, so it reads what is up rather than what was asked
+    #   for, and making it consult the resolver would break that.
+    resolver_exempt = {"lint-compose.sh", "smoke-test.sh"}
+    calls_compose = re.compile(r"(?<![\w./-])compose\s")
+    unresolved: list[str] = []
+    reaches_compose: list[str] = []
+    for script in sorted((REPO / "scripts").glob("*.sh")):
+        script_text = script.read_text(encoding="utf-8")
+        script_code = "\n".join(line for line in script_text.splitlines() if not line.lstrip().startswith("#"))
+        if not calls_compose.search(script_code):
+            continue
+        reaches_compose.append(script.name)
+        if script.name in resolver_exempt:
+            continue
+        if "select_profiles" not in script_code and "select_ambient" not in script_code:
+            unresolved.append(script.name)
+    expect("there are scripts that reach Compose", bool(reaches_compose), "found none — this rule checked nothing")
+    expect(
+        "every script that calls compose resolves its Selection first",
+        not unresolved,
+        f"{unresolved} call compose without select_profiles/select_ambient",
+    )
+    # …and both exemptions are real files that really do call compose. An exemption for a
+    # script that no longer exists, or no longer reaches the runtime, is a hole waiting
+    # for the next script of that name.
+    expect(
+        "both resolver exemptions are scripts that actually reach Compose",
+        resolver_exempt <= set(reaches_compose),
+        f"exempt but not reaching Compose: {sorted(resolver_exempt - set(reaches_compose))}",
     )
 
     # --- The CI workflow is a gate, not a suggestion. ---
@@ -3378,20 +3899,28 @@ def main() -> int:
         ]
         expect(f"CI job {job_name} runs exactly ['{expected_command}']", work == [expected_command], f"runs {work}")
 
-    # Both stack jobs must start every profile the model declares. Hard-coding is fine
-    # only while it agrees with the model: a third profile would otherwise be linted
-    # by lint-compose and never started, which is the gap this whole story removes.
-    # Asserted on the Podman job too, so "no service is silently excluded under
-    # Podman" is a gate rather than a sentence in the README.
-    declared = tool(["docker", "compose", "config", "--profiles"], cwd=REPO)
-    model_profiles = {line.strip() for line in declared.stdout.splitlines() if line.strip()}
-    expect("the model declares profiles to compare against", bool(model_profiles), f"stderr: {declared.stderr!r}")
+    # Both stack jobs must start every Module. Equality against `config --profiles` is
+    # what this used to say, and it cannot survive Selection: there are fifteen declared
+    # profiles now and a job must not name every Module by hand. What matters is not the
+    # spelling but what it resolves to, so that is what is asserted — on the Podman job
+    # too, so "no service is silently excluded under Podman" is a gate rather than a
+    # sentence in the README.
+    catalog = sorted(path.parent.name for path in (REPO / "services").glob("*/compose.yaml"))
+    expect("there are Modules for the CI jobs to start", bool(catalog), "found no services/*/compose.yaml")
     for job_name in ("stack", "stack-podman"):
         job_profiles = str(ci_jobs.get(job_name, {}).get("env", {}).get("COMPOSE_PROFILES", ""))
+        expect(f"the {job_name} job states a Selection", bool(job_profiles), "no COMPOSE_PROFILES in the job env")
+        job_selection = run_script("select.sh", job_profiles)
         expect(
-            f"the {job_name} job starts exactly the profiles the model declares",
-            {name.strip() for name in job_profiles.split(",") if name.strip()} == model_profiles,
-            f"workflow: {job_profiles!r}; model: {sorted(model_profiles)}",
+            f"the {job_name} job's Selection resolves",
+            job_selection.returncode == 0,
+            f"{job_profiles!r}: exit {job_selection.returncode}: {job_selection.stderr!r}",
+        )
+        expect(
+            f"the {job_name} job's Selection resolves to every Module",
+            job_selection.stdout.strip() == ",".join(catalog),
+            f"workflow: {job_profiles!r} resolves to {job_selection.stdout.strip()!r}; "
+            f"missing {sorted(set(catalog) - set(job_selection.stdout.strip().split(',')))}",
         )
 
     # The Podman job's runtime switch is one environment variable. Without it the job

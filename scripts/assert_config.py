@@ -7,7 +7,11 @@ take no part in Compose interpolation, so a port that reads as `127.0.0.1:5432:5
 source file can still render bound to every interface. Only the rendered output says what
 the runtime will actually do.
 
-Five properties, one pass per profile combination:
+Five properties, one pass per Selection — the Selections `scripts/resolve_selection.py`
+names, one per Module, one per group profile and one for every Module at once (ADR 0013).
+That replaced the power set over the declared profiles: fifteen declared profiles is 32 768
+renders, and a cap on it would be arbitrary. Every duplicate-published-port collision is
+still caught, because the full Selection contains every Module.
 
 * every published port binds to the configured bind address, never to `0.0.0.0` or to an
   empty host address (NFR-2);
@@ -55,12 +59,16 @@ cannot express them.
   directory or a justified `seed.none`; it declares a non-empty top-level `x-endpoints:` whose
   keys and the `*_PORT` variables it publishes are the *same set*, in both directions; and
   every `x-requires:` entry names an existing provider Module, only endpoints that provider
-  declares, and a provider some service the Module owns already lists in `depends_on`. The
-  check is presence-based throughout: it asks whether the five things exist, never whether
-  their content was warranted — but a marker with no justification is the silent skip in file
-  form, so an empty one is refused, as is a probe that is declared only to be turned off.
+  declares, and a provider some service the Module owns already lists in `depends_on`. Every
+  service the Module owns declares its own Module name in `profiles:` and no other Module's,
+  and a helper's profile set equals its primary's — the leg that makes a Selection mean
+  anything, and the one the rendered model cannot be asked about, because `config` reports
+  which services a Selection selects and never which Module a service belongs to. The
+  check is presence-based throughout: it asks whether the six things exist, never whether
+  their content was warranted — but a marker with no justification is the silent skip in
+  file form, so an empty one is refused, as is a probe declared only to be turned off.
 
-A combination that renders no services is a failure, not a pass, and so is a module scan
+A Selection that renders no services is a failure, not a pass, and so is a module scan
 that found no module file: a check that walked an empty set has verified nothing, which is
 the silent skip this repository keeps removing.
 
@@ -79,7 +87,15 @@ import subprocess
 import sys
 from pathlib import Path
 
-import yaml
+from resolve_selection import (
+    Selection,
+    build_graph,
+    depends_on_names,
+    module_composes,
+    read_model,
+    selections,
+    service_profiles,
+)
 
 REPO = Path(__file__).resolve().parent.parent
 
@@ -207,38 +223,28 @@ def declared_profiles() -> list[str]:
     return [line.strip() for line in result.stdout.splitlines() if line.strip()]
 
 
-def combinations(profiles: list[str]) -> list[list[str]]:
-    """Enumerate every subset of the declared profiles, smallest mask first.
+def label(selection: Selection) -> str:
+    """Name a Selection for a diagnostic.
 
     Args:
-        profiles: Declared profile names.
+        selection: The Selection being rendered.
 
     Returns:
-        Every subset, starting with the empty one.
+        The request and the Modules it resolved to, so a diagnostic says both what was
+        asked for and what that turned out to mean.
     """
-    subsets: list[list[str]] = []
-    for mask in range(1 << len(profiles)):
-        subsets.append([name for index, name in enumerate(profiles) if mask & (1 << index)])
-    return subsets
+    return f"{selection.request} -> {selection.value()}"
 
 
-def label(profiles: list[str]) -> str:
-    """Name a profile combination for a diagnostic.
+def render(selection: Selection) -> dict[str, object]:
+    """Render one resolved Selection to its JSON model.
+
+    The Modules are passed as `--profile` flags rather than through COMPOSE_PROFILES,
+    because `run_compose` clears that variable for every child: leaving it set would union
+    the ambient Selection into every render and the enumeration would prove nothing.
 
     Args:
-        profiles: The combination's profile names.
-
-    Returns:
-        A comma-joined name, or `(none)` for the empty combination.
-    """
-    return ",".join(profiles) if profiles else "(none)"
-
-
-def render(profiles: list[str]) -> dict[str, object]:
-    """Render one profile combination to its resolved JSON model.
-
-    Args:
-        profiles: The combination's profile names.
+        selection: The Selection to render.
 
     Returns:
         The parsed `config --format json` document.
@@ -247,55 +253,19 @@ def render(profiles: list[str]) -> dict[str, object]:
         RuntimeError: If the runtime failed or produced output that is not JSON.
     """
     args: list[str] = []
-    for name in profiles:
+    for name in selection.modules:
         args += ["--profile", name]
     args += ["config", "--format", "json"]
     result = run_compose(args)
     if result.returncode != 0:
-        raise RuntimeError(f"{label(profiles)}: compose config failed: {result.stderr.strip()}")
+        raise RuntimeError(f"{label(selection)}: compose config failed: {result.stderr.strip()}")
     try:
         document = json.loads(result.stdout)
     except json.JSONDecodeError as exc:
-        raise RuntimeError(f"{label(profiles)}: compose config did not return JSON: {exc}") from exc
+        raise RuntimeError(f"{label(selection)}: compose config did not return JSON: {exc}") from exc
     if not isinstance(document, dict):
-        raise RuntimeError(f"{label(profiles)}: compose config returned {type(document).__name__}, not an object")
+        raise RuntimeError(f"{label(selection)}: compose config returned {type(document).__name__}, not an object")
     return document
-
-
-def module_composes() -> list[Path]:
-    """List the Compose fragments the modules contribute.
-
-    Returns:
-        Every `services/<name>/compose.yaml`, in directory order.
-    """
-    return sorted((REPO / "services").glob("*/compose.yaml"))
-
-
-def read_model(path: Path) -> dict[str, object]:
-    """Parse a compose file as text, failing loudly on anything that is not a model.
-
-    Args:
-        path: The file to read.
-
-    Returns:
-        The parsed mapping.
-
-    Raises:
-        RuntimeError: If the file cannot be read or does not parse as a compose model.
-    """
-    try:
-        parsed = yaml.safe_load(path.read_text(encoding="utf-8"))
-    except UnicodeDecodeError as exc:
-        # Named, not an interpreter traceback: the same contract lint_json.py and
-        # assert_renovate.py hold, and the one the self-test asserts for both.
-        raise RuntimeError(f"{path}: not valid UTF-8 at byte {exc.start}: {exc.reason}") from exc
-    except OSError as exc:
-        raise RuntimeError(f"{path}: unreadable: {exc}") from exc
-    except yaml.YAMLError as exc:
-        raise RuntimeError(f"{path}: does not parse as YAML: {exc}") from exc
-    if not isinstance(parsed, dict):
-        raise RuntimeError(f"{path}: parsed as {type(parsed).__name__}, not a compose model")
-    return parsed
 
 
 def root_declarations(stanza: str) -> dict[str, object]:
@@ -508,37 +478,25 @@ def published_ports(services: dict[str, object]) -> tuple[set[str], list[str]]:
     return found, literal
 
 
-def depends_on_names(service: dict[str, object]) -> set[str]:
-    """Read the services one service declares a dependency edge on.
-
-    Both Compose forms are accepted, because both are in use here: the list form waits for
-    start, the mapping form waits for a condition, and `x-requires:` is about the edge
-    existing rather than about which form expresses it.
-
-    Args:
-        service: One rendered-or-source service body.
-
-    Returns:
-        The service names named in `depends_on`, empty when there is none.
-    """
-    declared = service.get("depends_on")
-    if isinstance(declared, dict):
-        return {str(name) for name in declared}
-    if isinstance(declared, list):
-        return {str(name) for name in declared}
-    return set()
-
-
 def module_contract(paths: list[Path]) -> list[str]:
     """Assert every Module carries its own contract, and that no service escapes one.
 
-    Five things per Module, and the check is presence-based: it asks whether each exists,
+    Six things per Module, and the check is presence-based: it asks whether each exists,
     never whether its content was warranted. What makes that worth having is the second
     direction. A Compose service can be declared in a module file or in the root, the root
     is pinned to declare no `services:` key at all, and every service key here must be
     `<dir>` or `<dir>-<role>` — so a service that no Module directory owns cannot exist.
     Asserting that against the *rendered* model instead would be weaker and would break a
     dozen self-test fixtures, which name services no directory owns on purpose.
+
+    The sixth is Selection membership, and it is the one leg the rendered model cannot be
+    asked about: `docker compose config` reports which services a profile combination
+    selects, never which Module a service belongs to. Every service a Module owns declares
+    its own Module name in `profiles:` — that is what makes `COMPOSE_PROFILES=<module>`
+    select it, and therefore what makes the resolver's closure mean anything (AD-16) — and
+    no *other* Module's name, which would make this Module part of that one's Selection; and
+    a helper's profile set equals its primary's, so neither can be selected without the
+    other.
 
     `x-requires:` is reconciled against the provider's own `x-endpoints:` keys rather than
     against anything this checker knows about databases or brokers, which is what keeps the
@@ -661,7 +619,59 @@ def module_contract(paths: list[Path]) -> list[str]:
                         f"describes is the same drift, one file later"
                     )
 
-        # 6. Requirements, reconciled against the provider's own declaration and its edge.
+        # 6. Selection membership. Every service the Module owns declares the Module's own
+        #    name in `profiles:`, which is what makes `COMPOSE_PROFILES=<module>` select it
+        #    and therefore what makes the resolver's closure mean anything (AD-16). A
+        #    service that lost the key joins the *default* selection instead — it starts
+        #    whatever was asked for, and no Selection can exclude it — which renders valid,
+        #    passes `config -q`, and is invisible in every other check here.
+        owned_profiles = {
+            str(name): service_profiles(body) for name, body in services.items() if isinstance(body, dict)
+        }
+        for name in sorted(owned_profiles):
+            if module not in owned_profiles[name]:
+                problems.append(
+                    f"{where}: module '{module}' owns the service '{name}', which declares "
+                    f"profiles: {owned_profiles[name]} — not its own Module name '{module}'. "
+                    f"Without it the service starts under every Selection and none can leave it "
+                    f"out, so `./scripts/select.sh {module}` resolves to a Module that does not "
+                    f"actually gate on the request"
+                )
+            #    …and the reverse direction, which matters just as much. A service may
+            #    carry its own Module name and group names, and nothing else: another
+            #    Module's name in the list makes this Module part of *that* Module's
+            #    Selection. `pgadmin` writing `profiles: [pgadmin, postgres, admin]`
+            #    renders valid and passes every other gate, while
+            #    `./scripts/select.sh postgres` then emits `pgadmin,postgres` — the "two
+            #    names, two containers" property broken with everything green, and a
+            #    Module reaching into another Module's Selection, which AD-15 forbids.
+            for profile in owned_profiles[name]:
+                if profile != module and profile in parsed_by_module:
+                    problems.append(
+                        f"{where}: module '{module}' declares the service '{name}' with the profile "
+                        f"'{profile}', which is another Module's name — a service may carry its own "
+                        f"Module name and group names only. This one joins the '{profile}' Selection, "
+                        f"so `./scripts/select.sh {profile}` would start '{module}' too, and no "
+                        f"request for '{profile}' alone can leave it out (AD-15, AD-16)"
+                    )
+        #    …and a helper carries exactly what its primary carries. A helper selected by a
+        #    different set is a service that starts without the primary it exists to serve,
+        #    or one the primary's Selection silently leaves behind: `minio-init` takes
+        #    `[minio]`, identical to `minio`.
+        if module in owned_profiles:
+            primary_set = set(owned_profiles[module])
+            for name in sorted(owned_profiles):
+                if name == module or set(owned_profiles[name]) == primary_set:
+                    continue
+                problems.append(
+                    f"{where}: module '{module}' declares the helper '{name}' with profiles: "
+                    f"{owned_profiles[name]}, which is not the {owned_profiles[module]} its primary "
+                    f"'{module}' carries — a helper selected by a different set either starts "
+                    f"without the service it exists to serve, or is left behind when that service "
+                    f"is selected"
+                )
+
+        # 7. Requirements, reconciled against the provider's own declaration and its edge.
         requires = parsed.get("x-requires")
         if requires is None:
             continue
@@ -729,20 +739,20 @@ def tag_problem(image: str) -> str | None:
 
 
 def check(
-    profiles: list[str], document: dict[str, object], expected_bind: str, logging: dict[str, object]
+    selection: Selection, document: dict[str, object], expected_bind: str, logging: dict[str, object]
 ) -> list[str]:
-    """Assert every rule against one rendered combination.
+    """Assert every rule against one rendered Selection.
 
     Args:
-        profiles: The combination's profile names.
+        selection: The Selection that was rendered.
         document: The parsed `config --format json` document.
         expected_bind: The address every published port must bind to.
         logging: The logging options every service must carry, from the shared fragment.
 
     Returns:
-        One diagnostic per violation, empty when the combination is clean.
+        One diagnostic per violation, empty when the Selection is clean.
     """
-    where = label(profiles)
+    where = label(selection)
     problems: list[str] = []
 
     services = document.get("services")
@@ -850,10 +860,10 @@ def check(
 
 
 def main() -> int:
-    """Assert every rule for every profile combination.
+    """Assert every rule for every Selection this repository can name.
 
     Returns:
-        Process exit status: 0 when every combination is clean, 1 otherwise.
+        Process exit status: 0 when every Selection is clean, 1 otherwise.
     """
     expected_bind = bind_address()
     if expected_bind in WILDCARD_ADDRESSES:
@@ -887,7 +897,29 @@ def main() -> int:
 
     try:
         logging = shared_logging()
-        subsets = combinations(declared_profiles())
+        # The Selections come from the resolver, never from a list here: one per Module,
+        # one per group profile, and every Module at once (ADR 0013). That replaced the
+        # power set over the declared profiles, which at fifteen profiles is 32 768
+        # renders and would never finish.
+        graph = build_graph(modules)
+        wanted = selections(graph)
+        # …and the model's own profile enumeration is reconciled against it, which is the
+        # one thing the static parse cannot see for itself: a profile Compose reports and
+        # the resolver cannot name is a Selection nothing would ever validate. Read
+        # through `declared_profiles()`, so an enumeration that could not be read stays a
+        # failure rather than being taken for "no profiles".
+        #
+        # This is the *only* place that reconciliation happens. scripts/lint-compose.sh
+        # also reads `config --profiles`, but only to fail on a model that does not
+        # resolve and on an empty profile list; it enumerates from the resolver, exactly
+        # as this does, so neither file can catch the gap the other misses.
+        unknown = sorted(set(declared_profiles()) - set(graph.names()))
+        if unknown:
+            problems.append(
+                f"the model declares the profile(s) {unknown}, which the resolver cannot name — "
+                f"scripts/resolve_selection.py reads services/*/compose.yaml, so a profile only "
+                f"the rendered model knows about belongs to no Selection and is never validated"
+            )
     except RuntimeError as exc:
         # Whatever the module scan already found is a finding in its own right: losing it
         # behind an unrelated runtime failure is how a data-loss diagnostic goes unread.
@@ -896,17 +928,17 @@ def main() -> int:
             sys.stderr.write(f"assert-config: {problem}\n")
         return 1
 
-    for profiles in subsets:
+    for selection in wanted:
         try:
-            document = render(profiles)
+            document = render(selection)
         except RuntimeError as exc:
             problems.append(str(exc))
             continue
-        found = check(profiles, document, expected_bind, logging)
+        found = check(selection, document, expected_bind, logging)
         if found:
             problems += found
         else:
-            passed.append(f"OK {label(profiles)}")
+            passed.append(f"OK {label(selection)}")
 
     if problems:
         for problem in problems:
@@ -915,7 +947,7 @@ def main() -> int:
 
     for line in passed:
         sys.stdout.write(f"assert-config: {line}\n")
-    sys.stdout.write(f"assert-config: OK — {len(subsets)} profile combination(s), bind address {expected_bind}\n")
+    sys.stdout.write(f"assert-config: OK — {len(wanted)} Selection(s), bind address {expected_bind}\n")
     return 0
 
 

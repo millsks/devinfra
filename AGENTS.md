@@ -24,7 +24,15 @@ Docker Compose stack of local development infrastructure — Postgres, Redis, Ke
   the smoke driver sources; a top-level `x-endpoints:` naming every `*_PORT` it publishes; a `seed/` or a
   justified `seed.none`; and a `gotchas.md`. A module file may declare only `<dir>` and `<dir>-<role>`
   services. `x-requires:` names the provider Module and the provider's own endpoint keys, and needs the
-  matching `depends_on`.
+  matching `depends_on`. Every service a Module owns declares that Module's name in `profiles:`, and
+  a helper's profile set equals its primary's.
+- `COMPOSE_PROFILES` is a **Selection** — Module and group names — expanded to its transitive
+  `depends_on` closure by `scripts/select.sh` before Compose sees it (ADR 0013). Every service
+  carries its own Module name in `profiles:`, so nothing starts unless the Selection asks for it and
+  an empty Selection is refused, not proceeded with. `pixi run select <names>` prints a closure.
+  Every script that calls `compose` resolves first, through `select_profiles`/`select_ambient` in
+  `scripts/lib/common.sh`; `lint-compose.sh` and `smoke-test.sh` are the two documented exceptions.
+  A raw `docker compose --profile <module>` bypassing the resolver is expected to fail.
 - Changing anything under `services/<name>/` — read that Module's own `gotchas.md` first, then README
   "Gotchas worth knowing"; between them they document the traps that cost real time.
 - Architecture rules binding future changes: `_bmad-output/planning-artifacts/architecture/architecture-devinfra-2026-09-06/ARCHITECTURE-SPINE.md` (21 decisions). Rationale in `docs/adr/`.

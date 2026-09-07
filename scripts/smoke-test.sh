@@ -21,7 +21,9 @@
 # Exits non-zero if any check fails. Modules that are not currently running are
 # skipped rather than failed — FR-5, and what a developer running a partial
 # Selection wants. The `running` oracle is observational: it asks the runtime
-# what is up, never COMPOSE_PROFILES or a resolver.
+# what is up, never COMPOSE_PROFILES or a resolver. A runtime that could not
+# answer is not an observation, though, so a non-zero `ps` is fatal there rather
+# than read as "nothing is running".
 #
 #   SMOKE_STRICT=1 ./scripts/smoke-test.sh
 #
@@ -110,9 +112,33 @@ section() { printf '\n\033[1m%s\033[0m\n' "$1"; }
 # The service list is captured before it is filtered rather than piped straight
 # into grep: shellcheck cannot see a sourced function through a pipeline, and the
 # runtime call is the one thing here that must stay on the compose seam.
+#
+# A non-zero `ps` is fatal, and its stderr is left alone. `ps` ignores active
+# profiles, but it still has to *load the project*, and an unresolved Selection —
+# COMPOSE_PROFILES naming a Module without its dependencies — fails that with
+# `depends on undefined service`. Discarding that status read as "nothing is
+# running": every Module skipped and the suite exited 0 having verified nothing,
+# which is the silent pass the three preflights above exist to remove. This file
+# still consults no resolver (AD-16's documented exemption); it reports that the
+# project did not load and names the variable to fix.
 running() {
-    local names
-    names="$(compose ps --services --filter status=running 2>/dev/null)"
+    local names status=0 shown="unset or empty"
+    names="$(compose ps --services --filter status=running)" || status=$?
+    if ((status != 0)); then
+        # Built in a variable rather than nested expansions: `${V:+'$V'}${V:-unset}`
+        # fires *both* arms for a set value and prints it twice.
+        if [[ -n "${COMPOSE_PROFILES:-}" ]]; then
+            shown="'${COMPOSE_PROFILES}'"
+        fi
+        printf '\nsmoke-test: the compose project did not load (ps exited %d).\n' "$status" >&2
+        printf '  COMPOSE_PROFILES is %s.\n' "$shown" >&2
+        printf '  A Selection naming a Module without its dependencies leaves a depends_on\n' >&2
+        printf '  target undefined, and every check here would then read as "not running".\n' >&2
+        # The command is the message; expanding it here would defeat the point.
+        # shellcheck disable=SC2016
+        printf '  Resolve it first: export COMPOSE_PROFILES="$(./scripts/select.sh <names>)".\n' >&2
+        exit 1
+    fi
     printf '%s\n' "$names" | grep -qx "$1"
 }
 

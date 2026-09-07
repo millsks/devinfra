@@ -10,4 +10,7 @@ set -euo pipefail
 # shellcheck source=scripts/lib/common.sh
 source "$(dirname "$0")/lib/common.sh"
 
+# The ambient Selection, resolved to its dependency closure before Compose sees it.
+select_ambient
+
 compose ps --format 'table {{.Name}}\t{{.State}}\t{{.Health}}\t{{.Ports}}'

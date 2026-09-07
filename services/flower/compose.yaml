@@ -27,7 +27,7 @@ services:
       service: defaults
     image: mher/flower:${FLOWER_VERSION:-2.1.0}
     container_name: devinfra-flower
-    profiles: [admin]
+    profiles: [flower, admin]
     depends_on:
       redis:
         condition: service_healthy

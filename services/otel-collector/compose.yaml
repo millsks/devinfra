@@ -34,7 +34,7 @@ services:
       service: defaults
     image: otel/opentelemetry-collector-contrib:${OTEL_COLLECTOR_VERSION:-0.160.0}
     container_name: devinfra-otel-collector
-    profiles: [observability]
+    profiles: [otel-collector, observability]
     depends_on:
       - loki
       - tempo

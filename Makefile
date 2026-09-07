@@ -28,7 +28,7 @@ init: ## Create .env from the template if it does not exist
 	@pixi run init
 
 .PHONY: up
-up: ## Start the stack (profiles from COMPOSE_PROFILES)
+up: ## Start the stack (the Selection COMPOSE_PROFILES asks for)
 	@$(NOTICE)
 	@pixi run up
 

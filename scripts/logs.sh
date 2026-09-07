@@ -8,6 +8,9 @@ set -euo pipefail
 # shellcheck source=scripts/lib/common.sh
 source "$(dirname "$0")/lib/common.sh"
 
+# The ambient Selection, resolved to its dependency closure before Compose sees it.
+select_ambient
+
 # The pixi task quotes its interpolation so a service name may contain spaces,
 # which means "no service" arrives as one empty argument rather than none.
 argv=(logs -f --tail=100)

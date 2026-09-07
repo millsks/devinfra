@@ -3,12 +3,19 @@
 # Every stateful service writes to a named volume, so `docker compose down`
 # followed by `docker compose up` preserves data. Only `down -v` destroys it.
 #
-# Profiles:
-#   (none)         postgres, redis, keycloak, minio, mailpit  — always started
+# Selection:
+#   Every service carries its own Module name in `profiles:`, plus any group it
+#   joins. Nothing starts unless the Selection asks for it — there is no longer a
+#   set of core services that always start, and an empty COMPOSE_PROFILES starts
+#   nothing at all.
+#
 #   admin          pgadmin, redisinsight, flower
 #   observability  otel-collector, prometheus, loki, tempo, grafana
 #
-# Select profiles with COMPOSE_PROFILES in .env, or `--profile <name>` per run.
+#   COMPOSE_PROFILES in .env names Modules and groups; scripts/select.sh expands
+#   that request to its transitive depends_on closure before Compose sees it, and
+#   every lifecycle task goes through it (ADR 0013). A raw `--profile <module>`
+#   bypassing the resolver is expected to fail on the dependency it did not select.
 #
 # Extraction is complete: every service lives in services/<name>/ with its config
 # and seed data beside it, and this file assembles them through the `include:`

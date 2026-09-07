@@ -25,7 +25,7 @@ services:
       service: defaults
     image: dpage/pgadmin4:${PGADMIN_VERSION:-9.17}
     container_name: devinfra-pgadmin
-    profiles: [admin]
+    profiles: [pgadmin, admin]
     depends_on:
       postgres:
         condition: service_healthy
