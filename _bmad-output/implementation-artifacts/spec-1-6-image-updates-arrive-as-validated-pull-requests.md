@@ -8,7 +8,23 @@ review_loop_iteration: 0
 followup_review_recommended: true
 context: ['{project-root}/_bmad-output/implementation-artifacts/epic-1-context.md', '{project-root}/_bmad-output/implementation-artifacts/spec-1-5-every-image-brought-current.md', '{project-root}/docs/adr/0005-pixi-as-the-task-surface.md']
 warnings: ['oversized']
-deferred: []
+deferred:
+  - summary: >-
+      Nothing inside the repository can tell whether the Renovate App is still installed, so
+      image currency can decay silently.
+    evidence: |-
+      The self-hosted workflow was a tracked file, so its absence or misconfiguration reddened
+      the gate. The hosted App is repository state on GitHub's side, invisible to `pixi run ci`.
+      If it were uninstalled tomorrow, `lint-renovate` stays green — it proves renovate.json
+      would detect the pins, not that anything is reading it — and no proposals would arrive.
+      That is the failure mode ADR 0010 exists to prevent, moved outside the gate's reach. The
+      Dependency Dashboard issue is the only signal, and the README now says to check it.
+      Closing it honestly needs a network call to the GitHub API for the installation, which no
+      current task can make; checking pin currency against upstream is the other half and would
+      catch decay regardless of cause.
+    location: >-
+      renovate.json, scripts/assert_renovate.py
+    severity: medium
 operator_actions:
   - "Mint a credential for the bot and add it as the repository secret `RENOVATE_TOKEN`: a fine-grained personal access token, or a GitHub App installation token, scoped to this repository with `contents: write`, `pull-requests: write` and `issues: write`. It must not be the workflow's own `GITHUB_TOKEN` — a pull request opened with that token triggers no `pull_request` workflow, so the bot's proposals would arrive with no checks having run, which is the one outcome this story exists to prevent."
   - "Merge this branch to `main`, then start the Renovate workflow by hand from the Actions tab (`workflow_dispatch`) rather than waiting for Monday's schedule. Nothing in this repository has ever authenticated as the bot; that run is the story's actual acceptance evidence for the first criterion."
