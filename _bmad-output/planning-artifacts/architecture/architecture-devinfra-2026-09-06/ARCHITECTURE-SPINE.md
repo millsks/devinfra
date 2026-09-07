@@ -153,7 +153,8 @@ graph TD
 
 - **Binds:** FR-17, NFR-4
 - **Prevents:** Tag drift going unnoticed, and an update bot that is configured but silently matches nothing.
-- **Rule:** Every image reference keeps the form `image: <repo>:${<MODULE>_VERSION:-<pinned>}`, with the version variable in the root `.env` immediately preceded by `# renovate: datasource=docker depName=<repo>`. Updates run through Renovate `customManagers` regex over `.env`. No Service resolves to a floating tag. Version variables are Module variables under AD-4 and are exempt from nothing.
+- **Rule:** Every *pulled* image reference keeps the form `image: <repo>:${<MODULE>_VERSION:-<pinned>}`, with the version variable in the root `.env` immediately preceded by `# renovate: datasource=docker depName=<repo>`. Updates run through Renovate `customManagers` regex over `.env`. No Service resolves to a floating tag. Version variables are Module variables under AD-4 and are exempt from nothing.
+  A *built* image (AD-22) satisfies this rule through its `Dockerfile` instead: its base tag and every installed package version are pinned there and tracked by Renovate on the same terms. The obligation is identical — pinned and tracked — only its location differs.
 
 *Renovate's docker-compose manager **skips** `repo:${VAR:-tag}` — it handles only whole-image `${VAR:-repo:tag}`. Dependabot cannot read `.env` at all and has no custom-manager escape hatch.*
 
@@ -252,6 +253,21 @@ graph LR
 
 *`select.sh` is load-bearing for AD-6, AD-10, AD-16 and AD-18. An error in it is indistinguishable from a correct run right up until data is missing.*
 
+### AD-22 — A built image is pinned twice, built locally, and never published
+
+- **Binds:** FR-21, NFR-3, NFR-4, AD-11, AD-19
+- **Prevents:** Two developers on the same commit getting different images — the exact drift AD-11 prevents for upstream images, reintroduced through the back door of a build. `apt-get install <pkg>` resolves to whatever the repository publishes today; a build is only as reproducible as its least-pinned line.
+- **Rule:** A Module builds an image only when no upstream image provides the capability; until FR-21 there were none, and this remains the exception rather than a pattern.
+  - The `Dockerfile` lives in the Module directory it belongs to, like every other Module asset (AD-8).
+  - **Both the base image tag and every package version are pinned explicitly** — `apt-get install -y <pkg>=<exact-version>`, never a bare package name. An unpinned install makes the image unreproducible and violates NFR-4 regardless of how carefully the base is pinned.
+  - The image is **built locally and never published to a registry.** devinfra distributes no artifacts; the consumption model is a standalone checkout (Deferred, resolved), and publishing would create a release surface the project does not otherwise have.
+  - The built image carries a local name derived from the Module, so two Modules cannot collide on one tag.
+  - CI builds it, and the Smoke Test runs against the built image rather than the base (AD-19).
+  - Renovate tracks the base tag **and** the pinned package version; a build hides its dependencies from AD-11 otherwise.
+  - The first build's cost is excluded from the NFR-3 startup budget, which is defined on a warm cache; a cold build is a cold-cache cost like an image pull.
+
+*Introduced by FR-21: Apache AGE and pgvector must share one Postgres instance, and no trustworthy image bundles both — the two community images have 3 and 4 stars, and one carries no licence at all, failing AD-20.*
+
 ## Consistency Conventions
 
 | Concern | Convention |
@@ -271,6 +287,7 @@ graph LR
 | Smoke check exit | 0 pass, non-zero fail; the runner decides what to skip, the check never skips itself |
 | Shell scripts | `scripts/*.sh` and `services/*/smoke.sh`, `set -euo pipefail`, shellcheck-clean under CI (AD-9) |
 | Config file mounts | `:ro` always |
+| Built images | `Dockerfile` in the Module directory; base tag and every package version pinned; local name derived from the Module; never published (AD-22) |
 | Gotcha entries | Symptom, cause, fix, affected versions — four fields, in the Module's `gotchas.md` |
 
 ## Stack
@@ -284,7 +301,8 @@ Verified current as of 2026-09-06. The code owns these once they exist; this is 
 | pixi | 0.79.0 |
 | prefix-dev/setup-pixi | 0.10.2 |
 | Renovate | `customManagers` regex over `.env` |
-| pgvector/pgvector | 0.8.6-pg17 |
+| pgvector/pgvector (base for the built Postgres image) | 0.8.6-pg17 |
+| postgresql-17-age (PGDG package, pinned in the Dockerfile) | 1.7.0 |
 | redis | 8.10.1 |
 | quay.io/keycloak/keycloak | 26.7.3 |
 | axllent/mailpit | v1.31.1 |
@@ -314,6 +332,7 @@ devinfra/
   services/
     postgres/
       compose.yaml          # identifier-only volume stanza (AD-5), x-requires (AD-14)
+      Dockerfile            # base + AGE, both pinned (AD-22) — the only image devinfra builds
       conf/postgresql.conf
       seed/                 # initdb scripts
       smoke.sh              # module-owned check (AD-10)
@@ -402,10 +421,11 @@ graph LR
 
 - ~~**The S3-compatible object storage Service.**~~ **RESOLVED — adopted `pgsty/silo`.** MinIO and `minio/mc` were both archived upstream, and the final MinIO release fixed a privilege-escalation CVE that was never published to any registry. Silo preserves the `MINIO_*` variables and the on-disk format, so this was an image swap with no data migration and the `minio-data` volume was untouched (AD-5 held). Compatibility was verified **bidirectionally** against a copy of the live volume before any change, making the move reversible, and the full smoke suite passes — 45/0/0. The same image also supplies `mc`, retiring the second archived dependency. See `docs/adr/0008`. Residual risk is bus factor 1, mitigated by the verified format portability.
 
-- **The consumption model** (PRD Q1). Deliberately open. AD-6's closure-validity is the mechanism keeping the reusable-base path reachable; nothing here commits to it.
+- ~~**The consumption model** (PRD Q1).~~ **RESOLVED — standalone checkout.** A project consumes the services devinfra provides and clones devinfra if they are not already running; consuming projects are never modified to embed it. The reusable-base and CLI paths are not pursued. AD-6's closure-validity still holds and keeps the reusable-base option reachable at no cost, but no AD now depends on it.
 - **`keycloak-config-cli` for idempotent realm reconciliation.** AD-12 removes the pain that motivated it. Revisit if realm-as-code becomes a real workflow. Pin would be `6.5.1-26.5.5` — no `26.4.x` artifact exists.
 - **Which product fills each Catalog category** (message broker, search). Each arrives as one Module under AD-8, so deferring costs nothing.
 - **Multi-Stack / port allocation across concurrent Stacks.** AD-17 governs allocation *within* one Stack. Running two Stacks simultaneously is unaddressed and would become urgent only if the reusable-base consumption model is adopted.
 - **Windows-native support.** AD-9 removes the Make dependency that was the main obstacle, but nothing here verifies it.
+- **Podman is now the preferred runtime** (Docker Desktop licensing), so AD-19's CI matrix should treat Podman as primary rather than as the alternative. What remains deferred is which Services, if any, cannot work under it.
 - **Versioning and release of the repository itself.** devinfra is consumed by `git clone`, so it has no release artifact and currently no tags. Deferred deliberately: it becomes a real question only if PRD Q1 resolves toward the reusable-base model, at which point a consuming repository needs something to pin. Recorded here so the silence is a choice rather than an oversight.
 - **Secrets handling beyond the Stack's own posture.** AD-20 fixes the posture — credentials stay trivial and committed in `.env.example` by design. What is deferred is whether OpenBao (FR-9) becomes merely *a Service in the Catalog* or also *the mechanism by which other Modules obtain their credentials*. The second is a much larger change and nothing here assumes it.
