@@ -1,8 +1,18 @@
-# Tempo 2.x single-binary trace store, filesystem-backed.
+# Tempo single-binary trace store, filesystem-backed.
 #
 # Receives traces only from the OTel Collector (otlp/tempo exporter), but the
 # OTLP receivers are open on the network so you can also point an SDK straight
 # at tempo:4317 while debugging the collector itself.
+#
+# Tempo 3.0 rewrote the write path: the ingester is gone, replaced by the
+# live-store and block-builder, and the compactor is gone, replaced by the
+# backend scheduler and worker. `ingester:` and `compactor:` are no longer
+# fields of the config type at all, so leaving either in place is a hard parse
+# error and the container restart-loops. In monolithic mode every one of those
+# components runs in-process and needs no Kafka; what the old blocks tuned is
+# either automatic now (recent traces are served by the live-store, so the
+# aggressive ingester flush that used to make a just-written trace searchable
+# has nothing left to tune) or has moved, as retention has.
 
 server:
   http_listen_port: 3200
@@ -21,13 +31,15 @@ distributor:
         http:
           endpoint: 0.0.0.0:4318
 
-ingester:
-  # Flush aggressively so a trace you just produced is searchable in seconds
-  # instead of minutes. Wasteful in production, essential for a dev loop.
-  max_block_duration: 5m
-  complete_block_timeout: 1m
-
-compactor:
+# Retention, formerly compactor.compaction.block_retention. Both halves of the
+# replacement carry it: the scheduler decides which blocks are past it, the
+# worker enforces it, and in monolithic mode both run here.
+backend_scheduler:
+  provider:
+    compaction:
+      compaction:
+        block_retention: 168h  # 7 days
+backend_worker:
   compaction:
     block_retention: 168h  # 7 days
 
@@ -51,16 +63,15 @@ metrics_generator:
     remote_write:
       - url: http://prometheus:9090/api/v1/write
         send_exemplars: true
-  traces_storage:
-    path: /var/tempo/generator/traces
 
 overrides:
   defaults:
     metrics_generator:
+      # local-blocks is gone with the ingester: the live-store builds those
+      # blocks itself, and naming the processor is an error in 3.0.
       processors:
         - service-graphs
         - span-metrics
-        - local-blocks
 
 usage_report:
   reporting_enabled: false
