@@ -174,10 +174,9 @@ pixi run keycloak-export     # write the live realm back over the JSON
 ## Repository layout
 
 ```
-compose.yaml                    the stack: the `include:` registry, the eight
-                                admin and observability services not yet
-                                extracted, and the volume and network
-                                declarations
+compose.yaml                    the stack: the `include:` registry plus the
+                                volume and network declarations; it declares no
+                                services of its own
 common/base.yaml                restart, logging and networks; every module's
                                 `extends` target, never itself included
 .env.example                    every tunable, with defaults
@@ -221,27 +220,35 @@ scripts/check_commit_msg.py     the commit-message contract, where it can be tes
 scripts/podman-socket.sh        stops Docker and enables Podman's API socket (CI)
 scripts/assert-podman.sh        proves Podman itself reports the running containers
 scripts/lint_selftest.py        proves the lint surface and the scripts hold
-services/                       one directory per extracted service, listed in the
-                                order compose.yaml's `include:` reads them; the admin
-                                and observability services are not extracted yet and
-                                are still inlined in compose.yaml
+services/                       one directory per service, listed in the order
+                                compose.yaml's `include:` reads them; every service
+                                is extracted, so this is the whole stack
+  flower/compose.yaml           the Flower service; volume only, no config files
+  grafana/compose.yaml          the Grafana service; depends_on prometheus, loki, tempo
+  grafana/conf/provisioning/    datasources + dashboard provider
+  grafana/dashboards/           drop dashboard JSON here; picked up within 30s
   keycloak/compose.yaml         the Keycloak service; depends_on postgres and mailpit
   keycloak/seed/                realm imported on first boot
+  loki/compose.yaml             the Loki service; no healthcheck by design
+  loki/conf/loki-config.yaml    single-binary config, filesystem storage
   mailpit/compose.yaml          the Mailpit service; no config files, volume only
   minio/compose.yaml            the Silo server plus the one-shot minio-init helper
                                 that provisions its buckets (the volume keeps the
                                 minio- prefix; see below)
+  otel-collector/compose.yaml   the collector; depends_on loki and tempo, no volume
+  otel-collector/conf/          collector pipelines
+  pgadmin/compose.yaml          the pgAdmin service; depends_on postgres
+  pgadmin/conf/servers.json     the pre-registered Postgres connection
   postgres/compose.yaml         the Postgres service, pulled in by `include:`
   postgres/conf/postgresql.conf dev-tuned config (loaded via config_file)
   postgres/seed/                extensions + extra databases, first boot only
+  prometheus/compose.yaml       the Prometheus service
+  prometheus/conf/              scrape config
   redis/compose.yaml            the Redis service
   redis/conf/redis.conf         AOF + RDB persistence, noeviction
-docker/                         config for the services still inlined
-  pgadmin/servers.json          the pre-registered Postgres connection
-  otel/                         collector pipelines
-  prometheus/ loki/ tempo/      backend configs
-  grafana/provisioning/         datasources + dashboard provider
-  grafana/dashboards/           drop dashboard JSON here; picked up within 30s
+  redisinsight/compose.yaml     the RedisInsight service; depends_on redis
+  tempo/compose.yaml            the Tempo service; no healthcheck by design
+  tempo/conf/tempo.yaml         storage + metrics_generator config
 ```
 
 ## Common tasks
@@ -567,12 +574,11 @@ misbehaves under Podman turns the run red rather than going unrecorded.
 
 ### Deviations worth knowing
 
-- **`max-file` is inert.** `compose.yaml`'s `x-logging` and `common/base.yaml`'s
-  `defaults` — the two sources every service reads, one inlined and one extracted
-  — both set `max-size: "10m"` and `max-file: "3"`. Podman's compat API accepts
-  unknown log options without complaint and reads only `path`, `max-size` and
-  `tag`, so under Podman you get one rotated log file rather than three. Nothing
-  fails and nothing warns.
+- **`max-file` is inert.** `common/base.yaml`'s `defaults` — the single source
+  every service reads, through `extends` — sets `max-size: "10m"` and
+  `max-file: "3"`. Podman's compat API accepts unknown log options without
+  complaint and reads only `path`, `max-size` and `tag`, so under Podman you get
+  one rotated log file rather than three. Nothing fails and nothing warns.
 - **`restart: unless-stopped` does not survive a reboot** unless you also
   `systemctl enable podman-restart.service`. Podman honours the policy while it
   is running; it has no always-on daemon to reapply it at boot.
@@ -613,7 +619,7 @@ Grafana, a full `down` followed by `up` returns every one of them intact.
 Telemetry backends keep data far longer than you usually need locally: Prometheus
 15 days, Tempo 7 days, Loki until compaction. If the volumes grow inconveniently,
 `pixi run destroy` is the blunt fix; per-service retention lives in each backend's
-config file under `docker/`.
+config file under `services/<name>/conf/`.
 
 When querying Prometheus for a short-lived series, use `/api/v1/series` or a small
 `step`. A `query_range` with a large step can land every evaluation point outside

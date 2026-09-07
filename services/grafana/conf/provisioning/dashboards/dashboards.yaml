@@ -1,4 +1,4 @@
-# Dashboard provider. Drop any dashboard JSON into docker/grafana/dashboards/
+# Dashboard provider. Drop any dashboard JSON into services/grafana/dashboards/
 # and it is picked up within 30s without restarting Grafana.
 
 apiVersion: 1

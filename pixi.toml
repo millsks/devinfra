@@ -180,11 +180,11 @@ cmd = "shellcheck scripts/**/*.sh services/**/*.sh .githooks/*"
 
 [tasks.lint-yaml]
 description = "yamllint the compose files, the shared fragment, the CI workflow and every service YAML config"
-cmd = "yamllint --strict -c .yamllint.yaml .yamllint.yaml compose.yaml common/**/*.y*ml services/**/*.y*ml .github/workflows/*.y*ml docker/**/*.y*ml"
+cmd = "yamllint --strict -c .yamllint.yaml .yamllint.yaml compose.yaml common/**/*.y*ml services/**/*.y*ml .github/workflows/*.y*ml"
 
 [tasks.lint-json]
 description = "Validate every JSON config parses"
-cmd = "python scripts/lint_json.py renovate.json docker/**/*.json services/**/*.json"
+cmd = "python scripts/lint_json.py renovate.json services/**/*.json"
 
 [tasks.lint-python]
 description = "ruff and mypy over the repository's own Python"

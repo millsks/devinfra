@@ -1,0 +1,28 @@
+# Loki — log store; the collector's log pipeline writes here.
+# Profile: observability.
+#
+# A Module. The rules every Module holds are spelled out once in
+# services/postgres/compose.yaml and in the 2026-09-07 amendment to
+# docs/adr/0004-volume-names-are-frozen.md; `lint-config` enforces them.
+services:
+  loki:
+    extends:
+      file: ../../common/base.yaml
+      service: defaults
+    image: grafana/loki:${LOKI_VERSION:-3.7.7}
+    container_name: devinfra-loki
+    profiles: [observability]
+    ports:
+      - "${BIND_ADDRESS:-127.0.0.1}:${LOKI_PORT:-3100}:3100"
+    volumes:
+      - loki-data:/loki
+      - ./conf/loki-config.yaml:/etc/loki/local-config.yaml:ro
+    command: ["-config.file=/etc/loki/local-config.yaml"]
+    # No healthcheck: Loki 3.7 dropped the busybox layer its image used to carry,
+    # so the container holds /usr/bin/loki and nothing else — no shell, no wget,
+    # no HTTP client of any kind — and a Docker healthcheck has nothing to run.
+    # The readiness gate is not lost, it moved: smoke-test.sh polls /ready from
+    # the host, before the OTLP round-trip, and strict mode fails on it.
+
+volumes:
+  loki-data:

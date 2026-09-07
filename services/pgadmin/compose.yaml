@@ -1,0 +1,33 @@
+# pgAdmin — web UI for the Postgres instance in this stack. Profile: admin.
+#
+# A Module. The rules every Module holds are spelled out once in
+# services/postgres/compose.yaml and in the 2026-09-07 amendment to
+# docs/adr/0004-volume-names-are-frozen.md; `lint-config` enforces them.
+services:
+  pgadmin:
+    extends:
+      file: ../../common/base.yaml
+      service: defaults
+    image: dpage/pgadmin4:${PGADMIN_VERSION:-9.17}
+    container_name: devinfra-pgadmin
+    profiles: [admin]
+    depends_on:
+      postgres:
+        condition: service_healthy
+    ports:
+      - "${BIND_ADDRESS:-127.0.0.1}:${PGADMIN_PORT:-5050}:80"
+    environment:
+      # pgAdmin validates this address and exits if it fails; bare "@localhost"
+      # and special-use TLDs (.local, .test) are both rejected.
+      PGADMIN_DEFAULT_EMAIL: ${PGADMIN_EMAIL:-dev@example.com}
+      PGADMIN_DEFAULT_PASSWORD: ${PGADMIN_PASSWORD:-devinfra}
+      PGADMIN_CONFIG_SERVER_MODE: "False"
+      PGADMIN_CONFIG_MASTER_PASSWORD_REQUIRED: "False"
+      PGADMIN_DISABLE_POSTFIX: "True"
+    volumes:
+      - pgadmin-data:/var/lib/pgadmin
+      - ./conf/servers.json:/pgadmin4/servers.json:ro
+    user: "5050:5050"
+
+volumes:
+  pgadmin-data:

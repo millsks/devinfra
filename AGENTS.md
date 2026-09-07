@@ -3,7 +3,7 @@
 
 ## devinfra
 
-Docker Compose stack of local development infrastructure — Postgres, Redis, Keycloak, object storage, Mailpit, plus admin and observability profiles. No application code; the deliverables are `compose.yaml` with the module files it includes, service configs under `services/<name>/` and `docker/`, and the verification in `scripts/smoke-test.sh`. Planning artifacts live in `_bmad-output/planning-artifacts/`, decisions in `docs/adr/`.
+Docker Compose stack of local development infrastructure — Postgres, Redis, Keycloak, object storage, Mailpit, plus admin and observability profiles. No application code; the deliverables are `compose.yaml` with the module files it includes, service configs under `services/<name>/`, and the verification in `scripts/smoke-test.sh`. Planning artifacts live in `_bmad-output/planning-artifacts/`, decisions in `docs/adr/`.
 
 ## Policy
 
@@ -14,11 +14,12 @@ Docker Compose stack of local development infrastructure — Postgres, Redis, Ke
 
 ## Where things are
 
-- The stack is `compose.yaml` plus the module files in its `include:` list. An extracted service owns
-  `services/<name>/` — its compose fragment, `conf/` and `seed/`; the rest are still inlined with their
-  config under `docker/<service>/`. Shared `restart`/`logging`/`networks` come from `common/base.yaml`
-  through `extends`, never a YAML anchor — anchors cannot cross an `include` boundary.
-- Changing anything under `services/` or `docker/` — read README "Gotchas worth knowing" first; it documents the traps that cost real time.
+- The stack is `compose.yaml` plus the module files in its `include:` list. Every service is extracted
+  and owns `services/<name>/` — its compose fragment, `conf/` and `seed/`. The root file declares no
+  services of its own; `include:` is the record of what runs. Shared `restart`/`logging`/`networks` come
+  from `common/base.yaml` through `extends`, never a YAML anchor — anchors cannot cross an `include`
+  boundary.
+- Changing anything under `services/` — read README "Gotchas worth knowing" first; it documents the traps that cost real time.
 - Architecture rules binding future changes: `_bmad-output/planning-artifacts/architecture/architecture-devinfra-2026-09-06/ARCHITECTURE-SPINE.md` (21 decisions). Rationale in `docs/adr/`.
 - Planned work: `_bmad-output/planning-artifacts/epics.md`.
 

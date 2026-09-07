@@ -631,28 +631,88 @@ def main() -> int:
     uncovered = sorted(path for path in shell_sources if path not in covered)
     expect("lint-shell covers every script at any depth", not uncovered, f"unlinted: {uncovered}")
 
-    # common/base.yaml and compose.yaml's anchors are two sources of one truth until
-    # every service is extracted: the eight inlined admin and observability services
-    # read `x-defaults`, the modules read `defaults`. A logging or restart change
-    # applied to one and not the other lands on some services and silently skips the
-    # rest, and nothing renders both in a way a diff would show. So they are compared
-    # here, resolved.
+    # Every service is extracted, so common/base.yaml is the *only* source of the
+    # shared restart/logging/networks fragment. The root file used to carry a second,
+    # anchored copy for the services inlined in it; both are gone, and what is pinned
+    # here is that end state. The whole key set is pinned rather than a deny-list of
+    # `services` and the three anchor names it used to carry: a second copy of the
+    # fragment re-added as `x-common` or `x-base` would pass a deny-list while
+    # recreating exactly the duplicated-source problem, and any new top-level key here
+    # is a claim this file makes about the stack that no per-module check can see.
     base_model = yaml.safe_load((REPO / "common" / "base.yaml").read_text(encoding="utf-8"))
     root_model = yaml.safe_load((REPO / "compose.yaml").read_text(encoding="utf-8"))
     shared = base_model.get("services", {}).get("defaults")
-    anchored = root_model.get("x-defaults")
     expect("common/base.yaml declares a 'defaults' service", isinstance(shared, dict), f"got {shared!r}")
-    expect("compose.yaml still declares the x-defaults anchor", isinstance(anchored, dict), f"got {anchored!r}")
+    root_keys = set(root_model)
     expect(
-        "the shared fragment and the root anchors resolve to the same configuration",
-        shared == anchored,
-        f"common/base.yaml defaults {shared!r} != compose.yaml x-defaults {anchored!r}",
+        "compose.yaml declares name, include, volumes and networks and nothing else",
+        root_keys == {"name", "include", "volumes", "networks"},
+        f"unexpected {sorted(root_keys - {'name', 'include', 'volumes', 'networks'})}, "
+        f"missing {sorted({'name', 'include', 'volumes', 'networks'} - root_keys)} — a service or a "
+        f"shared fragment back in the root file sits outside every per-module check and outside "
+        f"the `include:` list that is supposed to be the record of what the stack runs",
     )
     expect(
         "the shared fragment declares only restart, logging and networks",
         isinstance(shared, dict) and set(shared) == {"restart", "logging", "networks"},
         f"common/base.yaml defaults declares {sorted(shared) if isinstance(shared, dict) else shared!r}",
     )
+
+    # `include:` is the registry, and nothing else reconciles it against the module
+    # directories. A module missing from the list is linted by every check, renders
+    # nothing into the model, and validates green — the failure is a service that is
+    # simply absent from the running stack. Three directions, all cheap: every module
+    # file appears in the list, every entry resolves to a real file, and every entry
+    # names a module — an entry pointing anywhere else would put service definitions
+    # back where assert_config.py's module_composes(), assert_pins.py and every other
+    # per-module check cannot see them, which is the inlining this story removed in a
+    # new shape. Compose accepts both a bare path and the long `- path: <file>` form,
+    # so both are read and anything else is named rather than skipped.
+    include_entries = root_model.get("include") or []
+    expect(
+        "compose.yaml's include: is a non-empty list",
+        isinstance(include_entries, list) and bool(include_entries),
+        f"include: is {include_entries!r}, so every registry assertion below would pass vacuously",
+    )
+    included: list[str] = []
+    for entry in include_entries if isinstance(include_entries, list) else []:
+        if isinstance(entry, str):
+            included.append(entry)
+        elif isinstance(entry, dict) and isinstance(entry.get("path"), str):
+            included.append(str(entry["path"]))
+        else:
+            expect(
+                f"compose.yaml's include: entry {entry!r} is a path this check can read",
+                False,
+                "neither a bare path nor the long `- path: <file>` form, so it is unverifiable here",
+            )
+    registered = {(REPO / entry).resolve() for entry in included}
+    module_files = sorted((REPO / "services").glob("*/compose.yaml"))
+    expect("there are module files to reconcile", bool(module_files), "found no services/*/compose.yaml")
+    for module in module_files:
+        expect(
+            f"compose.yaml's include: registers {module.relative_to(REPO).as_posix()}",
+            module.resolve() in registered,
+            "the module is linted by every check and contributes nothing to the model",
+        )
+    for entry in included:
+        expect(
+            f"compose.yaml's include: entry {entry} resolves to a file",
+            (REPO / entry).is_file(),
+            "the entry names a file that does not exist",
+        )
+        # The leading `./` is optional to Compose and optional here: the direction above
+        # compares resolved paths, so `services/x/compose.yaml` already satisfies it, and
+        # a rule that rejected that spelling would hand the author a diagnostic claiming
+        # their module is invisible to module_composes() — which globs services/*/compose.yaml
+        # from disk and would have found it. What must hold is the location, since a module
+        # anywhere else is what those globs really would miss.
+        expect(
+            f"compose.yaml's include: entry {entry} is a module file",
+            re.fullmatch(r"(?:\./)?services/[^/]+/compose\.yaml", entry) is not None,
+            "not services/<name>/compose.yaml, so the services it declares are invisible to "
+            "assert_config.py's module_composes() and to every other per-module check",
+        )
 
     # minio-init is a one-shot helper, and `extends` made its `restart` override
     # load-bearing: while it aliased x-logging it only restated Docker's own default, but
@@ -723,18 +783,34 @@ def main() -> int:
             REPO / HOOKS_DIR / "zz_selftest_defect",
             '#!/usr/bin/env bash\nv="$1"\necho $v\n',
         ),
-        ("lint-yaml", REPO / "docker" / "loki" / "zz_selftest_defect.yaml", "root:\n  a: 1\n      b: 2\n"),
-        ("lint-json", REPO / "docker" / "pgadmin" / "zz_selftest_defect.json", '{\n  "a": 1,\n}\n'),
-        # …and the same defect one directory tree over. The `services/**/*.json` term is
-        # newer than the `docker/**/*.json` one and covers the Keycloak realm; a fixture
-        # under docker/ alone would still pass if that term were dropped. It sits beside
-        # the module file, not in seed/: that directory is bind-mounted wholesale into
-        # Keycloak's --import-realm path, so a fixture surviving a killed run would break
-        # the next realm import.
+        # Below a module root, not beside the module file: `services/**/*.y*ml` has to
+        # reach a module's own config, not just its compose.yaml, and a fixture at
+        # services/loki/ would pass even if the `**` collapsed to a single level.
+        ("lint-yaml", REPO / "services" / "loki" / "conf" / "zz_selftest_defect.yaml", "root:\n  a: 1\n      b: 2\n"),
+        # The same depth argument for JSON: `services/**/*.json` must reach a module's
+        # conf/ directory, which is where the pgAdmin server registration now lives.
+        ("lint-json", REPO / "services" / "pgadmin" / "conf" / "zz_selftest_defect.json", '{\n  "a": 1,\n}\n'),
+        # …and the same defect beside a module file rather than below it, so a `**` that
+        # ever stopped matching the module root itself would be caught too. It sits
+        # beside services/keycloak/compose.yaml, not in seed/: that directory is
+        # bind-mounted wholesale into Keycloak's --import-realm path, so a fixture
+        # surviving a killed run would break the next realm import.
         (
             "lint-json",
             REPO / "services" / "keycloak" / "zz_selftest_defect.json",
             '{\n  "a": 1,\n}\n',
+        ),
+        # The YAML half of that same pair, which the conf/ fixture above cannot stand in
+        # for. Narrowing `services/**/*.y*ml` to `services/**/conf/*.y*ml` leaves that one
+        # matched and empties no `empties` entry, so every case here would pass while none
+        # of the thirteen module compose.yaml files — the stack itself — was yamllinted.
+        # Placed in redisinsight/, the one module with neither a conf/ nor a seed/
+        # directory bind-mounted into it, so a fixture surviving a killed run reaches no
+        # container.
+        (
+            "lint-yaml",
+            REPO / "services" / "redisinsight" / "zz_selftest_defect.yaml",
+            "root:\n  a: 1\n      b: 2\n",
         ),
         (
             "lint-compose",
@@ -754,23 +830,35 @@ def main() -> int:
             )
 
     # --- Every glob-driven task fails when its pattern matches nothing. ---
+    #
+    # `moved_aside()` renames tracked files in place and restores them in a `finally`.
+    # A killed run — SIGKILL, a power cut — skips that restore, and the entries below
+    # hide the CI workflow and every module compose file and config: the tree would be
+    # left with no CI workflow and no stack at all, each file sitting beside where it
+    # belongs under a `.selftest-moved` suffix. Same hazard the Keycloak JSON fixture is
+    # placed to avoid, one size larger. `git status` names every one, and renaming the
+    # `.selftest-moved` files back — or `git checkout --` — restores the tree.
     empties: list[tuple[str, list[Path]]] = [
         ("lint-shell", sorted((REPO / "services" / "postgres" / "seed").glob("*.sh"))),
-        ("lint-yaml", sorted((REPO / "docker").rglob("*.yaml")) + sorted((REPO / "docker").rglob("*.yml"))),
-        # The two module halves of the lint-yaml glob, pinned one term per entry. Hiding
-        # both at once would let either `common/*.y*ml` or `services/**/*.y*ml` be deleted
-        # from pixi.toml with every case here still passing, because the other term would
-        # empty the file set on its own.
+        # The three glob halves of the lint-yaml pattern, pinned one term per entry.
+        # Hiding several at once would let any one of `common/**/*.y*ml`,
+        # `services/**/*.y*ml` and `.github/workflows/*.y*ml` be deleted from pixi.toml
+        # with every case here still passing, because another term would empty the file
+        # set on its own. The `services/` pin is the whole recursive term, not just
+        # `services/*/compose.yaml`: since the admin and observability modules landed,
+        # most YAML that term reaches is module config below the module root, and a pin
+        # on the compose files alone would no longer empty it.
         ("lint-yaml", sorted((REPO / "common").rglob("*.y*ml"))),
-        ("lint-yaml", sorted((REPO / "services").glob("*/compose.yaml"))),
-        # The two *glob* halves of the lint-json pattern, pinned one term per entry, for
-        # the same reason the lint-yaml halves are: hiding only docker/'s JSON would leave
-        # `services/**/*.json` deletable from pixi.toml with every case here still green,
-        # and hiding only services/' would leave `docker/**/*.json` deletable. The third
-        # term, the literal `renovate.json`, is not pinned here and does not need to be:
-        # a literal path cannot silently stop matching, which is the only failure this
-        # mechanism detects, and assert_renovate.py parses that file on every run anyway.
-        ("lint-json", sorted((REPO / "docker").rglob("*.json"))),
+        ("lint-yaml", sorted((REPO / "services").rglob("*.yaml")) + sorted((REPO / "services").rglob("*.yml"))),
+        (
+            "lint-yaml",
+            sorted((REPO / ".github" / "workflows").glob("*.yaml"))
+            + sorted((REPO / ".github" / "workflows").glob("*.yml")),
+        ),
+        # The lint-json pattern's one glob term. The other term, the literal
+        # `renovate.json`, is not pinned here and does not need to be: a literal path
+        # cannot silently stop matching, which is the only failure this mechanism
+        # detects, and assert_renovate.py parses that file on every run anyway.
         ("lint-json", sorted((REPO / "services").rglob("*.json"))),
     ]
     for task, targets in empties:
@@ -1499,10 +1587,11 @@ def main() -> int:
         ]["logging"]
 
         def rendered(services: dict[str, object]) -> str:
-            # Every real service renders with the shared logging options, whether it reads
-            # them from the `x-logging` anchor or from common/base.yaml through `extends`,
-            # so the stub document carries them too. A service written here without them is
-            # stating that defect deliberately.
+            # Every real service renders with the shared logging options, which it reads
+            # from common/base.yaml through `extends` — the `x-logging` anchor that was the
+            # other source is gone with the last inlined service. The stub document carries
+            # them too; a service written here without them is stating that defect
+            # deliberately.
             filled = {
                 name: ({"logging": base_logging, **body} if isinstance(body, dict) else body)
                 for name, body in services.items()
@@ -1677,6 +1766,71 @@ def main() -> int:
             "lint-config names the service whose logging is not the shared one",
             "postgres" in r.stderr and "logging" in r.stderr,
             f"stderr: {r.stderr!r}",
+        )
+
+        # Bind sources, the property with no other net. A module writes them against its
+        # own directory, and a mistyped one never fails: Docker creates the missing path
+        # as an empty *directory* and starts the container, so pgAdmin comes up with no
+        # server registration while `/misc/ping` still answers 200 and the smoke suite
+        # passes. Three cases, because existence alone is not the rule — the empty
+        # directory Docker leaves behind would satisfy an `exists()` check forever after
+        # the first `up`, which is exactly when the defect is already live.
+        def bound(source: Path, target: str = "/pgadmin4/servers.json") -> str:
+            return rendered(
+                {
+                    "pgadmin": {
+                        "image": "dpage/pgadmin4:9.8",
+                        "ports": [],
+                        "volumes": [{"type": "bind", "source": str(source), "target": target, "read_only": True}],
+                    }
+                }
+            )
+
+        r = pixi("lint-config", env=fresh(document=bound(REPO / "services" / "pgadmin" / "conf" / "servers.json")))
+        expect(
+            "lint-config accepts a bind source that is a real file",
+            r.returncode == 0,
+            f"output: {(r.stdout + r.stderr)!r}",
+        )
+
+        no_source = REPO / "services" / "pgadmin" / "conf" / "zz_selftest_absent.json"
+        r = pixi("lint-config", env=fresh(document=bound(no_source)))
+        expect("lint-config rejects a bind source that does not exist", r.returncode != 0, "exited 0")
+        expect(
+            "lint-config names the service, the missing source and what Docker would do",
+            "pgadmin" in r.stderr and no_source.name in r.stderr and "empty directory" in r.stderr,
+            f"stderr: {r.stderr!r}",
+        )
+
+        # The state Docker leaves after starting once with the mistyped source above.
+        # Planted rather than described, so the check is proved against the real
+        # filesystem it reads. Reused and removed whole, the way defect_module is,
+        # so a killed run neither aborts the next one nor needs a hand cleanup.
+        materialised = REPO / "services" / "pgadmin" / "conf" / "zz_selftest_materialised"
+        materialised.mkdir(exist_ok=True)
+        try:
+            r = pixi("lint-config", env=fresh(document=bound(materialised)))
+            expect(
+                "lint-config rejects a bind source Docker already materialised as an empty directory",
+                r.returncode != 0,
+                "exited 0 — an existence-only check passes here, and this is the state after the first `up`",
+            )
+            expect(
+                "lint-config names the empty directory and the .gitkeep way out",
+                "pgadmin" in r.stderr and materialised.name in r.stderr and ".gitkeep" in r.stderr,
+                f"stderr: {r.stderr!r}",
+            )
+        finally:
+            shutil.rmtree(materialised, ignore_errors=True)
+
+        # ...and the directory sources that are legitimate stay legitimate. Grafana's
+        # drop-zone is the case the rule above has to not break: it holds nothing but
+        # .gitkeep, which is also the only reason git tracks the directory at all.
+        r = pixi("lint-config", env=fresh(document=bound(REPO / "services" / "grafana" / "dashboards", "/dashboards")))
+        expect(
+            "lint-config accepts a directory source that carries only .gitkeep",
+            r.returncode == 0,
+            f"output: {(r.stdout + r.stderr)!r}",
         )
 
         env = fresh(profiles=two, document=clean_doc)
@@ -2576,6 +2730,40 @@ def main() -> int:
                 f"core {sorted(core_services)} vs all {sorted(all_services)}",
             )
 
+            # A proper subset is not enough. `profiles:` is one key per service, and a
+            # service that lost it joins the *default* selection — the one `pixi run
+            # up-core` starts — while every check here stays green and the subset above
+            # still holds. So membership is pinned literally, against the real runtime,
+            # the way the ci.yml profile list is. These are an independent list, not a
+            # reading of compose.yaml's header: the header stays prose nothing verifies,
+            # and it is one member shorter than this set — it names the services a reader
+            # starts, while `minio-init` is the one-shot helper minio pulls in behind
+            # them, carrying no `profiles:` key and so landing in this selection.
+            expected_core = {"postgres", "redis", "keycloak", "minio", "minio-init", "mailpit"}
+            expected_admin = {"pgadmin", "redisinsight", "flower"}
+            expected_observability = {"otel-collector", "prometheus", "loki", "tempo", "grafana"}
+            expect(
+                "the default selection is exactly the core services",
+                core_services == expected_core,
+                f"unexpected {sorted(core_services - expected_core)}, missing {sorted(expected_core - core_services)} "
+                f"— a service that lost its `profiles:` key joins the stack `pixi run up-core` starts",
+            )
+            expect(
+                "admin and observability together add exactly their documented members",
+                all_services == expected_core | expected_admin | expected_observability,
+                f"unexpected {sorted(all_services - (expected_core | expected_admin | expected_observability))}, "
+                f"missing {sorted((expected_core | expected_admin | expected_observability) - all_services)}",
+            )
+            for profile, members in (("admin", expected_admin), ("observability", expected_observability)):
+                one = tool(["docker", "compose", "--profile", profile, "config", "--services"], cwd=REPO, env=real)
+                selected = {line.strip() for line in one.stdout.splitlines() if line.strip()}
+                expect(
+                    f"the {profile} profile holds exactly the services compose.yaml's header lists",
+                    selected == expected_core | members,
+                    f"unexpected {sorted(selected - (expected_core | members))}, "
+                    f"missing {sorted((expected_core | members) - selected)}",
+                )
+
     # --- An enumeration that cannot be read is a failure, never "no profiles". ---
     # `config --profiles` resolves the whole model, so a real structural defect
     # surfaces there rather than in the per-combination loop. Treating that as an
@@ -3153,7 +3341,7 @@ def main() -> int:
             expect("the rejection names the offending script", shell_defect.name in output, f"said: {output!r}")
             expect("the rejection names the rule that caught it", "SC2086" in output, f"said: {output!r}")
 
-        yaml_defect = REPO / "docker" / "loki" / "zz_selftest_hook_defect.yaml"
+        yaml_defect = REPO / "services" / "loki" / "conf" / "zz_selftest_hook_defect.yaml"
         with planted(yaml_defect, "root:\n  a: 1\n      b: 2\n"):
             r = commit("yaml.txt", "feat: this commit must not land either")
             output = r.stdout + r.stderr

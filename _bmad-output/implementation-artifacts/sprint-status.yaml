@@ -48,7 +48,7 @@ development_status:
   epic-2: backlog
   2-1-the-shared-fragment-and-the-first-module: done
   2-2-the-remaining-core-modules: done
-  2-3-the-admin-and-observability-modules: backlog
+  2-3-the-admin-and-observability-modules: done
   2-4-every-module-carries-its-own-contract-enforced: backlog
   2-5-selecting-a-module-brings-what-it-needs: backlog
   2-6-bundles-and-a-safe-path-through-the-breaking-change: backlog

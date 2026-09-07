@@ -1,0 +1,33 @@
+# RedisInsight — web UI for the Redis instance in this stack. Profile: admin.
+#
+# A Module. The rules every Module holds are spelled out once in
+# services/postgres/compose.yaml and in the 2026-09-07 amendment to
+# docs/adr/0004-volume-names-are-frozen.md; `lint-config` enforces them.
+#
+# No config or seed files: the volume is the whole of this module's state.
+services:
+  redisinsight:
+    extends:
+      file: ../../common/base.yaml
+      service: defaults
+    image: redis/redisinsight:${REDISINSIGHT_VERSION:-3.8.0}
+    container_name: devinfra-redisinsight
+    profiles: [admin]
+    depends_on:
+      redis:
+        condition: service_healthy
+    ports:
+      - "${BIND_ADDRESS:-127.0.0.1}:${REDISINSIGHT_PORT:-5540}:5540"
+    environment:
+      RI_APP_HOST: 0.0.0.0
+      RI_APP_PORT: 5540
+      # Auto-adds the local Redis on first start; no manual "add database" step.
+      RI_REDIS_HOST: redis
+      RI_REDIS_PORT: 6379
+      RI_REDIS_PASSWORD: ${REDIS_PASSWORD:-devinfra}
+      RI_REDIS_ALIAS: devinfra
+    volumes:
+      - redisinsight-data:/data
+
+volumes:
+  redisinsight-data:
