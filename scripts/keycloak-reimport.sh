@@ -11,7 +11,7 @@ set -euo pipefail
 # shellcheck source=scripts/lib/common.sh
 source "$(dirname "$0")/lib/common.sh"
 
-echo "Drops the 'keycloak' database and re-imports docker/keycloak/realms/."
+echo "Drops the 'keycloak' database and re-imports services/keycloak/seed/."
 echo "All realm changes made through the admin console will be lost."
 confirm_word reimport
 

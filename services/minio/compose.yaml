@@ -1,0 +1,90 @@
+# Silo — S3-compatible object storage (maintained MinIO fork), plus the one-shot
+# helper that provisions its buckets.
+#
+# minio/minio and minio/mc were both archived upstream in 2026. The last MinIO
+# release fixed a privilege-escalation CVE and was never published to any
+# registry, so the newest pullable image is permanently unpatched. Silo preserves
+# the MINIO_* variables and the on-disk format, so the existing minio-data volume
+# is read as-is. See docs/adr/0008-object-storage-replacement.md.
+#
+# The module directory is services/minio/ and the volume is minio-data. ADR 0004
+# freezes the *volume* identifier — renaming it orphans real data with no error —
+# and says nothing about the directory. See the 2026-09-07 amendment in ADR 0008.
+#
+# Pulled into the model by the `include:` list in the root compose.yaml. Shared
+# configuration arrives through `extends` rather than a YAML anchor: anchors are
+# document-scoped and cannot cross a file boundary. `project_directory` is never used
+# in a module file; should this one ever gain a relative path, it is written against
+# *this* directory.
+#
+# The `volumes:` stanza below carries the identifier and nothing else. Driver keys
+# live in the root compose.yaml, which wins on every key it sets explicitly; a
+# module adding one would silently win instead.
+#
+# There is deliberately no `networks:` stanza here, and adding one back breaks CI.
+# Compose v2 refuses an `include` in which a module declares a top-level resource
+# the root declares *with keys* — `networks.devinfra conflicts with imported
+# resource`, exit 15. The root's `networks: devinfra:` carries `name:` and
+# `driver:`, so no module may name it; its `volumes: minio-data:` is bare, so a
+# bare redeclaration here is accepted. Both services still join the network: they
+# inherit `networks: [devinfra]` from common/base.yaml through `extends`. See the
+# 2026-09-07 amendment in docs/adr/0004-volume-names-are-frozen.md.
+services:
+  minio:
+    extends:
+      file: ../../common/base.yaml
+      service: defaults
+    image: pgsty/silo:${SILO_VERSION:-RELEASE.2026-09-03T13-18-01Z}
+    container_name: devinfra-minio
+    ports:
+      - "${BIND_ADDRESS:-127.0.0.1}:${MINIO_API_PORT:-9100}:9000"
+      - "${BIND_ADDRESS:-127.0.0.1}:${MINIO_CONSOLE_PORT:-9101}:9001"
+    environment:
+      MINIO_ROOT_USER: ${MINIO_ROOT_USER:-devinfra}
+      MINIO_ROOT_PASSWORD: ${MINIO_ROOT_PASSWORD:-devinfra123}
+      MINIO_BROWSER_REDIRECT_URL: http://localhost:${MINIO_CONSOLE_PORT:-9101}
+      MINIO_PROMETHEUS_AUTH_TYPE: public
+    volumes:
+      - minio-data:/data
+    command: ["server", "/data", "--console-address", ":9001"]
+    healthcheck:
+      test: ["CMD", "mc", "ready", "local"]
+      interval: 10s
+      timeout: 5s
+      retries: 10
+      start_period: 15s
+
+  # One-shot bucket provisioning. Exits 0 once buckets exist; `docker compose ps`
+  # will show it as Exited, which is expected.
+  minio-init:
+    extends:
+      file: ../../common/base.yaml
+      service: defaults
+    # Same image as the server: it ships `mc`, so the archived minio/mc is
+    # no longer needed. Overriding the entrypoint runs the client.
+    image: pgsty/silo:${SILO_VERSION:-RELEASE.2026-09-03T13-18-01Z}
+    container_name: devinfra-minio-init
+    depends_on:
+      minio:
+        condition: service_healthy
+    environment:
+      MINIO_ROOT_USER: ${MINIO_ROOT_USER:-devinfra}
+      MINIO_ROOT_PASSWORD: ${MINIO_ROOT_PASSWORD:-devinfra123}
+      MINIO_BUCKETS: ${MINIO_BUCKETS:-uploads,artifacts,backups}
+    entrypoint: ["/bin/sh", "-c"]
+    command:
+      - |
+        set -eu
+        mc alias set local http://minio:9000 "$$MINIO_ROOT_USER" "$$MINIO_ROOT_PASSWORD"
+        echo "$$MINIO_BUCKETS" | tr ',' '\n' | while read -r bucket; do
+          [ -z "$$bucket" ] && continue
+          mc mb --ignore-existing "local/$$bucket"
+          mc version enable "local/$$bucket"
+          echo "minio-init: bucket '$$bucket' ready (versioning on)"
+        done
+    # The base declares `restart: unless-stopped`. Without this override the
+    # one-shot helper is restarted the moment it exits 0 and loops forever.
+    restart: "no"
+
+volumes:
+  minio-data:

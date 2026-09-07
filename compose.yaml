@@ -13,6 +13,11 @@
 # Services are moving out of this file one at a time. An extracted service lives in
 # services/<name>/ with its config and seed data beside it, and is reassembled here by
 # the `include:` list below — which is the record of what has moved so far.
+#
+# Every core service has moved. The services still inlined below are the ones in the
+# admin and observability profiles; their `depends_on` edges onto postgres and redis
+# now cross the include boundary, which resolves because include assembles one model
+# before dependencies are checked.
 
 name: ${COMPOSE_PROJECT_NAME:-devinfra}
 
@@ -20,7 +25,11 @@ name: ${COMPOSE_PROJECT_NAME:-devinfra}
 # Modules — one file per extracted service, reassembled here
 # ---------------------------------------------------------------------------
 include:
+  - ./services/keycloak/compose.yaml
+  - ./services/mailpit/compose.yaml
+  - ./services/minio/compose.yaml
   - ./services/postgres/compose.yaml
+  - ./services/redis/compose.yaml
 
 # ---------------------------------------------------------------------------
 # Reusable fragments
@@ -45,176 +54,6 @@ x-defaults: &defaults
   networks: [devinfra]
 
 services:
-  # =========================================================================
-  # Redis 8 — cache (db 0), Celery broker (db 1), Celery backend (db 2)
-  # =========================================================================
-  redis:
-    <<: *defaults
-    image: redis:${REDIS_VERSION:-8.10.1-alpine}
-    container_name: devinfra-redis
-    ports:
-      - "${BIND_ADDRESS:-127.0.0.1}:${REDIS_PORT:-6379}:6379"
-    volumes:
-      - redis-data:/data
-      - ./docker/redis/redis.conf:/usr/local/etc/redis/redis.conf:ro
-    command:
-      - redis-server
-      - /usr/local/etc/redis/redis.conf
-      - --requirepass
-      - ${REDIS_PASSWORD:-devinfra}
-    healthcheck:
-      test: ["CMD-SHELL", "redis-cli -a ${REDIS_PASSWORD:-devinfra} --no-auth-warning ping | grep -q PONG"]
-      interval: 10s
-      timeout: 5s
-      retries: 10
-      start_period: 10s
-
-  # =========================================================================
-  # Keycloak 26 — OpenID Connect provider
-  # =========================================================================
-  keycloak:
-    <<: *defaults
-    image: quay.io/keycloak/keycloak:${KEYCLOAK_VERSION:-26.7.3}
-    container_name: devinfra-keycloak
-    depends_on:
-      postgres:
-        condition: service_healthy
-      mailpit:
-        condition: service_started
-    ports:
-      - "${BIND_ADDRESS:-127.0.0.1}:${KEYCLOAK_PORT:-8080}:8080"
-      - "${BIND_ADDRESS:-127.0.0.1}:${KEYCLOAK_MGMT_PORT:-9000}:9000"
-    environment:
-      # --- Bootstrap admin (console at /admin) ---
-      KC_BOOTSTRAP_ADMIN_USERNAME: ${KEYCLOAK_ADMIN:-admin}
-      KC_BOOTSTRAP_ADMIN_PASSWORD: ${KEYCLOAK_ADMIN_PASSWORD:-admin}
-
-      # --- Persistence: Postgres, not the default in-memory H2 ---
-      KC_DB: postgres
-      KC_DB_URL: jdbc:postgresql://postgres:5432/keycloak
-      KC_DB_USERNAME: ${POSTGRES_USER:-devinfra}
-      KC_DB_PASSWORD: ${POSTGRES_PASSWORD:-devinfra}
-
-      # --- HTTP / hostname ---
-      # Fixing the hostname keeps the OIDC issuer stable at
-      # http://localhost:8080/realms/<realm>, which matters because clients
-      # reject tokens whose issuer does not match their discovery document.
-      KC_HOSTNAME: http://localhost:${KEYCLOAK_PORT:-8080}
-      KC_HOSTNAME_STRICT: "false"
-      KC_HTTP_ENABLED: "true"
-      KC_PROXY_HEADERS: xforwarded
-
-      # --- Observability endpoints on the management port (9000) ---
-      KC_HEALTH_ENABLED: "true"
-      KC_METRICS_ENABLED: "true"
-
-      # Substituted into docker/keycloak/realms/devinfra-realm.json at import.
-      KEYCLOAK_CLIENT_SECRET: ${KEYCLOAK_CLIENT_SECRET:-devinfra-local-secret}
-    volumes:
-      - keycloak-data:/opt/keycloak/data
-      - ./docker/keycloak/realms:/opt/keycloak/data/import:ro
-    # start-dev: no TLS, no hostname strictness, caching disabled. Never use in
-    # production. --import-realm only creates realms that do not already exist,
-    # so edits to the JSON need `make keycloak-reimport`.
-    command: ["start-dev", "--import-realm"]
-    healthcheck:
-      # The Keycloak image has bash but no curl/wget/nc, so this drives a raw
-      # HTTP request over bash's /dev/tcp.
-      test:
-        - CMD-SHELL
-        - >-
-          exec 3<>/dev/tcp/127.0.0.1/9000 &&
-          printf 'GET /health/ready HTTP/1.1\r\nHost: localhost\r\nConnection: close\r\n\r\n' >&3 &&
-          grep -q '"status": "UP"' <&3
-      interval: 15s
-      timeout: 10s
-      retries: 15
-      start_period: 90s
-
-  # =========================================================================
-  # Silo — S3-compatible object storage (maintained MinIO fork)
-  #
-  # minio/minio and minio/mc were both archived upstream in 2026. The last
-  # MinIO release fixed a privilege-escalation CVE and was never published to
-  # any registry, so the newest pullable image is permanently unpatched.
-  # Silo preserves the MINIO_* variables and the on-disk format, so the
-  # existing minio-data volume is read as-is. See docs/adr/0008.
-  # =========================================================================
-  minio:
-    <<: *defaults
-    image: pgsty/silo:${SILO_VERSION:-RELEASE.2026-09-03T13-18-01Z}
-    container_name: devinfra-minio
-    ports:
-      - "${BIND_ADDRESS:-127.0.0.1}:${MINIO_API_PORT:-9100}:9000"
-      - "${BIND_ADDRESS:-127.0.0.1}:${MINIO_CONSOLE_PORT:-9101}:9001"
-    environment:
-      MINIO_ROOT_USER: ${MINIO_ROOT_USER:-devinfra}
-      MINIO_ROOT_PASSWORD: ${MINIO_ROOT_PASSWORD:-devinfra123}
-      MINIO_BROWSER_REDIRECT_URL: http://localhost:${MINIO_CONSOLE_PORT:-9101}
-      MINIO_PROMETHEUS_AUTH_TYPE: public
-    volumes:
-      - minio-data:/data
-    command: ["server", "/data", "--console-address", ":9001"]
-    healthcheck:
-      test: ["CMD", "mc", "ready", "local"]
-      interval: 10s
-      timeout: 5s
-      retries: 10
-      start_period: 15s
-
-  # One-shot bucket provisioning. Exits 0 once buckets exist; `docker compose ps`
-  # will show it as Exited, which is expected.
-  minio-init:
-    <<: *logging
-    # Same image as the server: it ships `mc`, so the archived minio/mc is
-    # no longer needed. Overriding the entrypoint runs the client.
-    image: pgsty/silo:${SILO_VERSION:-RELEASE.2026-09-03T13-18-01Z}
-    container_name: devinfra-minio-init
-    networks: [devinfra]
-    depends_on:
-      minio:
-        condition: service_healthy
-    environment:
-      MINIO_ROOT_USER: ${MINIO_ROOT_USER:-devinfra}
-      MINIO_ROOT_PASSWORD: ${MINIO_ROOT_PASSWORD:-devinfra123}
-      MINIO_BUCKETS: ${MINIO_BUCKETS:-uploads,artifacts,backups}
-    entrypoint: ["/bin/sh", "-c"]
-    command:
-      - |
-        set -eu
-        mc alias set local http://minio:9000 "$$MINIO_ROOT_USER" "$$MINIO_ROOT_PASSWORD"
-        echo "$$MINIO_BUCKETS" | tr ',' '\n' | while read -r bucket; do
-          [ -z "$$bucket" ] && continue
-          mc mb --ignore-existing "local/$$bucket"
-          mc version enable "local/$$bucket"
-          echo "minio-init: bucket '$$bucket' ready (versioning on)"
-        done
-    restart: "no"
-
-  # =========================================================================
-  # Mailpit — catches every outbound email, including Keycloak's
-  # =========================================================================
-  mailpit:
-    <<: *defaults
-    image: axllent/mailpit:${MAILPIT_VERSION:-v1.31.1}
-    container_name: devinfra-mailpit
-    ports:
-      - "${BIND_ADDRESS:-127.0.0.1}:${MAILPIT_SMTP_PORT:-1025}:1025"
-      - "${BIND_ADDRESS:-127.0.0.1}:${MAILPIT_UI_PORT:-8025}:8025"
-    environment:
-      MP_MAX_MESSAGES: 5000
-      MP_DATABASE: /data/mailpit.db
-      MP_SMTP_AUTH_ACCEPT_ANY: 1
-      MP_SMTP_AUTH_ALLOW_INSECURE: 1
-    volumes:
-      - mailpit-data:/data
-    healthcheck:
-      test: ["CMD", "wget", "-q", "-O", "-", "http://127.0.0.1:8025/readyz"]
-      interval: 15s
-      timeout: 5s
-      retries: 5
-      start_period: 10s
-
   # =========================================================================
   # Admin UIs — profile: admin
   # =========================================================================

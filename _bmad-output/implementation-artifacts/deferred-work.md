@@ -149,3 +149,83 @@ source_spec: `spec-2-1-the-shared-fragment-and-the-first-module.md`
 severity: medium
 reason: Reproduced: inserting `restart: "no"` into services/postgres/compose.yaml below an intact `extends:` block leaves lint-compose, lint-config, lint-yaml and lint-pins all green while the service renders with Docker's non-restarting policy. The accidental case is already caught — a module that drops `extends` loses `logging` with it — so what remains is an explicit override, and an override is sanctioned: common/base.yaml's own header tells a one-shot helper to set `restart: "no"`, and minio-init does exactly that, rendering `restart: no` today. A blanket equality check like the logging one would therefore reject a legitimate service. Closing this needs a way to declare the exception, which is the same design question as the no-exception-mechanism risk already recorded for logging; epics story 2.4 ("Every Module carries its own contract, enforced") owns it.
 status: open
+
+### DW-20: DW-13 is closed by this change, but the deferred-work ledger still records it as status: open.
+origin: spec-deferred 271f843ff488
+location: _bmad-output/implementation-artifacts/deferred-work.md (DW-13)
+source_spec: `spec-2-2-the-remaining-core-modules.md`
+severity: low
+reason: pixi.toml's lint-json glob now carries `services/**/*.json`, which is exactly the fix _bmad-output/implementation-artifacts/deferred-work.md DW-13 describes. This run does not write that ledger: it is the bmad-loop orchestrator's sweep artifact, and the sweep's own job is to detect already-resolved entries. Recorded here so the next sweep has the claim.
+status: open
+
+### DW-21: lint-json has no "covers every JSON at any depth" assertion, though lint-shell has exactly that guard.
+origin: spec-deferred 38258a24dd41
+location: scripts/lint_selftest.py (lint-shell coverage assertion has no lint-json counterpart)
+source_spec: `spec-2-2-the-remaining-core-modules.md`
+severity: low
+reason: scripts/lint_selftest.py expands lint-shell's own task patterns and diffs them against a recursive walk, so a script in a new tree cannot silently escape coverage. lint-json has only the two per-term `empties` pins added here, which cover docker/ and services/. A JSON file added under common/, docs/, .github/ or at the repository root would be unlinted with no error anywhere — the same class of lapse DW-13 records. Deferred because no such file exists to demonstrate the gap, and epics story 2.4 owns the bidirectional contract check.
+status: open
+
+### DW-22: The module-file header comment is now duplicated near-verbatim across five module files, with no single source.
+origin: spec-deferred bc18de915844
+location: services/*/compose.yaml (header comments)
+source_spec: `spec-2-2-the-remaining-core-modules.md`
+severity: low
+reason: The "no networks: stanza / Compose v2 exit 15 / identifier-only volumes / project_directory is never used" block appears in services/{keycloak,mailpit,minio,postgres,redis}/compose.yaml. This story multiplied the duplication from one file to five; stories 2.3 onward take it to thirteen, and the copies will drift. DW-14 already owns the missing "adding a module" recipe and assigns the per-Module gotchas artifact to epic 3 story 3.2.
+status: open
+
+### DW-23: The live-stack half of this story's acceptance criteria was never exercised — no container was recreated against its pre-existing volume, and pixi run smoke never ran.
+origin: spec-deferred 7295c40b6786
+location: spec Verification section (live-stack commands)
+source_spec: `spec-2-2-the-remaining-core-modules.md`
+severity: medium
+reason: The running devinfra-* containers are owned by the main checkout and their binds still point at the pre-story-2-1 layout. Recreating them from this worktree would repoint their binds at a directory that is deleted when the run ends, and restoring them requires operating in the main checkout, which this run is barred from. Verification used an isolated Compose project with fresh volumes instead, so "reaches healthy against its pre-existing volume" and "the pre-existing realm, keys and buckets are still present" are unproven. What is proven: the rendered model is byte-identical to the pre-change baseline apart from the two relocated bind sources, so no volume reference can have been renamed or re-driven, and the twelve devinfra_* volumes are unchanged. Settling it needs one operator run of `pixi run up` plus `pixi run smoke` from a checkout that owns the live stack.
+status: open
+
+### DW-24: DW-19's deferral rationale no longer covers the case this change created.
+origin: spec-deferred 0bcf9a505da4
+location: _bmad-output/implementation-artifacts/deferred-work.md (DW-19)
+source_spec: `spec-2-2-the-remaining-core-modules.md`
+severity: low
+reason: DW-19 justifies leaving the shared-fragment restart/networks half unasserted on the grounds that "the accidental case is already caught — a module that drops `extends` loses `logging` with it". That covers an unwanted override. This change creates the opposite direction: a service whose `extends` block is intact and whose logging is therefore correct, but whose sanctioned `restart` override is missing. The targeted minio-init assertion added in this pass closes the one instance; the ledger entry's reasoning is stale for the general case.
+status: open
+
+### DW-25: A dropped depends_on edge is caught by no committed check — only by the one-off rendered-model diff, which leaves no baseline behind.
+origin: spec-deferred 52212d7cfe1f
+location: scripts/lint-compose.sh
+source_spec: `spec-2-2-the-remaining-core-modules.md`
+severity: low
+reason: scripts/lint-compose.sh runs `docker compose config -q` over every profile subset, which catches a *dangling* edge naming an undefined service. An edge simply deleted renders and validates cleanly. The before/after rendered diff is what actually proved "preserving every dependency edge" here, and it ran from a scratch directory outside the repository. ADR 0002 makes `config -q` the sanctioned dependency gate, so committing an edge-set baseline would revisit a decided ADR; epics story 2.4 owns the contract check.
+status: open
+
+### DW-26: Nothing reconciles the services/*/compose.yaml set against the root compose.yaml include: list, so a module directory absent from include: still validates green.
+origin: spec-deferred dd782014685b
+location: scripts/assert_config.py (module_composes) vs compose.yaml include:
+source_spec: `spec-2-2-the-remaining-core-modules.md`
+severity: medium
+reason: scripts/assert_config.py enumerates services/*/compose.yaml from disk and never reads the root include: list; lint-pins and lint-renovate do the same. A module present on disk but missing from include: would be scanned by every check and would silently contribute nothing to the model. Pre-existing — story 2-1 recorded it as an open residual risk — but this change adds four more include lines that carry no automated coverage. Epics story 2.4 owns the bidirectional Module-to-service contract check.
+status: open
+
+### DW-27: Nothing checks that a Module's bind-mount source still exists, and the Keycloak seed directory is the case where its absence is silent.
+origin: spec-deferred 58fa13ed7b2f
+location: services/keycloak/compose.yaml (./seed bind source)
+source_spec: `spec-2-2-the-remaining-core-modules.md`
+severity: medium
+reason: services/keycloak/compose.yaml mounts `./seed:/opt/keycloak/data/import:ro`. Rename or empty that directory and Docker creates a bare host directory at the source path, `--import-realm` finds no realm, and Keycloak starts and reports healthy with no realm and no error anywhere. `docker compose config -q` does not check bind sources, and lint-json's `services/**/*.json` term keeps matching the realm file wherever under services/ it lands. Pre-existing in kind — the same hole existed for `./docker/keycloak/realms` before this story moved it — and services/redis's identical shape fails loudly instead, because redis-server cannot read a directory as its config. Settling it needs a per-Module contract check that asserts each declared bind source resolves to an existing path; epics story 2.4 owns that check.
+status: open
+
+### DW-28: The rendered-config diff is named the primary verification for every extraction, yet it leaves no committed baseline and cannot be re-run after the fact.
+origin: spec-deferred 48f4806a13e7
+location: spec Verification section (rendered-model diff); scripts/lint-compose.sh
+source_spec: `spec-2-2-the-remaining-core-modules.md`
+severity: medium
+reason: The epic context and this spec both make `docker compose config` before-and-after the highest-value check in the migration. It was run for this story from a scratch directory outside the repository and proved the model byte-identical apart from the two relocated bind sources — but nothing in the tree can reproduce it, so stories 2.3 through 2.6 each have to re-capture their own baseline by hand or skip the check. Distinct from DW-25, which scopes the same absence to `depends_on` edges only; this is the whole rendered model, including environment, command and healthcheck values. ADR 0002 makes `config -q` the sanctioned model gate, so committing a rendered baseline revisits a decided ADR; epics story 2.4 owns the per-Module contract check that would replace it.
+status: open
+
+### DW-29: The architecture memlog still repeats the `docker/minio/` claim that ADR 0008's amendment refutes.
+origin: spec-deferred c22e7f2396d6
+location: _bmad-output/planning-artifacts/architecture/architecture-devinfra-2026-09-06/.memlog.md:71
+source_spec: `spec-2-2-the-remaining-core-modules.md`
+severity: low
+reason: _bmad-output/planning-artifacts/architecture/architecture-devinfra-2026-09-06/.memlog.md:71 records "AD-5 held - minio-data volume name and `docker/minio/` config path both unchanged". `git log --all -- docker/minio` is empty, so the claim is false there as it was in ADR 0008 and the README, both corrected by this story. Not corrected here because the memlog is a phase 1-3 planning artifact, upstream of this story's bounds, and this story's Tasks list scoped the correction to ADR 0008 and the README. It matters because a future architecture session reads the memlog first.
+status: open
