@@ -180,6 +180,8 @@ pyproject.toml                  ruff and mypy settings (no package here)
 .yamllint.yaml                  YAML lint rules
 .gitattributes                  LF line endings on every checkout
 .github/workflows/ci.yml        CI: the static gate, and the stack on Docker and Podman
+.github/workflows/renovate.yml  the update bot, on a schedule; opens image-bump PRs
+renovate.json                   what the bot reads: one regex manager over the two files above
 Makefile                        deprecated shims forwarding to pixi tasks
 scripts/lib/common.sh           .env loading and defaults, sourced by the rest
 scripts/compose.sh              the container runtime, honouring DEVINFRA_COMPOSE
@@ -202,6 +204,8 @@ scripts/smoke-test.sh           end-to-end verification; SMOKE_STRICT=1 forbids 
 scripts/lint-compose.sh         `config -q` for every combination of declared profiles
 scripts/assert_config.py        bind address, host-port collisions and image pinning
 scripts/lint_json.py            the JSON check, one file per diagnostic
+scripts/assert_pins.py          .env.example and the compose.yaml fallback must agree
+scripts/assert_renovate.py      the bot's own regexes must still detect every pin
 scripts/podman-socket.sh        stops Docker and enables Podman's API socket (CI)
 scripts/assert-podman.sh        proves Podman itself reports the running containers
 scripts/lint_selftest.py        proves the lint surface and the scripts hold
@@ -247,10 +251,11 @@ docker/
 | `pixi run keycloak-export` | Write the live realm back over the JSON | `make keycloak-export` |
 | `pixi run token dev dev` | Mint an access token | `make token U=dev P=dev` |
 | `pixi run config` | Render the resolved compose configuration | `make config` |
-| `pixi run lint` | Validate compose, rendered config, pins, shell, YAML, JSON, Python | `make lint` |
+| `pixi run lint` | Validate compose, rendered config, pins, the update bot, shell, YAML, JSON, Python | `make lint` |
 | `pixi run lint-compose` | `config -q` for every combination of declared profiles | — |
 | `pixi run lint-config` | Assert the *rendered* config's ports and image tags | — |
 | `pixi run lint-pins` | Assert every pin agrees between `.env.example` and `compose.yaml` | — |
+| `pixi run lint-renovate` | Assert the update bot's regexes still detect every image pin | — |
 | `pixi run test` | Prove the checks and scripts hold their contracts | — |
 | `pixi run ci` | The done-gate: lint + test | — |
 | `pixi run ci-stack` | Start the stack, wait for health, run the strict smoke suite | — |
@@ -298,6 +303,71 @@ want when you started a partial selection. CI starts *every* profile, so there a
 skip is evidence the stack did not come up. `SMOKE_STRICT=1` — what
 `pixi run smoke-strict` sets — scores every skip as a failure naming the absent
 service. Nothing else about any check changes.
+
+## Keeping images current
+
+Every pinned tag is watched by [Renovate](https://docs.renovatebot.com).
+`.github/workflows/renovate.yml` runs the bot weekly (and on demand from the
+Actions tab); each image whose upstream has moved arrives as its own pull
+request, which `ci.yml` validates exactly like a human's. Nothing is merged
+automatically — the bot proposes, CI gates, you decide.
+
+### The annotation contract
+
+Renovate has no manager that can read this stack's pins: its `docker-compose`
+manager skips the `repo:${VAR:-tag}` form, and Dependabot cannot read a dotenv
+file at all. So a `customManagers` regex in `renovate.json` reads both places a
+tag lives, and each declaration in `.env.example` is immediately preceded by an
+annotation naming the repository `compose.yaml` uses for it:
+
+```sh
+# renovate: datasource=docker depName=redis
+REDIS_VERSION=8.10.1-alpine
+```
+
+```yaml
+    image: redis:${REDIS_VERSION:-8.10.1-alpine}
+```
+
+One manager reads both files, so one image at one version resolves to one branch
+— and therefore one pull request that moves the declaration and the fallback
+together. That is the only shape `pixi run lint-pins` accepts. Add a service and
+you add its annotation in the same commit; the reasoning is in
+[ADR 0010](docs/adr/0010-image-updates-are-proposed-by-regex-over-the-dotenv-template.md).
+
+### `pixi run lint-renovate`
+
+A regex manager that matches nothing opens no pull requests and reports a clean
+run, which looks exactly like "everything is current". `pixi run lint-renovate`
+— part of `pixi run lint`, and therefore of `pixi run ci` — refuses that. It
+applies `renovate.json`'s *own* `matchStrings` to the files its *own*
+`managerFilePatterns` select and fails if any pattern matches nothing, if a
+declaration is unannotated, if an annotation names a repository `compose.yaml`
+disagrees with, or if `ci.yml`'s `pull_request` trigger ever grows a `paths:`
+filter a bot pull request could fall through. It needs no network, no Node and
+no token, so CI runs it on every change.
+
+The real extraction, if you want to see Renovate's own count, needs all three
+and is run by hand:
+
+```sh
+npx --yes renovate --platform=local --dry-run=extract
+```
+
+### What the operator must supply
+
+The bot authenticates with a repository secret named **`RENOVATE_TOKEN`** — a
+fine-grained personal access token or a GitHub App installation token with
+`contents: write`, `pull-requests: write` and `issues: write` (the last for the
+dependency dashboard issue) on this repository. It is deliberately *not* the
+workflow's own `GITHUB_TOKEN`: a pull request opened with that token triggers no
+`pull_request` workflow, so the bot's proposals would arrive looking validated
+with nothing having run. Without the secret the bot cannot authenticate and
+proposes nothing, so set it before relying on the schedule.
+
+One thing a bot pull request cannot do for you: the service table at the top of
+this README abbreviates versions (`8.10`, `12.2`), so no regex can maintain it.
+Every bump PR carries a note reminding you to update its row before merging.
 
 ## Running under Podman
 
