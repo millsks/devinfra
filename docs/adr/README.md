@@ -18,6 +18,7 @@ a superseding ADR, never by editing a decided one.
 | [0007](0007-catalog-admission-policy.md) | Catalog admission policy | Accepted |
 | [0008](0008-object-storage-replacement.md) | Object storage replacement | Accepted |
 | [0009](0009-podman-is-verified-through-the-docker-compatible-socket.md) | Podman is verified through the Docker-compatible socket | Accepted |
+| [0010](0010-image-updates-are-proposed-by-regex-over-the-dotenv-template.md) | Image updates are proposed by regex over the dotenv template | Accepted |
 
 ## Related
 
