@@ -660,7 +660,7 @@ services:
         <div class="ad-group">
           <h3>Data that cannot be recovered <span class="n">2 decisions</span></h3>
           <div class="ads">
-            <div class="ad data"><span class="id">AD-5</span><span class="t">Volume names are frozen</span><p class="p">A renamed volume is a <em>new</em> volume — the old one orphans and the service starts empty, silently. Module stanzas carry the identifier and nothing else. <code>object-storage</code> keeps <code>minio-data</code>.</p></div>
+            <div class="ad data"><span class="id">AD-5</span><span class="t">Volume names are frozen</span><p class="p">A renamed volume is a <em>new</em> volume — the old one orphans and the service starts empty, silently. A module&rsquo;s <code>volumes:</code> stanza carries the identifier and nothing else, and a module never declares the shared network at all &mdash; Compose v2 rejects an included file that names a keyed root resource. <code>object-storage</code> keeps <code>minio-data</code>.</p></div>
             <div class="ad data"><span class="id">AD-12</span><span class="t">Stop → write → restart</span><p class="p">Any write to another module's state stops its dependents first. Covers realm import <em>and</em> Postgres restore, which rewrites the Keycloak database.</p></div>
           </div>
         </div>
