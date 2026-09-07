@@ -1,0 +1,11 @@
+{
+  "actions": [
+    "Repair this workstation's container-runtime registry transport, then apply the three remaining bumps. `docker pull` hangs indefinitely with no output \u2014 including on `hello-world:latest` \u2014 while `registry-1.docker.io` and `auth.docker.io` answer `curl` from the same host in under 250 ms. This is a daemon fault outside the repository and outside an agent's reach; no image that is not already in the local cache can be fetched until it is fixed.",
+    "Once pulls work, apply bump 9 (`REDISINSIGHT_VERSION` `2.70` -> `3.8.0`), then bump 10 (`LOKI_VERSION` `3.5.7` -> `3.7.7`), then bump 11 (`TEMPO_VERSION` `2.9.0` -> `3.0.3` **and** `GRAFANA_VERSION` `12.2.0` -> `13.2.1` in one commit). Each edits `.env.example`, the matching `compose.yaml` fallback and the README service table's Version column together, and is committed only after `pixi run ci` plus a green strict smoke run against a stack actually running that image. Delete the pin's entry from the `# Image currency` block in `.env.example` as it lands.",
+    "Do not apply these bumps statically without the smoke run. All four tags were confirmed present for `linux/amd64` and `linux/arm64` by direct registry API call on 2026-09-07, so they will resolve \u2014 but a bump that is green only in the linter and never exercised is exactly the silent-skip class of defect this epic exists to remove. Tempo 3.0 and Grafana 13 in particular both touch the span-metrics path, and the OTLP round-trip through the collector into Tempo, Loki and Prometheus is their gate."
+  ],
+  "parked_at": "2026-09-07",
+  "run_id": "20260906-235846-1f93",
+  "spec_file": "_bmad-output/implementation-artifacts/spec-1-5-every-image-brought-current.md",
+  "story_key": "1-5-every-image-brought-current"
+}

@@ -166,6 +166,10 @@ cmd = "./scripts/lint-compose.sh"
 description = "Assert the rendered config binds locally, collides on no host port and pins every image"
 cmd = "python scripts/assert_config.py"
 
+[tasks.lint-pins]
+description = "Assert every image pin agrees between .env.example and the compose.yaml fallback"
+cmd = "python scripts/assert_pins.py"
+
 [tasks.lint-shell]
 description = "shellcheck every shell script in the repository, at any depth"
 cmd = "shellcheck scripts/**/*.sh docker/postgres/initdb/*.sh"
@@ -188,7 +192,7 @@ cmd = "python scripts/lint_selftest.py"
 
 [tasks.lint]
 description = "Run every validation check"
-depends-on = ["lint-compose", "lint-config", "lint-shell", "lint-yaml", "lint-json", "lint-python"]
+depends-on = ["lint-compose", "lint-config", "lint-pins", "lint-shell", "lint-yaml", "lint-json", "lint-python"]
 
 [tasks.ci]
 description = "The done-gate: every check this repository needs"

@@ -8,16 +8,16 @@ preserves your data — only an explicit `pixi run destroy` throws it away.
 
 | Service | Version | Purpose | Endpoint |
 |---|---|---|---|
-| **PostgreSQL** | 17 (+pgvector) | Primary datastore, Celery result backend, Keycloak persistence | `localhost:5432` |
-| **Redis** | 8 | Cache, Celery broker, Celery result backend | `localhost:6379` |
-| **Keycloak** | 26.4 | OpenID Connect provider | http://localhost:8080 |
+| **PostgreSQL** | 17 (+pgvector 0.8.6) | Primary datastore, Celery result backend, Keycloak persistence | `localhost:5432` |
+| **Redis** | 8.10 | Cache, Celery broker, Celery result backend | `localhost:6379` |
+| **Keycloak** | 26.7 | OpenID Connect provider | http://localhost:8080 |
 | **Silo** | 2026-09-03 | S3-compatible object storage (maintained MinIO fork) | http://localhost:9101 (API `:9100`) |
-| **Mailpit** | 1.28 | Catches all outbound SMTP | http://localhost:8025 (SMTP `:1025`) |
-| **pgAdmin** | 9.9 | PostgreSQL web console | http://localhost:5050 |
+| **Mailpit** | 1.31 | Catches all outbound SMTP | http://localhost:8025 (SMTP `:1025`) |
+| **pgAdmin** | 9.17 | PostgreSQL web console | http://localhost:5050 |
 | **RedisInsight** | 2.70 | Redis web console | http://localhost:5540 |
-| **Flower** | 2.0 | Celery task monitoring | http://localhost:5555 |
-| **OTel Collector** | 0.140 | Single OTLP ingest point | `localhost:4317` (gRPC) / `:4318` (HTTP) |
-| **Prometheus** | 3.7 | Metrics | http://localhost:9090 |
+| **Flower** | 2.1 | Celery task monitoring | http://localhost:5555 |
+| **OTel Collector** | 0.160 | Single OTLP ingest point | `localhost:4317` (gRPC) / `:4318` (HTTP) |
+| **Prometheus** | 3.14 | Metrics | http://localhost:9090 |
 | **Loki** | 3.5 | Logs | http://localhost:3100 |
 | **Tempo** | 2.9 | Traces | http://localhost:3200 |
 | **Grafana** | 12.2 | Dashboards over all three signals | http://localhost:3000 |
@@ -247,9 +247,10 @@ docker/
 | `pixi run keycloak-export` | Write the live realm back over the JSON | `make keycloak-export` |
 | `pixi run token dev dev` | Mint an access token | `make token U=dev P=dev` |
 | `pixi run config` | Render the resolved compose configuration | `make config` |
-| `pixi run lint` | Validate compose, rendered config, shell, YAML, JSON, Python | `make lint` |
+| `pixi run lint` | Validate compose, rendered config, pins, shell, YAML, JSON, Python | `make lint` |
 | `pixi run lint-compose` | `config -q` for every combination of declared profiles | — |
 | `pixi run lint-config` | Assert the *rendered* config's ports and image tags | — |
+| `pixi run lint-pins` | Assert every pin agrees between `.env.example` and `compose.yaml` | — |
 | `pixi run test` | Prove the checks and scripts hold their contracts | — |
 | `pixi run ci` | The done-gate: lint + test | — |
 | `pixi run ci-stack` | Start the stack, wait for health, run the strict smoke suite | — |

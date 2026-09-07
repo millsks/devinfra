@@ -43,6 +43,7 @@ from typing import Any
 import yaml
 
 LINTER = Path(__file__).with_name("lint_json.py")
+PINNER = Path(__file__).with_name("assert_pins.py")
 REPO = Path(__file__).resolve().parent.parent
 
 #: Constructs that turn a missing tool into a pass. None may appear in a task body.
@@ -1451,6 +1452,139 @@ def main() -> int:
 
         r = pixi("lint-config", env=fresh(document=rendered({})))
         expect("lint-config refuses an empty service set", r.returncode != 0, "a pass over zero services")
+
+        # --- assert_pins: the two places every tag lives must agree. ---
+        # Driven over throwaway fixtures rather than the tracked pair, because the
+        # defect being proved is a tracked file edited alone — planting that inside
+        # the repository is the very state the check exists to reject.
+        pins_dir = stubs / "pins"
+        pins_dir.mkdir(exist_ok=True)
+
+        def pins(compose_body: str, dotenv_body: str) -> subprocess.CompletedProcess[str]:
+            compose_fixture = pins_dir / "compose.yaml"
+            dotenv_fixture = pins_dir / ".env.example"
+            compose_fixture.write_text(compose_body, encoding="utf-8", newline="\n")
+            dotenv_fixture.write_text(dotenv_body, encoding="utf-8", newline="\n")
+            return tool([sys.executable, str(PINNER), str(compose_fixture), str(dotenv_fixture)])
+
+        # The real shape, including a variable referenced twice: the object-storage
+        # image and its init helper share SILO_VERSION, so a check that compared only
+        # the first occurrence would miss a second one left behind.
+        clean_compose = (
+            "services:\n"
+            "  redis:\n"
+            "    image: redis:${REDIS_VERSION:-8-alpine}\n"
+            "  minio:\n"
+            "    image: pgsty/silo:${SILO_VERSION:-RELEASE.2026-09-03T13-18-01Z}\n"
+            "  minio-init:\n"
+            "    image: pgsty/silo:${SILO_VERSION:-RELEASE.2026-09-03T13-18-01Z}\n"
+        )
+        clean_env = "REDIS_VERSION=8-alpine\nSILO_VERSION=RELEASE.2026-09-03T13-18-01Z\n"
+
+        r = pins(clean_compose, clean_env)
+        expect("lint-pins accepts a pair that agrees", r.returncode == 0, f"output: {(r.stdout + r.stderr)!r}")
+        # The exact phrase, not a bare "3": a substring check passes for 13, 23 or 30,
+        # so it would survive the very miscount it is supposed to catch.
+        expect(
+            "lint-pins reports how many pins it compared",
+            "OK 3 pin references agree" in r.stdout,
+            f"stdout: {r.stdout!r}",
+        )
+
+        drifted = clean_compose.replace("${REDIS_VERSION:-8-alpine}", "${REDIS_VERSION:-8.9.0-alpine}")
+        r = pins(drifted, clean_env)
+        expect("lint-pins rejects a drifted tag", r.returncode != 0, "exited 0")
+        expect(
+            "lint-pins names the variable and both values",
+            "REDIS_VERSION" in r.stderr and "8-alpine" in r.stderr and "8.9.0-alpine" in r.stderr,
+            f"stderr: {r.stderr!r}",
+        )
+
+        # The second occurrence of a twice-referenced pin must be compared too.
+        half_moved = clean_compose.replace(
+            "  minio-init:\n    image: pgsty/silo:${SILO_VERSION:-RELEASE.2026-09-03T13-18-01Z}\n",
+            "  minio-init:\n    image: pgsty/silo:${SILO_VERSION:-RELEASE.2026-08-01T00-00-00Z}\n",
+        )
+        r = pins(half_moved, clean_env)
+        expect("lint-pins compares every occurrence, not just the first", r.returncode != 0, "exited 0")
+        expect("lint-pins names the stale occurrence", "SILO_VERSION" in r.stderr, f"stderr: {r.stderr!r}")
+
+        no_fallback = clean_compose.replace("${REDIS_VERSION:-8-alpine}", "${REDIS_VERSION}")
+        r = pins(no_fallback, clean_env)
+        expect("lint-pins rejects a reference with no fallback", r.returncode != 0, "exited 0")
+        expect("lint-pins names the unguarded variable", "REDIS_VERSION" in r.stderr, f"stderr: {r.stderr!r}")
+
+        r = pins(clean_compose, "SILO_VERSION=RELEASE.2026-09-03T13-18-01Z\n")
+        expect("lint-pins rejects a variable no dotenv declares", r.returncode != 0, "exited 0")
+        expect("lint-pins names the undeclared variable", "REDIS_VERSION" in r.stderr, f"stderr: {r.stderr!r}")
+
+        # Two sides that agree on nothing at all still render `image: redis:`, which
+        # is the untagged image the fallback rule exists to prevent — so equality is
+        # not on its own a pass.
+        empty_tag = clean_compose.replace("${REDIS_VERSION:-8-alpine}", "${REDIS_VERSION:-}")
+        r = pins(empty_tag, "REDIS_VERSION=\nSILO_VERSION=RELEASE.2026-09-03T13-18-01Z\n")
+        expect("lint-pins rejects an empty tag both sides agree on", r.returncode != 0, "exited 0")
+        expect("lint-pins names the emptily-pinned variable", "REDIS_VERSION" in r.stderr, f"stderr: {r.stderr!r}")
+
+        # The compose-to-dotenv direction alone is blind to a variable nothing reads,
+        # which is what a misspelled name and a literal tag written over the
+        # interpolation both leave behind.
+        r = pins(clean_compose, clean_env + "LOKI_VERSION=3.5.7\n")
+        expect("lint-pins rejects a declared pin compose never references", r.returncode != 0, "exited 0")
+        expect("lint-pins names the unreferenced variable", "LOKI_VERSION" in r.stderr, f"stderr: {r.stderr!r}")
+
+        r = pins("services:\n  redis:\n    image: redis:8-alpine\n", clean_env)
+        expect("lint-pins refuses an empty match set", r.returncode != 0, "a pass over zero pins")
+
+        # A commented-out reference is not in the model Compose renders, so it must
+        # not count towards the non-zero-match guard: a file whose every real image
+        # had lost its interpolation would otherwise still report pins compared.
+        commented_out = (
+            "services:\n  redis:\n    image: redis:8-alpine\n    # image: redis:${REDIS_VERSION:-8-alpine}\n"
+        )
+        r = pins(commented_out, "REDIS_VERSION=8-alpine\n")
+        expect("lint-pins does not count a commented-out reference", r.returncode != 0, "a pass over commented text")
+        expect("lint-pins says it checked no pins", "checked no pins" in r.stderr, f"stderr: {r.stderr!r}")
+
+        # A commented-out declaration is invisible to `source`, so it must be
+        # invisible here: reading it would let a disabled pin satisfy the check.
+        r = pins(clean_compose, "# REDIS_VERSION=8-alpine\nSILO_VERSION=RELEASE.2026-09-03T13-18-01Z\n")
+        expect("lint-pins ignores a commented-out declaration", r.returncode != 0, "exited 0")
+
+        # …and `export ` plus a trailing comment must be stripped, for the same
+        # reason: both are invisible to the shell, so keeping either would fail a
+        # pin whose declaration the runtime reads as correct.
+        r = pins(clean_compose, "export REDIS_VERSION=8-alpine   # pinned\nSILO_VERSION=RELEASE.2026-09-03T13-18-01Z\n")
+        expect("lint-pins reads a declaration the way sourcing it would", r.returncode == 0, f"stderr: {r.stderr!r}")
+
+        # Quoted *and* commented at once: unquoting has to happen before the comment
+        # is stripped, or the closing quote lands inside the retained value and the
+        # tag reads as `8-alpine"` — false drift on a declaration the shell reads fine.
+        r = pins(clean_compose, 'REDIS_VERSION="8-alpine"  # pinned\nSILO_VERSION=RELEASE.2026-09-03T13-18-01Z\n')
+        expect(
+            "lint-pins unquotes a value that is both quoted and commented", r.returncode == 0, f"stderr: {r.stderr!r}"
+        )
+
+        # The task itself, over the tracked pair — the tool passing on fixtures says
+        # nothing about whether what CI runs is wired to the real files.
+        r = pixi("lint-pins")
+        expect("lint-pins passes on the tracked pair", r.returncode == 0, f"output: {(r.stdout + r.stderr)!r}")
+
+        # …and passing says nothing about *coverage*. Every fixture case above would
+        # still pass if the PIN regex narrowed to match fewer images, and a service
+        # added with a hardcoded tag leaves the check reporting OK over the pins it
+        # does see. Tying the reported count to the number of `image:` keys is what
+        # makes either regression go red.
+        image_keys = sum(
+            1
+            for line in (REPO / "compose.yaml").read_text(encoding="utf-8").splitlines()
+            if line.lstrip().startswith("image:")
+        )
+        expect(
+            "lint-pins compares one pin for every image in the tracked compose file",
+            f"OK {image_keys} pin references agree" in r.stdout,
+            f"{image_keys} 'image:' keys, stdout: {r.stdout!r}",
+        )
 
         # --- smoke-test: FR-5 by default, FR-16 under SMOKE_STRICT. ---
         # The stub answers `ps` with nothing, so no service is running. .env is
