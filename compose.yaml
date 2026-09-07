@@ -363,7 +363,7 @@ services:
 
   tempo:
     <<: *defaults
-    image: grafana/tempo:${TEMPO_VERSION:-2.9.0}
+    image: grafana/tempo:${TEMPO_VERSION:-3.0.3}
     container_name: devinfra-tempo
     profiles: [observability]
     ports:
@@ -372,16 +372,14 @@ services:
       - tempo-data:/var/tempo
       - ./docker/tempo/tempo.yaml:/etc/tempo/tempo.yaml:ro
     command: ["-config.file=/etc/tempo/tempo.yaml"]
-    healthcheck:
-      test: ["CMD", "wget", "-q", "-O", "-", "http://127.0.0.1:3200/ready"]
-      interval: 15s
-      timeout: 5s
-      retries: 10
-      start_period: 30s
+    # No healthcheck, for the same reason as loki above: Tempo 3.0 dropped the
+    # busybox layer, so the container holds /usr/bin/tempo and nothing else and
+    # a Docker healthcheck has nothing to run. smoke-test.sh polls /ready from
+    # the host instead, before the OTLP round-trip.
 
   grafana:
     <<: *defaults
-    image: grafana/grafana:${GRAFANA_VERSION:-12.2.0}
+    image: grafana/grafana:${GRAFANA_VERSION:-13.2.1}
     container_name: devinfra-grafana
     profiles: [observability]
     depends_on:

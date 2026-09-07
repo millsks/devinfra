@@ -19,8 +19,8 @@ preserves your data — only an explicit `pixi run destroy` throws it away.
 | **OTel Collector** | 0.160 | Single OTLP ingest point | `localhost:4317` (gRPC) / `:4318` (HTTP) |
 | **Prometheus** | 3.14 | Metrics | http://localhost:9090 |
 | **Loki** | 3.7 | Logs | http://localhost:3100 |
-| **Tempo** | 2.9 | Traces | http://localhost:3200 |
-| **Grafana** | 12.2 | Dashboards over all three signals | http://localhost:3000 |
+| **Tempo** | 3.0 | Traces | http://localhost:3200 |
+| **Grafana** | 13.2 | Dashboards over all three signals | http://localhost:3000 |
 
 All ports bind to `127.0.0.1` by default, so the stack is not exposed to your
 network. Change `BIND_ADDRESS` in `.env` if you need otherwise.
