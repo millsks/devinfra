@@ -2,7 +2,7 @@
 title: 'The stack runs under Podman'
 type: 'feature'
 created: '2026-09-07'
-status: 'awaiting-operator'
+status: done
 baseline_revision: '9ade08718b48706c8615daa25b747841715170d7'
 review_loop_iteration: 0
 followup_review_recommended: true
@@ -192,3 +192,14 @@ Status: awaiting-operator
 - `assert-podman.sh` compares Compose's `{{.Name}}` against Podman's `{{.Names}}` with `grep -qxF`. That the two emit byte-identical names is established by reading Podman 5.8's source, not by execution.
 - `podman-socket.sh` is runner-shaped: it assumes `systemctl`, passwordless `sudo`, and that the runner user is in the `docker` group. Outside those assumptions it fails loudly rather than degrading.
 - The 15-minute bound on the Podman job is copied from the Docker job, not measured; Podman's first-pull and start timings are unknown.
+
+## Operator Confirmation
+
+Confirmed 2026-09-07: the external actions this story owed were carried out.
+
+- Merge this branch to `main` and watch the first hosted run of the new `stack-podman` job to completion. Nothing in this repository has ever executed against Podman: the socket setup, the health gating and the strict smoke suite are proven here only against stubs and against Docker, so that run is the story's actual acceptance evidence.
+- If the `stack-podman` job goes red on a specific service rather than on setup, do not drop the check. Follow the exclusion route in README's `Running under Podman` -> `No service is excluded`: give that service its own profile, leave it out of the `stack-podman` job, update the profile-set assertion and the strict smoke suite in the same commit, and record the reason in that README section.
+- Read the `stack-podman` job's wall-clock duration from that first run. If it was cancelled at its 15-minute bound, split it into a core-profiles job and a full-profiles job running in parallel - never drop a check to fit the bound.
+- Decide whether `stack-podman` joins the `required_status_checks` contexts that story 1-3 owes on repository ruleset `protect-default-branch` (id 22412252). Story 1-3's operator action names only `validate` and `stack`; unless `stack-podman` is added alongside them, the job this story exists to add reports but does not gate merge. Add the context only after the job has reported green at least once, since a required check named before it has ever reported blocks every pull request permanently.
+
+_Appended by the bmad-loop orchestrator (`bmad-loop confirm`, #335): a human confirmed these external actions out of band, and the story was advanced from `awaiting-operator` to `done`._
