@@ -184,6 +184,41 @@ exit "$code"
 """
 
 
+#: A stub standing in for `podman` and for `sudo`: it records and does nothing else.
+#:
+#: Separate from RECORDER because both are in play at once. assert-podman.sh asks the
+#: compose seam what containers exist and then asks Podman what it is running, and the
+#: point of the check is that the two answers can disagree — one stub answering both
+#: from the same variable could never express that.
+#: Only a `tee` invocation reads standard input, and only from the pipe the script
+#: builds. Draining stdin unconditionally would block: every other invocation
+#: inherits this process's stdin, which may be a terminal that never reaches EOF.
+LISTER = r"""#!/bin/sh
+for a in "$@"; do printf '%s\n' "$a"; done >> "$STUB_LIST_RECORD"
+case "${1:-}" in
+  tee) cat >> "${STUB_LIST_STDIN:-/dev/null}" ;;
+esac
+printf '%s' "${STUB_LIST_STDOUT:-}"
+exit "${STUB_LIST_EXIT:-0}"
+"""
+
+
+def write_lister(directory: Path, name: str) -> Path:
+    """Write a stub that records its arguments and prints a fixed answer.
+
+    Args:
+        directory: Directory to write the stub into.
+        name: File name for the stub.
+
+    Returns:
+        Path to the stub, marked executable.
+    """
+    stub = directory / name
+    stub.write_text(LISTER, encoding="utf-8", newline="\n")
+    stub.chmod(0o755)
+    return stub
+
+
 def write_recorder(directory: Path, name: str) -> Path:
     """Write a stub that records what it was asked to do instead of doing it.
 
@@ -519,6 +554,13 @@ def main() -> int:
         cmd = body.get("cmd", "") if isinstance(body, dict) else str(body)
         hits = [token for token in FORBIDDEN if token in cmd]
         expect(f"{name} has no tool-presence branch", not hits, f"cmd contains {hits}")
+        # A task body cannot expand ${DEVINFRA_COMPOSE:-docker compose} — pixi.toml
+        # has no shell expansion — so one that names a runtime directly runs that
+        # runtime whatever the environment selected, and DEVINFRA_COMPOSE becomes a
+        # setting that appears to work and does not. Everything goes through
+        # scripts/compose.sh instead.
+        runtimes = [token for token in ("docker compose", "docker-compose", "podman compose") if token in cmd]
+        expect(f"{name} names no container runtime directly", not runtimes, f"cmd contains {runtimes}")
 
     # The same scan over every shell script. This story moved essentially all the
     # logic out of task bodies and into scripts/, so a `|| true` or a `command -v`
@@ -980,6 +1022,250 @@ def main() -> int:
                 f"observed {profiles}",
             )
 
+        # --- Every lifecycle task reaches the runtime through the DEVINFRA_COMPOSE seam. ---
+        # Five task bodies used to name `docker compose` directly. pixi.toml has no
+        # shell expansion, so those five ignored DEVINFRA_COMPOSE entirely and a
+        # contributor who set it started the stack under Docker regardless — the
+        # setting appeared to work and did not. These cases run the tasks themselves,
+        # so a body repointed back at a runtime fails here rather than at review.
+        seam_tasks = {
+            "start": ["up", "-d"],
+            "down": ["--profile", "admin", "--profile", "observability", "down"],
+            "stop": ["--profile", "admin", "--profile", "observability", "stop"],
+            "pull": ["--profile", "admin", "--profile", "observability", "pull"],
+            "config": ["--profile", "admin", "--profile", "observability", "config"],
+            "dump-logs": [
+                "--profile",
+                "admin",
+                "--profile",
+                "observability",
+                "logs",
+                # Uncoloured because the destination is a CI log, and bounded because
+                # an unbounded dump of fourteen services buries the failure it exists
+                # to explain. `logs.sh` cannot be reused: it hard-codes -f and hangs.
+                "--no-color",
+                "--tail=200",
+            ],
+        }
+        # `start` depends on init, which would otherwise create a .env and leave it.
+        with planted(REPO / ".env", (REPO / ".env.example").read_text(encoding="utf-8")):
+            for task_name, expected_argv in seam_tasks.items():
+                r = pixi(task_name, env=fresh())
+                expect(
+                    f"{task_name} exits 0 through the seam",
+                    r.returncode == 0,
+                    f"exit {r.returncode}: {(r.stdout + r.stderr)!r}",
+                )
+                expect(
+                    f"{task_name} invokes DEVINFRA_COMPOSE, not docker",
+                    recorded(record) == expected_argv,
+                    f"recorded {recorded(record)}",
+                )
+
+        # The seam's default, against the real runtime: only it can say what an
+        # unset DEVINFRA_COMPOSE actually reaches. An exported-but-empty value must
+        # read as unset too, exactly as ${DEVINFRA_COMPOSE:-docker compose} does —
+        # taken as a value it splits to an empty argv and the first real argument
+        # is executed as the command. Docker stays the default; the Podman job
+        # changes where the API lives, not what this falls back to.
+        for value in (None, ""):
+            env = dict(os.environ)
+            if value is None:
+                env.pop("DEVINFRA_COMPOSE", None)
+            else:
+                env["DEVINFRA_COMPOSE"] = value
+            r = run_script("compose.sh", "version", env=env)
+            expect(
+                f"compose.sh defaults to docker compose when DEVINFRA_COMPOSE is {value!r}",
+                r.returncode == 0 and "Docker Compose" in r.stdout,
+                f"exit {r.returncode}: {(r.stdout + r.stderr)!r}",
+            )
+
+        # --- assert-podman: the gate that makes a silent fallback to Docker impossible. ---
+        # A job that sets DOCKER_HOST and reaches a Docker daemon anyway starts the
+        # stack, passes every healthcheck and passes the smoke suite. Nothing else in
+        # this repository would notice. So the check asks Podman's own API what it is
+        # running and compares that against what Compose says this run created.
+        lister = write_lister(stubs, "podman-stub")
+        list_record = stubs / "list-record.txt"
+        list_stdin = stubs / "list-stdin.txt"
+        podman_url = "unix:///run/podman/podman.sock"
+        containers = "devinfra-postgres\ndevinfra-redis\n"
+
+        def fresh_podman(names: str, url: str | None = podman_url, listing: str = containers) -> dict[str, str]:
+            env = fresh(stdout=listing)
+            list_record.unlink(missing_ok=True)
+            env["DEVINFRA_PODMAN"] = str(lister)
+            env["STUB_LIST_RECORD"] = str(list_record)
+            env["STUB_LIST_STDOUT"] = names
+            env.pop("DOCKER_HOST", None)
+            env.pop("DEVINFRA_PODMAN_URL", None)
+            if url is not None:
+                env["DEVINFRA_PODMAN_URL"] = url
+            return env
+
+        r = pixi("assert-podman", env=fresh_podman(containers))
+        expect("assert-podman passes when Podman reports every container", r.returncode == 0, f"stderr: {r.stderr!r}")
+        expect("assert-podman names the endpoint it verified", podman_url in r.stdout, f"stdout: {r.stdout!r}")
+        expect(
+            "assert-podman asks Podman over the socket, in remote mode",
+            recorded(list_record) == ["--url", podman_url, "ps", "--all", "--format", "{{.Names}}"],
+            f"recorded {recorded(list_record)}",
+        )
+
+        # The failure this whole story exists to catch: the containers exist, but
+        # they are not Podman's.
+        r = pixi("assert-podman", env=fresh_podman("devinfra-postgres\n"))
+        expect("assert-podman fails when Podman does not report a container", r.returncode != 0, "exited 0")
+        expect(
+            "assert-podman names the container Podman does not see",
+            "devinfra-redis" in r.stderr,
+            f"stderr: {r.stderr!r}",
+        )
+
+        # The stack ran entirely under Docker: Podman reports none of them.
+        r = pixi("assert-podman", env=fresh_podman(""))
+        expect("assert-podman fails when Podman reports none of the containers", r.returncode != 0, "exited 0")
+        for name in ("devinfra-postgres", "devinfra-redis"):
+            expect(f"assert-podman names {name} as unseen by Podman", name in r.stderr, f"stderr: {r.stderr!r}")
+
+        # An empty expected set is the silent skip this epic removes: with nothing to
+        # look for, every comparison passes and the job reports a stack it never ran.
+        r = pixi("assert-podman", env=fresh_podman(containers, listing=""))
+        expect("assert-podman refuses an empty container set", r.returncode != 0, "an empty set passed")
+        expect(
+            "assert-podman says there was nothing to verify",
+            "nothing to verify" in r.stderr,
+            f"stderr: {r.stderr!r}",
+        )
+
+        env = fresh_podman(containers, url=None)
+        r = pixi("assert-podman", env=env)
+        expect("assert-podman fails when no endpoint is configured", r.returncode != 0, "exited 0")
+        for variable in ("DEVINFRA_PODMAN_URL", "DOCKER_HOST"):
+            expect(f"assert-podman names {variable}", variable in r.stderr, f"stderr: {r.stderr!r}")
+        expect("assert-podman never reached Podman with no endpoint", not recorded(list_record), "the stub ran")
+
+        # DOCKER_HOST alone must work: it is what the CI job sets, and what the
+        # Compose client in that same job talks to.
+        env = fresh_podman(containers, url=None)
+        env["DOCKER_HOST"] = podman_url
+        r = pixi("assert-podman", env=env)
+        expect("assert-podman falls back to DOCKER_HOST", r.returncode == 0, f"output: {(r.stdout + r.stderr)!r}")
+
+        # --- podman-socket: it reconfigures the machine, so it must refuse by default. ---
+        sudo_stub = write_lister(stubs, "sudo-stub")
+        socket_file = stubs / "podman.sock"
+        # Never the real /etc/systemd path. Every case below drives the *consenting*
+        # branch with sudo stubbed; if the drop-in directory were the production one,
+        # a single wrong variable would reconfigure the developer's own machine and
+        # stop their Docker before any assertion had a chance to fail.
+        dropin_dir = stubs / "systemd" / "podman.socket.d"
+        dropin_file = dropin_dir / "devinfra-socket-group.conf"
+        privileged = [
+            # The socket before the service: systemd restarts a stopped
+            # docker.service through a still-listening docker.socket.
+            "systemctl",
+            "stop",
+            "docker.socket",
+            "docker.service",
+            "mkdir",
+            "-p",
+            str(dropin_dir),
+            "tee",
+            str(dropin_file),
+            "systemctl",
+            "daemon-reload",
+            "systemctl",
+            "enable",
+            "podman.socket",
+            # `enable --now` leaves an already-active socket untouched, so on an image
+            # where podman.socket is running the new SocketGroup would not apply until
+            # the next reboot and every Compose call would get permission denied.
+            "systemctl",
+            "restart",
+            "podman.socket",
+        ]
+        # The whole unit body, not just the line that matters today: any other change
+        # to what is written into /etc/systemd should be a deliberate edit here too.
+        dropin_body = "[Socket]\nSocketGroup=docker\nSocketMode=0660\n"
+
+        def fresh_socket(ci: str | None, allow: str | None, socket: Path) -> dict[str, str]:
+            env = fresh()
+            list_record.unlink(missing_ok=True)
+            list_stdin.unlink(missing_ok=True)
+            env["DEVINFRA_SUDO"] = str(sudo_stub)
+            env["STUB_LIST_RECORD"] = str(list_record)
+            env["STUB_LIST_STDIN"] = str(list_stdin)
+            env["STUB_LIST_STDOUT"] = ""
+            env["DEVINFRA_PODMAN_SOCKET"] = str(socket)
+            env["DEVINFRA_PODMAN_DROPIN_DIR"] = str(dropin_dir)
+            env.pop("CI", None)
+            env.pop("DEVINFRA_ALLOW_RUNTIME_SETUP", None)
+            if ci is not None:
+                env["CI"] = ci
+            if allow is not None:
+                env["DEVINFRA_ALLOW_RUNTIME_SETUP"] = allow
+            return env
+
+        socket_file.write_text("", encoding="utf-8")
+        # `CI=false` is what a workstation exports to turn CI-ish behaviour off.
+        # Reading "set" as "yes" would take it as permission to stop that machine's
+        # Docker and write under /etc/systemd — the opposite of what it says.
+        for refusing_ci, label in ((None, "unset"), ("false", "false"), ("", "empty")):
+            r = pixi("ci-podman-socket", env=fresh_socket(refusing_ci, None, socket_file))
+            expect(f"podman-socket refuses with CI {label}", r.returncode != 0, "exited 0")
+            expect(
+                f"podman-socket names the opt-in variable with CI {label}",
+                "DEVINFRA_ALLOW_RUNTIME_SETUP" in r.stderr,
+                f"stderr: {r.stderr!r}",
+            )
+            expect(
+                f"podman-socket refuses before it stops or writes anything with CI {label}",
+                not recorded(list_record),
+                f"recorded {recorded(list_record)}",
+            )
+
+        r = pixi("ci-podman-socket", env=fresh_socket("true", None, socket_file))
+        expect("podman-socket runs under CI", r.returncode == 0, f"output: {(r.stdout + r.stderr)!r}")
+        expect(
+            "podman-socket stops Docker, installs the drop-in and restarts podman.socket",
+            recorded(list_record) == privileged,
+            f"recorded {recorded(list_record)}",
+        )
+        # podman.socket is created root:root 0660; without this the non-root runner
+        # user cannot open it and every later step fails with a connection error.
+        expect(
+            "podman-socket writes exactly the SocketGroup drop-in",
+            (list_stdin.read_text(encoding="utf-8") if list_stdin.exists() else "") == dropin_body,
+            f"wrote {(list_stdin.read_text(encoding='utf-8') if list_stdin.exists() else '')!r}",
+        )
+
+        r = pixi("ci-podman-socket", env=fresh_socket(None, "1", socket_file))
+        expect("podman-socket runs on an explicit opt-in", r.returncode == 0, f"output: {(r.stdout + r.stderr)!r}")
+
+        absent_socket = stubs / "no-such.sock"
+        r = pixi("ci-podman-socket", env=fresh_socket("true", None, absent_socket))
+        expect("podman-socket fails when the socket never appeared", r.returncode != 0, "exited 0")
+        expect("podman-socket names the socket path", str(absent_socket) in r.stderr, f"stderr: {r.stderr!r}")
+
+        # A socket that exists but cannot be opened is the failure the drop-in exists
+        # to prevent, and it is exactly what an ineffective drop-in leaves behind.
+        # Reporting OK there hands the job an unexplained connection error later.
+        unreadable = stubs / "locked.sock"
+        unreadable.write_text("", encoding="utf-8")
+        unreadable.chmod(0o000)
+        try:
+            r = pixi("ci-podman-socket", env=fresh_socket("true", None, unreadable))
+            expect("podman-socket fails when the socket is not usable by this user", r.returncode != 0, "exited 0")
+            expect(
+                "podman-socket says the socket is not writable",
+                "not writable" in r.stderr and str(unreadable) in r.stderr,
+                f"stderr: {r.stderr!r}",
+            )
+        finally:
+            unreadable.chmod(0o644)
+
         # --- lint-compose: one `config -q` per combination of declared profiles. ---
         # The profiles are read back from the model, so a profile added to
         # compose.yaml later is validated without anyone remembering to add it here.
@@ -1377,8 +1663,12 @@ def main() -> int:
     # job to `pixi run ps` would satisfy every assertion above while CI stopped
     # starting the stack at all.
     ci_jobs = workflows.get("ci.yml", {}).get("jobs", {})
-    expected_work = {"validate": "pixi run ci", "stack": "pixi run ci-stack"}
-    expect("ci.yml declares exactly the validate and stack jobs", set(ci_jobs) == set(expected_work), f"{set(ci_jobs)}")
+    expected_work = {
+        "validate": "pixi run ci",
+        "stack": "pixi run ci-stack",
+        "stack-podman": "pixi run ci-stack-podman",
+    }
+    expect("ci.yml declares exactly the three CI jobs", set(ci_jobs) == set(expected_work), f"{set(ci_jobs)}")
     for job_name, expected_command in expected_work.items():
         job = ci_jobs.get(job_name, {})
         work = [
@@ -1388,22 +1678,58 @@ def main() -> int:
         ]
         expect(f"CI job {job_name} runs exactly ['{expected_command}']", work == [expected_command], f"runs {work}")
 
-    # The stack job must start every profile the model declares. Hard-coding is fine
+    # Both stack jobs must start every profile the model declares. Hard-coding is fine
     # only while it agrees with the model: a third profile would otherwise be linted
     # by lint-compose and never started, which is the gap this whole story removes.
+    # Asserted on the Podman job too, so "no service is silently excluded under
+    # Podman" is a gate rather than a sentence in the README.
     declared = tool(["docker", "compose", "config", "--profiles"], cwd=REPO)
     model_profiles = {line.strip() for line in declared.stdout.splitlines() if line.strip()}
     expect("the model declares profiles to compare against", bool(model_profiles), f"stderr: {declared.stderr!r}")
-    job_profiles = str(ci_jobs.get("stack", {}).get("env", {}).get("COMPOSE_PROFILES", ""))
+    for job_name in ("stack", "stack-podman"):
+        job_profiles = str(ci_jobs.get(job_name, {}).get("env", {}).get("COMPOSE_PROFILES", ""))
+        expect(
+            f"the {job_name} job starts exactly the profiles the model declares",
+            {name.strip() for name in job_profiles.split(",") if name.strip()} == model_profiles,
+            f"workflow: {job_profiles!r}; model: {sorted(model_profiles)}",
+        )
+
+    # The Podman job's runtime switch is one environment variable. Without it the job
+    # would start the stack on the runner's Docker daemon and pass every check in it,
+    # so the value is pinned here rather than left to review.
+    podman_job = ci_jobs.get("stack-podman", {})
+    docker_host = str(podman_job.get("env", {}).get("DOCKER_HOST", ""))
     expect(
-        "the stack job starts exactly the profiles the model declares",
-        {name.strip() for name in job_profiles.split(",") if name.strip()} == model_profiles,
-        f"workflow: {job_profiles!r}; model: {sorted(model_profiles)}",
+        "the stack-podman job points the Docker API at Podman's socket",
+        docker_host.startswith("unix://") and "podman" in docker_host,
+        f"DOCKER_HOST: {docker_host!r}",
+    )
+    # The workflow says where the API is; podman-socket.sh verifies the socket it
+    # created. Two independent literals for one path: change either alone and the
+    # gate stays green while the hosted job fails on a connection error that names
+    # neither file.
+    socket_default = re.search(
+        r"DEVINFRA_PODMAN_SOCKET:-([^}]+)}",
+        (REPO / "scripts" / "podman-socket.sh").read_text(encoding="utf-8"),
+    )
+    expect("podman-socket.sh declares a default socket path", socket_default is not None, "no default found")
+    if socket_default is not None:
+        expect(
+            "the stack-podman job's DOCKER_HOST is the socket podman-socket.sh verifies",
+            docker_host == f"unix://{socket_default.group(1)}",
+            f"workflow: {docker_host!r}; script default: {socket_default.group(1)!r}",
+        )
+    # ubuntu-latest moves to a new release with a different Podman and a different
+    # Compose major, silently changing what this job proves.
+    expect(
+        "the stack-podman job pins its runner image",
+        str(podman_job.get("runs-on", "")).startswith("ubuntu-") and podman_job.get("runs-on") != "ubuntu-latest",
+        f"runs-on: {podman_job.get('runs-on')!r}",
     )
 
     # Every task CI invokes must exist, or the workflow fails on the runner for a
     # reason no local check would have surfaced.
-    for task_name in ("ci", "ci-stack", "ps"):
+    for task_name in ("ci", "ci-stack", "ci-stack-podman", "ps", "dump-logs"):
         expect(f"pixi declares the {task_name} task CI invokes", task_name in tasks, "no such task")
 
     # --- The gate must actually reach every check. ---
@@ -1422,6 +1748,22 @@ def main() -> int:
         "`pixi run ci-stack` starts the stack, waits and runs the strict suite",
         {"start", "wait", "smoke-strict"} <= set(chain("ci-stack")),
         f"ci-stack depends on {chain('ci-stack')}",
+    )
+    # The same tasks, in the same order, plus the socket setup that puts the Docker
+    # API at Podman and the gate that proves the containers ended up there. Order is
+    # part of the contract: asserting the socket first and the proof last is what
+    # stops the chain degenerating into a Docker run with a Podman-shaped name.
+    podman_chain = chain("ci-stack-podman")
+    expect(
+        "`pixi run ci-stack-podman` runs the same stack tasks the Docker job runs",
+        [name for name in podman_chain if name in {"init", "start", "wait", "smoke-strict"}]
+        == [name for name in chain("ci-stack") if name in {"init", "start", "wait", "smoke-strict"}],
+        f"ci-stack-podman depends on {podman_chain}",
+    )
+    expect(
+        "`pixi run ci-stack-podman` configures the socket first and proves Podman last",
+        podman_chain[:1] == ["ci-podman-socket"] and podman_chain[-1:] == ["assert-podman"],
+        f"ci-stack-podman depends on {podman_chain}",
     )
 
     # --- The Makefile is a shim and nothing more. ---
