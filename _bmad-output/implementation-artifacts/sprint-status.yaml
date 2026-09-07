@@ -29,7 +29,7 @@
 # - Dev moves story to 'review', then runs code-review (fresh context, different LLM recommended)
 # - Retrospective appends its action items to action_items; the status view surfaces open ones
 generated: 09-06-2026 22:20
-last_updated: 09-06-2026 22:29
+last_updated: 2026-09-07
 project: devinfra
 project_key: NOKEY
 tracking_system: file-system
@@ -38,7 +38,7 @@ development_status:
   epic-1: in-progress
   1-1-validation-tooling-that-cannot-silently-skip: done
   1-2-lifecycle-logic-extracted-into-testable-scripts: done
-  1-3-ci-proves-the-stack-works-on-every-change: awaiting-operator
+  1-3-ci-proves-the-stack-works-on-every-change: done
   1-4-the-stack-runs-under-podman: awaiting-operator
   1-5-every-image-brought-current: awaiting-operator
   1-6-image-updates-arrive-as-validated-pull-requests: backlog

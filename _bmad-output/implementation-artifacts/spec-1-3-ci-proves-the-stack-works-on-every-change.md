@@ -2,7 +2,7 @@
 title: 'CI proves the stack works on every change'
 type: 'feature'
 created: '2026-09-07'
-status: 'awaiting-operator'
+status: done
 baseline_revision: '4adad78c695c11112accc2fabb9a365685734721'
 review_loop_iteration: 0
 followup_review_recommended: true
@@ -260,3 +260,13 @@ Four layers reported 39 findings. Verdicts: 0 high, 17 medium, 15 low, 4 false, 
 - **The merge gate is not attached.** Ruleset `protect-default-branch` carries no `required_status_checks` rule, verified live. Until an operator adds one, CI reports but does not gate, and story 1.3's "the result gates merge" is unsatisfied. Deliberately not done from this unattended run: it mutates live repository settings, it would immediately apply to every other in-flight branch, and a check context named before it has ever reported blocks all pull requests permanently.
 - **The 15-minute bound is enforced, not measured.** `timeout-minutes` turns a breach red rather than letting it run long; whether the real duration is 4 minutes or 14 is unknown until the first hosted run.
 - Three deferred items are recorded in the frontmatter, all `low`.
+
+## Operator Confirmation
+
+Confirmed 2026-09-07: the external actions this story owed were carried out.
+
+- Merge this branch to `main`, then watch the first hosted CI run to completion: both the `validate` and the `stack` job must go green before the merge gate below is attached, because a required check named before it has ever reported blocks every pull request permanently.
+- Read the `stack` job's wall-clock duration from that first run. If the job was cancelled at its 15-minute bound, split it into a core-profiles job and a full-profiles job running in parallel — never drop a check to fit the bound.
+- Add a `required_status_checks` rule naming the contexts `validate` and `stack` to repository ruleset `protect-default-branch` (id 22412252) at https://github.com/millsks/devinfra/rules/22412252, or by PUT to `repos/millsks/devinfra/rulesets/22412252`. The ruleset carries `deletion`, `non_fast_forward`, `creation`, `update` and `pull_request` rules today and no status-check rule at all, so until this is added a red CI run does not block merge and story 1.3's "the result gates merge" is unsatisfied.
+
+_Appended by the bmad-loop orchestrator (`bmad-loop confirm`, #335): a human confirmed these external actions out of band, and the story was advanced from `awaiting-operator` to `done`._
