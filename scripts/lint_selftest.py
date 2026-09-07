@@ -31,12 +31,16 @@ import gzip
 import json
 import os
 import re
+import shutil
 import subprocess
 import sys
 import tempfile
 import tomllib
 from collections.abc import Iterator
 from pathlib import Path
+from typing import Any
+
+import yaml
 
 LINTER = Path(__file__).with_name("lint_json.py")
 REPO = Path(__file__).resolve().parent.parent
@@ -140,16 +144,58 @@ def run_script(
     )
 
 
+#: The recording stub, standing in for `docker compose` and for `curl`.
+#:
+#: The subcommand is found by walking the arguments rather than reading $1, because
+#: the compose invocations under test are prefixed with global flags — `--profile
+#: admin config -q` is a `config` call, and answering it with the `ps` reply would
+#: make the profile enumeration untestable.
+RECORDER = r"""#!/bin/sh
+for a in "$@"; do printf '%s\n' "$a"; done >> "$STUB_RECORD"
+printf 'COMPOSE_PROFILES=%s\n' "${COMPOSE_PROFILES-<unset>}" >> "$STUB_ENV_RECORD"
+sub=""
+skip=0
+for a in "$@"; do
+  if [ "$skip" = 1 ]; then skip=0; continue; fi
+  case "$a" in
+    --profile|-f|--file|-p|--project-name) skip=1 ;;
+    -*) ;;
+    *) sub="$a"; break ;;
+  esac
+done
+code="${STUB_EXIT:-0}"
+case "$sub" in
+  config)
+    case " $* " in
+      *" --profiles "*)
+        printf '%s' "${STUB_PROFILES:-}"
+        code="${STUB_PROFILES_EXIT:-${STUB_EXIT:-0}}" ;;
+      *" --format "*) printf '%s' "${STUB_JSON:-}" ;;
+      *) printf '%s' "${STUB_SERVICES:-}" ;;
+    esac ;;
+  ps)
+    case " $* " in
+      *" --all "*) printf '%s' "${STUB_ALL:-}" ;;
+      *) printf '%s' "${STUB_STDOUT:-}" ;;
+    esac ;;
+  *) printf '%s' "${STUB_STDOUT:-}" ;;
+esac
+exit "$code"
+"""
+
+
 def write_recorder(directory: Path, name: str) -> Path:
     """Write a stub that records what it was asked to do instead of doing it.
 
     It stands in for `docker compose` and for `curl`, so a script's contract can be
     asserted on the command it would have run. Every invocation appends one argument
     per line to STUB_RECORD and one environment observation to STUB_ENV_RECORD.
-    `config` answers with STUB_SERVICES, `ps --all` with STUB_ALL and everything else
-    with STUB_STDOUT, because the health wait asks for the expected service set, the
-    running containers and the exited ones in the same run and must be able to see all
-    three disagree.
+    `config --profiles` answers with STUB_PROFILES, `config --format` with STUB_JSON,
+    any other `config` with STUB_SERVICES, `ps --all` with STUB_ALL and everything
+    else with STUB_STDOUT — the health wait asks for the expected service set, the
+    running containers and the exited ones in the same run and must be able to see
+    all three disagree, and the compose lint asks for the profiles and then for each
+    combination's resolved model.
 
     Args:
         directory: Directory to write the stub into.
@@ -159,22 +205,7 @@ def write_recorder(directory: Path, name: str) -> Path:
         Path to the stub, marked executable.
     """
     stub = directory / name
-    stub.write_text(
-        "#!/bin/sh\n"
-        'for a in "$@"; do printf \'%s\\n\' "$a"; done >> "$STUB_RECORD"\n'
-        'printf \'COMPOSE_PROFILES=%s\\n\' "${COMPOSE_PROFILES-<unset>}" >> "$STUB_ENV_RECORD"\n'
-        'case "$1" in\n'
-        "  config) printf '%s' \"${STUB_SERVICES:-}\" ;;\n"
-        '  ps) case "${2:-}" in\n'
-        "        --all) printf '%s' \"${STUB_ALL:-}\" ;;\n"
-        "        *) printf '%s' \"${STUB_STDOUT:-}\" ;;\n"
-        "      esac ;;\n"
-        "  *) printf '%s' \"${STUB_STDOUT:-}\" ;;\n"
-        "esac\n"
-        'exit "${STUB_EXIT:-0}"\n',
-        encoding="utf-8",
-        newline="\n",
-    )
+    stub.write_text(RECORDER, encoding="utf-8", newline="\n")
     stub.chmod(0o755)
     return stub
 
@@ -185,6 +216,8 @@ def stub_env(
     stdout: str = "",
     services: str = "",
     exit_code: str = "0",
+    profiles: str = "",
+    document: str = "",
 ) -> dict[str, str]:
     """Build an environment whose container runtime and HTTP client are stubs.
 
@@ -194,6 +227,8 @@ def stub_env(
         stdout: Text the stub prints for `ps` and any subcommand but `config`.
         services: Text the stub prints for `config`, the expected service set.
         exit_code: Status the stub exits with, for driving a failure path.
+        profiles: Text the stub prints for `config --profiles`.
+        document: Text the stub prints for `config --format json`.
 
     Returns:
         A copy of this process's environment with the stub wiring added.
@@ -209,6 +244,12 @@ def stub_env(
     env["STUB_ALL"] = stdout
     env["STUB_SERVICES"] = services
     env["STUB_EXIT"] = exit_code
+    env["STUB_PROFILES"] = profiles
+    env["STUB_JSON"] = document
+    # The enumeration succeeds by default even when the per-combination calls are
+    # told to fail: a case that wants every combination to fail must still be able
+    # to read the combinations.
+    env["STUB_PROFILES_EXIT"] = "0"
     return env
 
 
@@ -358,17 +399,22 @@ def run(*args: str) -> subprocess.CompletedProcess[str]:
     )
 
 
-def tool(args: list[str], cwd: Path | None = None) -> subprocess.CompletedProcess[str]:
-    """Invoke a pinned lint tool.
+def tool(
+    args: list[str],
+    cwd: Path | None = None,
+    env: dict[str, str] | None = None,
+) -> subprocess.CompletedProcess[str]:
+    """Invoke a pinned lint tool, or the real container runtime.
 
     Args:
         args: Full command line.
         cwd: Working directory, defaulting to the process's own.
+        env: Environment to run under, defaulting to this process's own.
 
     Returns:
         The completed process, with stdout and stderr captured as text.
     """
-    return subprocess.run(args, capture_output=True, text=True, check=False, cwd=cwd)
+    return subprocess.run(args, capture_output=True, text=True, check=False, cwd=cwd, env=env)
 
 
 def main() -> int:
@@ -562,10 +608,16 @@ def main() -> int:
         record = stubs / "record.txt"
         compose_stub = write_recorder(stubs, "compose-stub")
 
-        def fresh(stdout: str = "", services: str = "", exit_code: str = "0") -> dict[str, str]:
+        def fresh(
+            stdout: str = "",
+            services: str = "",
+            exit_code: str = "0",
+            profiles: str = "",
+            document: str = "",
+        ) -> dict[str, str]:
             record.unlink(missing_ok=True)
             record.with_name(record.name + ".env").unlink(missing_ok=True)
-            return stub_env(compose_stub, record, stdout, services, exit_code)
+            return stub_env(compose_stub, record, stdout, services, exit_code, profiles, document)
 
         core = "postgres\nredis\n"
         healthy = "postgres|devinfra-postgres|running|healthy|0\nredis|devinfra-redis|running|healthy|0\n"
@@ -928,6 +980,313 @@ def main() -> int:
                 f"observed {profiles}",
             )
 
+        # --- lint-compose: one `config -q` per combination of declared profiles. ---
+        # The profiles are read back from the model, so a profile added to
+        # compose.yaml later is validated without anyone remembering to add it here.
+        two = "admin\nobservability\n"
+        every_combination = [
+            "config",
+            "--profiles",
+            "config",
+            "-q",
+            "--profile",
+            "admin",
+            "config",
+            "-q",
+            "--profile",
+            "observability",
+            "config",
+            "-q",
+            "--profile",
+            "admin",
+            "--profile",
+            "observability",
+            "config",
+            "-q",
+        ]
+        r = pixi("lint-compose", env=fresh(profiles=two))
+        expect("lint-compose exits 0 when every combination validates", r.returncode == 0, f"exit {r.returncode}")
+        expect(
+            "lint-compose validates every combination of the declared profiles",
+            recorded(record) == every_combination,
+            f"recorded {recorded(record)}",
+        )
+        expect(
+            "lint-compose clears COMPOSE_PROFILES so each combination is exactly its flags",
+            set(recorded_env(record)) == {"COMPOSE_PROFILES="},
+            f"observed {recorded_env(record)}",
+        )
+
+        r = pixi("lint-compose", env=fresh(profiles=""))
+        expect(
+            "lint-compose still validates one combination when no profile is declared",
+            recorded(record) == ["config", "--profiles", "config", "-q"],
+            f"recorded {recorded(record)}",
+        )
+
+        # A failure in one combination must not hide the others.
+        r = pixi("lint-compose", env=fresh(profiles=two, exit_code="1"))
+        listed = {line.strip() for line in r.stderr.splitlines() if line.startswith("  ")}
+        expect("lint-compose fails when a combination fails", r.returncode != 0, "exited 0")
+        expect(
+            "lint-compose names every failing combination",
+            listed == {"(none)", "admin", "observability", "admin,observability"},
+            f"listed {listed}; stderr: {r.stderr!r}",
+        )
+
+        # An enumeration that could not be read must never be treated as "no
+        # profiles": that would validate one combination and report success.
+        env = fresh(profiles=two)
+        env["STUB_PROFILES_EXIT"] = "1"
+        r = pixi("lint-compose", env=env)
+        expect("lint-compose fails when the profiles cannot be enumerated", r.returncode != 0, "exited 0")
+
+        # --- assert_config: the rules NFR-2, NFR-4 and AD-17 state, read from the
+        # rendered model. Each fixture is what `config --format json` would return.
+        def rendered(services: dict[str, object]) -> str:
+            return json.dumps({"name": "devinfra", "services": services})
+
+        def port(host_ip: str, published: str, target: int) -> dict[str, object]:
+            return {
+                "mode": "ingress",
+                "host_ip": host_ip,
+                "target": target,
+                "published": published,
+                "protocol": "tcp",
+            }
+
+        clean_doc = rendered(
+            {
+                "postgres": {"image": "pgvector/pgvector:0.8.1-pg17", "ports": [port("127.0.0.1", "5432", 5432)]},
+                "redis": {"image": "redis:8-alpine", "ports": [port("127.0.0.1", "6379", 6379)]},
+            }
+        )
+        r = pixi("lint-config", env=fresh(document=clean_doc))
+        expect("lint-config accepts a clean rendered config", r.returncode == 0, f"output: {(r.stdout + r.stderr)!r}")
+
+        env = fresh(profiles=two, document=clean_doc)
+        env["COMPOSE_PROFILES"] = "admin,observability"
+        r = pixi("lint-config", env=env)
+        expect(
+            "lint-config renders every profile combination",
+            recorded(record).count("--format") == 4,
+            f"recorded {recorded(record)}",
+        )
+        expect(
+            "lint-config clears COMPOSE_PROFILES so each combination is exactly its flags",
+            set(recorded_env(record)) == {"COMPOSE_PROFILES="},
+            f"observed {recorded_env(record)}",
+        )
+
+        # An enumeration that could not be read must never be treated as "no
+        # profiles": that would assert against one combination and report success.
+        env = fresh(profiles=two, document=clean_doc)
+        env["STUB_PROFILES_EXIT"] = "1"
+        r = pixi("lint-config", env=env)
+        expect("lint-config fails when the profiles cannot be enumerated", r.returncode != 0, "exited 0")
+
+        # A digest is a stricter pin than a tag, so it is accepted.
+        digest = rendered({"redis": {"image": "redis@sha256:" + "a" * 64, "ports": []}})
+        r = pixi("lint-config", env=fresh(document=digest))
+        expect("lint-config accepts a digest-pinned image", r.returncode == 0, f"output: {(r.stdout + r.stderr)!r}")
+
+        # A wildcard bind address is refused before a single port is looked at:
+        # every port would match it, so the port check alone would pass.
+        env = fresh(document=clean_doc)
+        env["BIND_ADDRESS"] = "0.0.0.0"
+        r = pixi("lint-config", env=env)
+        expect("lint-config refuses a wildcard BIND_ADDRESS", r.returncode != 0, "exited 0")
+        expect("lint-config names the wildcard address", "0.0.0.0" in r.stderr, f"stderr: {r.stderr!r}")
+
+        # .env must be read as the shell reads it. `export` and a trailing comment
+        # are both invisible to `source`. The declared address is deliberately not
+        # the default: taking `export ` literally would silently fall back to
+        # 127.0.0.1, and keeping the comment would compare every rendered host_ip
+        # against "10.1.2.3   # lab" and fail every port.
+        lab = rendered({"postgres": {"image": "redis:8-alpine", "ports": [port("10.1.2.3", "5432", 5432)]}})
+        with planted(REPO / ".env", "export BIND_ADDRESS=10.1.2.3   # lab\n"):
+            env = fresh(document=lab)
+            env.pop("BIND_ADDRESS", None)
+            r = pixi("lint-config", env=env)
+            expect(
+                "lint-config reads .env the way sourcing it would",
+                r.returncode == 0,
+                f"output: {(r.stdout + r.stderr)!r}",
+            )
+
+        # An exported-but-empty DEVINFRA_COMPOSE means "unset", as it does in
+        # common.sh. Read as a value it would split to an empty argv and execute
+        # the first real argument as the command.
+        env = fresh()
+        env["DEVINFRA_COMPOSE"] = ""
+        r = pixi("lint-config", env=env)
+        expect(
+            "lint-config falls back to docker compose when DEVINFRA_COMPOSE is empty",
+            r.returncode == 0 and "Traceback" not in r.stderr,
+            f"output: {(r.stdout + r.stderr)!r}",
+        )
+
+        wildcard = rendered({"postgres": {"image": "redis:8-alpine", "ports": [port("0.0.0.0", "5432", 5432)]}})
+        r = pixi("lint-config", env=fresh(document=wildcard))
+        expect("lint-config rejects a port published on every interface", r.returncode != 0, "exited 0")
+        expect(
+            "lint-config names the service, the port and the address",
+            "postgres" in r.stderr and "5432" in r.stderr and "0.0.0.0" in r.stderr,
+            f"stderr: {r.stderr!r}",
+        )
+
+        empty_host = rendered({"postgres": {"image": "redis:8-alpine", "ports": [port("", "5432", 5432)]}})
+        r = pixi("lint-config", env=fresh(document=empty_host))
+        expect("lint-config rejects a port with no host address", r.returncode != 0, "exited 0")
+
+        collision = rendered(
+            {
+                "postgres": {"image": "redis:8-alpine", "ports": [port("127.0.0.1", "5432", 5432)]},
+                "pgbouncer": {"image": "redis:8-alpine", "ports": [port("127.0.0.1", "5432", 6432)]},
+            }
+        )
+        r = pixi("lint-config", env=fresh(document=collision))
+        expect("lint-config rejects two services on one host port", r.returncode != 0, "exited 0")
+        expect(
+            "lint-config names both services and the port",
+            "postgres" in r.stderr and "pgbouncer" in r.stderr and "5432" in r.stderr,
+            f"stderr: {r.stderr!r}",
+        )
+
+        for image in ("redis", "redis:latest"):
+            floating = rendered({"redis": {"image": image, "ports": []}})
+            r = pixi("lint-config", env=fresh(document=floating))
+            expect(f"lint-config rejects the image '{image}'", r.returncode != 0, "exited 0")
+            expect(
+                f"lint-config names the service and image for '{image}'",
+                "redis" in r.stderr,
+                f"stderr: {r.stderr!r}",
+            )
+
+        r = pixi("lint-config", env=fresh(document=rendered({})))
+        expect("lint-config refuses an empty service set", r.returncode != 0, "a pass over zero services")
+
+        # --- smoke-test: FR-5 by default, FR-16 under SMOKE_STRICT. ---
+        # The stub answers `ps` with nothing, so no service is running. .env is
+        # planted because the suite interpolates ports at shell level.
+        with planted(REPO / ".env", (REPO / ".env.example").read_text(encoding="utf-8")):
+            r = run_script("smoke-test.sh", env=fresh())
+            expect("smoke-test exits 0 when a service is absent", r.returncode == 0, f"exit {r.returncode}")
+            expect("smoke-test reports SKIP by default", "SKIP" in r.stdout, f"stdout: {r.stdout!r}")
+            expect("smoke-test skips the absent keycloak", "keycloak not running" in r.stdout, f"stdout: {r.stdout!r}")
+
+            env = fresh()
+            env["SMOKE_STRICT"] = "1"
+            r = run_script("smoke-test.sh", env=env)
+            expect("smoke-test fails under SMOKE_STRICT when a service is absent", r.returncode != 0, "exited 0")
+            expect("strict smoke-test prints no SKIP line", "SKIP" not in r.stdout, f"stdout: {r.stdout!r}")
+            expect(
+                "strict smoke-test names the absent service as a failure",
+                "keycloak not running" in r.stdout,
+                f"stdout: {r.stdout!r}",
+            )
+
+            # The runtime must go through the compose seam, or the strict CI run
+            # would talk to a real daemon regardless of what it was pointed at.
+            expect(
+                "smoke-test drives the runtime through the compose seam",
+                bool(recorded(record)),
+                "the stub never ran",
+            )
+
+            # Preflight: a missing required tool fails before any check runs. PATH
+            # is replaced with a directory holding only what the script needs to
+            # reach the preflight at all, so `curl` is genuinely absent.
+            minimal = stubs / "minimal-bin"
+            minimal.mkdir()
+            for needed in ("bash", "sh", "dirname"):
+                resolved = shutil.which(needed)
+                if resolved is not None:
+                    os.symlink(resolved, minimal / needed)
+            env = fresh()
+            env["SMOKE_STRICT"] = "1"
+            env["PATH"] = str(minimal)
+            r = run_script("smoke-test.sh", env=env)
+            expect("smoke-test fails when a required tool is missing", r.returncode != 0, "exited 0")
+            for needed in ("curl", "openssl", "base64"):
+                expect(f"smoke-test names {needed} as missing", needed in r.stderr, f"stderr: {r.stderr!r}")
+            expect(
+                "smoke-test preflight runs before any check",
+                "PASS" not in r.stdout and "FAIL" not in r.stdout,
+                f"stdout: {r.stdout!r}",
+            )
+            expect("smoke-test never reached the runtime", not recorded(record), f"recorded {recorded(record)}")
+
+            # An unreachable runtime makes every service look absent. Without this
+            # preflight the default suite exits 0 having checked nothing, and the
+            # strict suite fails a dozen checks without once naming the cause.
+            env = fresh(exit_code="1")
+            r = run_script("smoke-test.sh", env=env)
+            expect("smoke-test fails when the runtime is unreachable", r.returncode != 0, "exited 0 having checked 0")
+            expect(
+                "smoke-test names the unreachable runtime",
+                "not reachable" in r.stderr and str(compose_stub) in r.stderr,
+                f"stderr: {r.stderr!r}",
+            )
+            expect(
+                "smoke-test stops before any check when the runtime is unreachable",
+                "SKIP" not in r.stdout and "PASS" not in r.stdout,
+                f"stdout: {r.stdout!r}",
+            )
+
+            # The strict TASK, not just the script with the variable injected by
+            # hand: deleting `env = { SMOKE_STRICT = "1" }` from pixi.toml would
+            # otherwise leave CI silently running the skip-tolerant suite.
+            r = pixi("smoke-strict", env=fresh())
+            expect("the smoke-strict task fails on an absent service", r.returncode != 0, "exited 0")
+            expect("the smoke-strict task prints no SKIP line", "SKIP" not in r.stdout, f"stdout: {r.stdout!r}")
+
+            # --- Profile precedence, against the real runtime. ---
+            # Everything above proves lint-compose *passes* COMPOSE_PROFILES=""; the
+            # stub has no precedence rules, so only Compose itself can show that the
+            # empty value beats the .env selecting both profiles. Without that, every
+            # combination would resolve to the same superset.
+            real = dict(os.environ)
+            real["COMPOSE_PROFILES"] = ""
+            empty_combination = tool(["docker", "compose", "config", "--services"], cwd=REPO, env=real)
+            full_combination = tool(
+                ["docker", "compose", "--profile", "admin", "--profile", "observability", "config", "--services"],
+                cwd=REPO,
+                env=real,
+            )
+            core_services = {line.strip() for line in empty_combination.stdout.splitlines() if line.strip()}
+            all_services = {line.strip() for line in full_combination.stdout.splitlines() if line.strip()}
+            expect("the real runtime rendered the core selection", bool(core_services), "no services")
+            expect(
+                "an empty COMPOSE_PROFILES beats the .env that selects every profile",
+                core_services < all_services,
+                f"core {sorted(core_services)} vs all {sorted(all_services)}",
+            )
+
+    # --- An enumeration that cannot be read is a failure, never "no profiles". ---
+    # `config --profiles` resolves the whole model, so a real structural defect
+    # surfaces there rather than in the per-combination loop. Treating that as an
+    # empty profile list would check one combination and report success — the exact
+    # silent pass this repository keeps removing.
+    with planted(
+        REPO / "compose.override.yaml",
+        "services:\n  zz-selftest-defect:\n    image: alpine:3\n    depends_on:\n      - zz-absent-service\n",
+    ):
+        r = pixi("lint-compose")
+        output = r.stdout + r.stderr
+        expect("lint-compose fails when the model does not resolve", r.returncode != 0, "exited 0")
+        expect("lint-compose names the undefined service", "zz-absent-service" in output, f"output: {output!r}")
+        expect(
+            "lint-compose says the profiles could not be read",
+            "could not read the declared profiles" in output,
+            f"output: {output!r}",
+        )
+        expect(
+            "lint-compose validated no combination it could not enumerate",
+            "profile combination(s) validated" not in output,
+            f"output: {output!r}",
+        )
+
     # --- Every script the tasks invoke must survive a fresh clone. ---
     # The stock Python .gitignore excludes `lib/`, which silently swallowed
     # scripts/lib/common.sh. A helper that lints locally and is absent from a
@@ -946,6 +1305,123 @@ def main() -> int:
         "no script is excluded by .gitignore",
         not ignored.stdout.strip(),
         f"ignored: {ignored.stdout.split()}",
+    )
+
+    # --- The CI workflow is a gate, not a suggestion. ---
+    # Checked here rather than trusted, because nothing else in this repository can
+    # tell whether the hosted run would have failed: the file is the only artefact.
+    # Every workflow is scanned, not just ci.yml, so one added later cannot arrive
+    # with a `continue-on-error` nothing looks at.
+    workflow_dir = REPO / ".github" / "workflows"
+    workflow_files = sorted(workflow_dir.glob("*.y*ml"))
+    expect("the repository ships at least one CI workflow", bool(workflow_files), f"nothing in {workflow_dir}")
+
+    workflows: dict[str, Any] = {}
+    for path in workflow_files:
+        text = path.read_text(encoding="utf-8")
+        softeners = ("continue-on-error", "|| true", "command -v", "if: always")
+        hits = [token for token in softeners if token in text]
+        expect(f"no step in {path.name} can report success having checked nothing", not hits, f"contains {hits}")
+        installers = ("apt-get", "apt install", "pip install", "brew install", "npm install")
+        hits = [token for token in installers if token in text]
+        expect(f"{path.name} installs no tool of its own", not hits, f"contains {hits}")
+
+        parsed = yaml.safe_load(text)
+        expect(f"{path.name} parses as a workflow", isinstance(parsed, dict), f"parsed as {type(parsed).__name__}")
+        if not isinstance(parsed, dict):
+            continue
+        workflows[path.name] = parsed
+
+        # `on` is a YAML 1.1 boolean, so PyYAML hands it back as True unless the
+        # file quotes the key. Both spellings mean the same trigger block.
+        triggers = parsed.get("on", parsed.get(True))
+        expect(f"{path.name} declares triggers", isinstance(triggers, dict), f"on: {triggers!r}")
+        if isinstance(triggers, dict):
+            for event in ("push", "pull_request"):
+                expect(f"{path.name} runs on {event}", event in triggers, f"triggers: {sorted(triggers)}")
+
+        jobs = parsed.get("jobs")
+        expect(f"{path.name} declares jobs", isinstance(jobs, dict) and bool(jobs), "no jobs found")
+        if not isinstance(jobs, dict):
+            continue
+        for job_name in sorted(jobs):
+            job = jobs[job_name]
+            bound = job.get("timeout-minutes")
+            expect(
+                f"{path.name} job {job_name} is bounded at 15 minutes or less",
+                isinstance(bound, int) and 0 < bound <= 15,
+                f"timeout-minutes: {bound!r}",
+            )
+            for step in job.get("steps") or []:
+                # Parsed, not grepped: `if: ${{ always() }}` and
+                # `if: success() || failure()` both defeat a substring scan, and
+                # both would let a red job report green.
+                guard = step.get("if")
+                expect(
+                    f"{path.name} job {job_name} step guard {guard!r} is a failure-only diagnostic",
+                    guard is None or str(guard).strip() == "failure()",
+                    f"if: {guard!r}",
+                )
+                command = step.get("run")
+                if command is None or (guard is not None and str(guard).strip() == "failure()"):
+                    # A diagnostic that runs only once the job has already failed
+                    # is not the job's work, and cannot turn a red run green.
+                    continue
+                expect(
+                    f"{path.name} job {job_name} runs {command.split(chr(10))[0]!r} as a pixi task",
+                    command.strip().startswith("pixi run "),
+                    f"run: {command!r}",
+                )
+
+    # Which task each job runs, pinned by equality. Without this, rewiring the stack
+    # job to `pixi run ps` would satisfy every assertion above while CI stopped
+    # starting the stack at all.
+    ci_jobs = workflows.get("ci.yml", {}).get("jobs", {})
+    expected_work = {"validate": "pixi run ci", "stack": "pixi run ci-stack"}
+    expect("ci.yml declares exactly the validate and stack jobs", set(ci_jobs) == set(expected_work), f"{set(ci_jobs)}")
+    for job_name, expected_command in expected_work.items():
+        job = ci_jobs.get(job_name, {})
+        work = [
+            str(step.get("run")).strip()
+            for step in job.get("steps") or []
+            if step.get("run") is not None and str(step.get("if", "")).strip() != "failure()"
+        ]
+        expect(f"CI job {job_name} runs exactly ['{expected_command}']", work == [expected_command], f"runs {work}")
+
+    # The stack job must start every profile the model declares. Hard-coding is fine
+    # only while it agrees with the model: a third profile would otherwise be linted
+    # by lint-compose and never started, which is the gap this whole story removes.
+    declared = tool(["docker", "compose", "config", "--profiles"], cwd=REPO)
+    model_profiles = {line.strip() for line in declared.stdout.splitlines() if line.strip()}
+    expect("the model declares profiles to compare against", bool(model_profiles), f"stderr: {declared.stderr!r}")
+    job_profiles = str(ci_jobs.get("stack", {}).get("env", {}).get("COMPOSE_PROFILES", ""))
+    expect(
+        "the stack job starts exactly the profiles the model declares",
+        {name.strip() for name in job_profiles.split(",") if name.strip()} == model_profiles,
+        f"workflow: {job_profiles!r}; model: {sorted(model_profiles)}",
+    )
+
+    # Every task CI invokes must exist, or the workflow fails on the runner for a
+    # reason no local check would have surfaced.
+    for task_name in ("ci", "ci-stack", "ps"):
+        expect(f"pixi declares the {task_name} task CI invokes", task_name in tasks, "no such task")
+
+    # --- The gate must actually reach every check. ---
+    # A task with cases of its own that no chain depends on is a check that runs
+    # only in the self-test: `pixi run ci` would stop running it and stay green.
+    def chain(task_name: str) -> list[str]:
+        body = tasks.get(task_name)
+        depends = body.get("depends-on", []) if isinstance(body, dict) else []
+        return [str(item) for item in depends] if isinstance(depends, list) else []
+
+    lint_tasks = {name for name in tasks if name.startswith("lint-")}
+    orphans = sorted(lint_tasks - set(chain("lint")))
+    expect("every lint-* task is reachable from `pixi run lint`", not orphans, f"orphaned: {orphans}")
+    expect("`pixi run ci` chains lint and test", {"lint", "test"} <= set(chain("ci")), f"ci depends on {chain('ci')}")
+    expect(
+        "`pixi run ci-stack` starts the stack, waits and runs the strict suite",
+        {"start", "wait", "smoke-strict"} <= set(chain("ci-stack")),
+        f"ci-stack depends on {chain('ci-stack')}",
     )
 
     # --- The Makefile is a shim and nothing more. ---

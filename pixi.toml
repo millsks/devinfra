@@ -13,6 +13,8 @@ yamllint = "1.38.*"
 python = "3.14.*"
 ruff = "0.16.*"
 mypy = "2.3.*"
+pyyaml = "6.0.*"
+types-pyyaml = "6.0.*"
 
 [environments]
 default = ["dev"]
@@ -85,6 +87,11 @@ cmd = "./scripts/logs.sh '{{ service }}'"
 description = "Run the end-to-end smoke test against the running stack"
 cmd = "./scripts/smoke-test.sh"
 
+[tasks.smoke-strict]
+description = "Run the smoke test with a skipped service scored as a failure (what CI runs)"
+cmd = "./scripts/smoke-test.sh"
+env = { SMOKE_STRICT = "1" }
+
 [tasks.urls]
 description = "Print every service endpoint"
 cmd = "./scripts/urls.sh"
@@ -143,16 +150,20 @@ cmd = "docker compose --profile admin --profile observability config"
 # Validation
 # ---------------------------------------------------------------------------
 [tasks.lint-compose]
-description = "Validate the compose configuration for the admin + observability profiles"
-cmd = "docker compose --profile admin --profile observability config -q"
+description = "Validate the compose configuration for every combination of the declared profiles"
+cmd = "./scripts/lint-compose.sh"
+
+[tasks.lint-config]
+description = "Assert the rendered config binds locally, collides on no host port and pins every image"
+cmd = "python scripts/assert_config.py"
 
 [tasks.lint-shell]
 description = "shellcheck every shell script in the repository, at any depth"
 cmd = "shellcheck scripts/**/*.sh docker/postgres/initdb/*.sh"
 
 [tasks.lint-yaml]
-description = "yamllint the compose file and every service YAML config"
-cmd = "yamllint --strict -c .yamllint.yaml .yamllint.yaml compose.yaml docker/**/*.y*ml"
+description = "yamllint the compose file, the CI workflow and every service YAML config"
+cmd = "yamllint --strict -c .yamllint.yaml .yamllint.yaml compose.yaml .github/workflows/*.y*ml docker/**/*.y*ml"
 
 [tasks.lint-json]
 description = "Validate every JSON config parses"
@@ -168,8 +179,15 @@ cmd = "python scripts/lint_selftest.py"
 
 [tasks.lint]
 description = "Run every validation check"
-depends-on = ["lint-compose", "lint-shell", "lint-yaml", "lint-json", "lint-python"]
+depends-on = ["lint-compose", "lint-config", "lint-shell", "lint-yaml", "lint-json", "lint-python"]
 
 [tasks.ci]
 description = "The done-gate: every check this repository needs"
 depends-on = ["lint", "test"]
+
+# The stack half of CI, invoked as one named task so the workflow never becomes a
+# second definition of what CI runs. Profiles come from the environment, which the
+# workflow sets explicitly; .env selects all of them too.
+[tasks.ci-stack]
+description = "Start the stack, wait for health and run the strict smoke suite"
+depends-on = ["init", "start", "wait", "smoke-strict"]
