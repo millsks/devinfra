@@ -7,16 +7,32 @@ take no part in Compose interpolation, so a port that reads as `127.0.0.1:5432:5
 source file can still render bound to every interface. Only the rendered output says what
 the runtime will actually do.
 
-Three properties, one pass per profile combination:
+Four properties, one pass per profile combination:
 
 * every published port binds to the configured bind address, never to `0.0.0.0` or to an
   empty host address (NFR-2);
 * no two services publish the same host address and port (AD-17) — `config -q` is blind to
   this, so `up` half-starts and reports `port is already allocated` instead;
-* every image resolves to an explicit tag that is not `latest` (NFR-4).
+* every image resolves to an explicit tag that is not `latest` (NFR-4);
+* every service carries the logging options `common/base.yaml` declares — the inlined
+  services reach them through the `x-logging` anchor and a module through `extends`, and a
+  module that lost its `extends` block renders valid, passes `config -q` and silently ships
+  with unbounded logs. Logging is the only one of the fragment's three keys asserted here:
+  `restart` cannot be, because overriding it is sanctioned — a one-shot helper such as
+  `minio-init` must set `restart: "no"` — so telling a legitimate override from a lost
+  inheritance needs a way to declare the exception, which no story has settled yet.
 
-A combination that renders no services is a failure, not a pass: a check that walked an
-empty set has verified nothing, which is the silent skip this repository keeps removing.
+One property is read from the module files' own text instead, because the rendered model
+cannot express it: every `volumes:`, `networks:`, `configs:` and `secrets:` entry in a
+`services/*/compose.yaml` names an identifier the root file already declares, and carries
+nothing else (AD-5). A module key the root file does not set *wins* — `docker compose
+config` reports the module's own `name:` or `driver:` and `config -q` accepts it — so a
+module that added one, or that named an identifier of its own, would silently mount a
+different Docker volume and orphan the real data with no error anywhere.
+
+A combination that renders no services is a failure, not a pass, and so is a module scan
+that found no module file: a check that walked an empty set has verified nothing, which is
+the silent skip this repository keeps removing.
 
 Written in Python for the same reason as `lint_json.py`: it runs identically on every
 platform `pixi.toml` declares. Diagnostics go to stderr because they are human-readable
@@ -33,6 +49,8 @@ import subprocess
 import sys
 from pathlib import Path
 
+import yaml
+
 REPO = Path(__file__).resolve().parent.parent
 
 #: Host addresses that publish a port on every interface. Never acceptable here.
@@ -40,6 +58,14 @@ WILDCARD_ADDRESSES = ("", "0.0.0.0", "::", "[::]", "*")
 
 #: The default `compose.yaml` interpolates for BIND_ADDRESS.
 DEFAULT_BIND_ADDRESS = "127.0.0.1"
+
+#: The top-level stanzas a module may declare, and may declare nothing but an identifier in.
+#: `configs` and `secrets` merge exactly as `volumes` and `networks` do, so a module body
+#: under either wins the same way even though nothing declares one today.
+MODULE_STANZAS = ("volumes", "networks", "configs", "secrets")
+
+#: The shared fragment every module service pulls in through `extends`.
+BASE_FRAGMENT = REPO / "common" / "base.yaml"
 
 
 def compose_argv() -> list[str]:
@@ -196,6 +222,127 @@ def render(profiles: list[str]) -> dict[str, object]:
     return document
 
 
+def module_composes() -> list[Path]:
+    """List the Compose fragments the modules contribute.
+
+    Returns:
+        Every `services/<name>/compose.yaml`, in directory order.
+    """
+    return sorted((REPO / "services").glob("*/compose.yaml"))
+
+
+def read_model(path: Path) -> dict[str, object]:
+    """Parse a compose file as text, failing loudly on anything that is not a model.
+
+    Args:
+        path: The file to read.
+
+    Returns:
+        The parsed mapping.
+
+    Raises:
+        RuntimeError: If the file cannot be read or does not parse as a compose model.
+    """
+    try:
+        parsed = yaml.safe_load(path.read_text(encoding="utf-8"))
+    except UnicodeDecodeError as exc:
+        # Named, not an interpreter traceback: the same contract lint_json.py and
+        # assert_renovate.py hold, and the one the self-test asserts for both.
+        raise RuntimeError(f"{path}: not valid UTF-8 at byte {exc.start}: {exc.reason}") from exc
+    except OSError as exc:
+        raise RuntimeError(f"{path}: unreadable: {exc}") from exc
+    except yaml.YAMLError as exc:
+        raise RuntimeError(f"{path}: does not parse as YAML: {exc}") from exc
+    if not isinstance(parsed, dict):
+        raise RuntimeError(f"{path}: parsed as {type(parsed).__name__}, not a compose model")
+    return parsed
+
+
+def root_identifiers(stanza: str) -> set[str]:
+    """List the identifiers the root file declares in one top-level stanza.
+
+    Args:
+        stanza: The stanza name, one of `MODULE_STANZAS`.
+
+    Returns:
+        Every identifier the root `compose.yaml` declares there.
+
+    Raises:
+        RuntimeError: If the root file cannot be read or does not parse as a compose model.
+    """
+    declared = read_model(REPO / "compose.yaml").get(stanza)
+    return set(declared) if isinstance(declared, dict) else set()
+
+
+def shared_logging() -> dict[str, object]:
+    """Read the logging options every service inherits from the shared fragment.
+
+    Returns:
+        The `logging` mapping `common/base.yaml` declares on its `defaults` service.
+
+    Raises:
+        RuntimeError: If the fragment is unreadable, unparseable, or declares no logging.
+    """
+    defaults = read_model(BASE_FRAGMENT).get("services")
+    defaults = defaults.get("defaults") if isinstance(defaults, dict) else None
+    logging = defaults.get("logging") if isinstance(defaults, dict) else None
+    if not isinstance(logging, dict) or not logging:
+        raise RuntimeError(f"{BASE_FRAGMENT}: the 'defaults' service declares no logging options")
+    return logging
+
+
+def identifier_only(paths: list[Path]) -> list[str]:
+    """Assert every module stanza names its resource and declares nothing about it.
+
+    A renamed or re-driven named volume is a *new* volume: the old one is orphaned and
+    the service starts empty, with no error anywhere (AD-5). The rendered model cannot
+    catch that, because the root file wins only on keys it sets explicitly and every key
+    it omits is last-include-wins — a module's own `name:` or `driver_opts:` renders
+    straight through and `config -q` accepts it. So the rule is asserted where it is
+    stated: in the module's own text.
+
+    Args:
+        paths: The module compose files to read.
+
+    Returns:
+        One diagnostic per entry carrying anything but its identifier.
+
+    Raises:
+        RuntimeError: If a file cannot be read or does not parse as a compose model.
+    """
+    problems: list[str] = []
+    known = {stanza: root_identifiers(stanza) for stanza in MODULE_STANZAS}
+    for path in paths:
+        where = path.relative_to(REPO).as_posix()
+        parsed = read_model(path)
+        for stanza in MODULE_STANZAS:
+            declared = parsed.get(stanza)
+            if declared is None:
+                continue
+            if not isinstance(declared, dict):
+                problems.append(
+                    f"{where}: '{stanza}:' parsed as {type(declared).__name__}, not a mapping of identifiers"
+                )
+                continue
+            for name, body in declared.items():
+                if str(name) not in known[stanza]:
+                    problems.append(
+                        f"{where}: {stanza}.{name} is not declared in the root compose.yaml — "
+                        f"an identifier only this module names is a *new* resource, so the one the "
+                        f"root declares is orphaned and the service starts empty (AD-5). Declare it "
+                        f"in the root {stanza}: list, or fix the spelling"
+                    )
+                if body is None or body == {}:
+                    continue
+                keys = sorted(str(key) for key in body) if isinstance(body, dict) else [repr(body)]
+                problems.append(
+                    f"{where}: {stanza}.{name} declares {keys} — a module names the identifier and "
+                    f"nothing else. Driver keys belong in the root compose.yaml; a key the root does "
+                    f"not set wins from here, silently repointing the resource (AD-5)"
+                )
+    return problems
+
+
 def tag_problem(image: str) -> str | None:
     """Judge whether an image reference is pinned.
 
@@ -221,13 +368,16 @@ def tag_problem(image: str) -> str | None:
     return None
 
 
-def check(profiles: list[str], document: dict[str, object], expected_bind: str) -> list[str]:
+def check(
+    profiles: list[str], document: dict[str, object], expected_bind: str, logging: dict[str, object]
+) -> list[str]:
     """Assert every rule against one rendered combination.
 
     Args:
         profiles: The combination's profile names.
         document: The parsed `config --format json` document.
         expected_bind: The address every published port must bind to.
+        logging: The logging options every service must carry, from the shared fragment.
 
     Returns:
         One diagnostic per violation, empty when the combination is clean.
@@ -250,6 +400,21 @@ def check(profiles: list[str], document: dict[str, object], expected_bind: str) 
         problem = tag_problem(image if isinstance(image, str) else "")
         if problem is not None:
             problems.append(f"{where}: service '{name}' image '{image}': {problem}")
+
+        # An inlined service reads the `x-logging` anchor; a module reads the same three
+        # keys out of common/base.yaml through `extends`. Drop the `extends` block from a
+        # module and nothing else notices: `config -q` still passes, the ports and the
+        # image are unchanged, and the service quietly ships with unbounded logs. The
+        # rendered model is where the two paths converge, so it is where they are
+        # compared. Only `logging` is compared: `restart` has a sanctioned override
+        # (`minio-init` sets `restart: "no"`), so an equality check would reject it.
+        if service.get("logging") != logging:
+            problems.append(
+                f"{where}: service '{name}' logging is {service.get('logging')!r}, not the "
+                f"{logging!r} every service inherits — an inlined service takes it from the "
+                f"x-logging anchor and a module from common/base.yaml through extends, so this "
+                f"one reaches neither"
+            )
 
         ports = service.get("ports")
         if not isinstance(ports, list):
@@ -303,30 +468,54 @@ def main() -> int:
         )
         return 1
 
+    modules = module_composes()
+    if not modules:
+        sys.stderr.write(
+            "assert-config: found no services/*/compose.yaml — a pass over an empty module set "
+            "verifies nothing about the identifier-only rule\n"
+        )
+        return 1
+
     try:
-        subsets = combinations(declared_profiles())
+        problems: list[str] = identifier_only(modules)
     except RuntimeError as exc:
         sys.stderr.write(f"assert-config: {exc}\n")
         return 1
+    # Held, not written as they are earned. stdout and stderr interleave by buffering, so
+    # a run that found a data-loss violation would otherwise end on a run of `OK` lines
+    # and read as a pass to anyone who trusts the output over the exit status.
+    passed: list[str] = [f"OK {len(modules)} module file(s) declare identifiers only"]
 
-    problems: list[str] = []
+    try:
+        logging = shared_logging()
+        subsets = combinations(declared_profiles())
+    except RuntimeError as exc:
+        # Whatever the module scan already found is a finding in its own right: losing it
+        # behind an unrelated runtime failure is how a data-loss diagnostic goes unread.
+        problems.append(str(exc))
+        for problem in problems:
+            sys.stderr.write(f"assert-config: {problem}\n")
+        return 1
+
     for profiles in subsets:
         try:
             document = render(profiles)
         except RuntimeError as exc:
             problems.append(str(exc))
             continue
-        found = check(profiles, document, expected_bind)
+        found = check(profiles, document, expected_bind, logging)
         if found:
             problems += found
         else:
-            sys.stdout.write(f"assert-config: OK {label(profiles)}\n")
+            passed.append(f"OK {label(profiles)}")
 
     if problems:
         for problem in problems:
             sys.stderr.write(f"assert-config: {problem}\n")
         return 1
 
+    for line in passed:
+        sys.stdout.write(f"assert-config: {line}\n")
     sys.stdout.write(f"assert-config: OK — {len(subsets)} profile combination(s), bind address {expected_bind}\n")
     return 0
 

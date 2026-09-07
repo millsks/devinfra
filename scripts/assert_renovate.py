@@ -3,7 +3,8 @@
 
 Renovate proposes image updates here through a `customManagers` regex over the annotated
 `<NAME>_VERSION=` declarations in `.env.example` and the matching `${<NAME>_VERSION:-tag}`
-fallbacks in `compose.yaml`. Neither of Renovate's stock managers can do it: the
+fallbacks in the compose files — the root one and every `services/<name>/compose.yaml` a
+module contributes. Neither of Renovate's stock managers can do it: the
 `docker-compose` manager skips the `repo:${VAR:-tag}` form entirely, and Dependabot cannot
 read a dotenv file at all. See
 `docs/adr/0010-image-updates-are-proposed-by-regex-over-the-dotenv-template.md`.
@@ -38,10 +39,12 @@ The properties asserted:
 * `matchStringsStrategy` is `any` — `combination` and `recursive` compose the patterns
   differently, so this check would be reproducing an extraction Renovate does not perform;
 * every `*_VERSION` declaration in `.env.example` is immediately preceded by its
-  `# renovate:` annotation, and is detected in both files;
-* the annotated `depName` is the image repository `compose.yaml` names for the same
+  `# renovate:` annotation, and is detected in the dotenv *and* in some compose file — a
+  pin whose service moved into a module and whose module the patterns do not select is
+  detected in one half only, which is the one-file pull request `lint-pins` rejects;
+* the annotated `depName` is the image repository the compose half names for the same
   variable, and an annotation carrying `versioning=` has a `packageRules` entry restating
-  it byte-for-byte — the `compose.yaml` half has no annotation to read, so without the
+  it byte-for-byte — the compose half has no annotation to read, so without the
   restatement the two halves compute different updates and the bot edits one file alone;
 * nothing re-enables grouping: no `extends`, and no `packageRules` entry naming a
   `groupName` — one image per pull request is what keeps a red run attributable;
@@ -159,25 +162,46 @@ def translate(pattern: str) -> re.Pattern[str]:
 def candidate_names(path: Path, base: Path) -> list[str]:
     r"""Give the names a `managerFilePatterns` entry could be written against.
 
-    Renovate matches these patterns against the repository-relative path, so a pattern
-    anchored on a directory (`/^docker\\/.*\\.yaml$/`) must be tried against that path and
-    not only against the basename. Both are offered: the relative path, computed against
-    the directory holding the configuration, and the basename, which is what a pattern like
-    `compose.yaml` is written against and what keeps the self-test's fixtures matchable.
+    Renovate matches these patterns against the repository-relative path and nothing
+    else, so that is what is offered here: the path computed against the directory
+    holding the configuration, which stands in for the repository root. The basename is
+    a fallback for a file that lies outside that directory and therefore has no relative
+    path at all.
+
+    Offering the basename as well would be laxer than the bot. Every module compose file
+    is called `compose.yaml`, so `/^compose\.yaml$/` would appear to select
+    `services/postgres/compose.yaml` here while Renovate — anchoring on the relative path
+    — selects only the root file. The configuration would look complete while the bot saw
+    one half of every module's pin, which is the one-file pull request lint-pins rejects.
 
     Args:
         path: The candidate file.
         base: The directory the configuration sits in, standing in for the repository root.
 
     Returns:
-        The distinct names to try, relative path first.
+        The names to try: the relative path, or the basename when there is none.
     """
-    names = [path.name]
     try:
-        relative = path.resolve().relative_to(base.resolve()).as_posix()
+        return [path.resolve().relative_to(base.resolve()).as_posix()]
     except ValueError:
-        return names
-    return [relative, *(name for name in names if name != relative)]
+        return [path.name]
+
+
+def source_name(path: Path, base: Path) -> str:
+    """Name a file the way `managerFilePatterns` and a reader both see it.
+
+    Every module compose file is called `compose.yaml`, so the basename identifies
+    none of them: `Detection.source` has to carry the repo-relative path or the
+    dotenv/compose split below cannot tell the root file from a module's.
+
+    Args:
+        path: The file to name.
+        base: The directory the configuration sits in.
+
+    Returns:
+        The repo-relative path, or the basename for a file outside the repository.
+    """
+    return candidate_names(path, base)[0]
 
 
 def selects(pattern: str, path: Path, base: Path) -> bool:
@@ -221,9 +245,9 @@ def read_text(path: Path) -> str:
     try:
         return path.read_text(encoding="utf-8")
     except UnicodeDecodeError as exc:
-        raise RuntimeError(f"{path.name}: not valid UTF-8 at byte {exc.start}: {exc.reason}") from exc
+        raise RuntimeError(f"{path}: not valid UTF-8 at byte {exc.start}: {exc.reason}") from exc
     except OSError as exc:
-        raise RuntimeError(f"{path.name}: unreadable: {exc}") from exc
+        raise RuntimeError(f"{path}: unreadable: {exc}") from exc
 
 
 def live_text(path: Path) -> str:
@@ -272,9 +296,9 @@ def load_config(path: Path) -> dict[str, Any]:
     try:
         parsed = json.loads(text)
     except json.JSONDecodeError as exc:
-        raise RuntimeError(f"{path.name}:{exc.lineno}:{exc.colno}: invalid JSON: {exc.msg}") from exc
+        raise RuntimeError(f"{path}:{exc.lineno}:{exc.colno}: invalid JSON: {exc.msg}") from exc
     if not isinstance(parsed, dict):
-        raise RuntimeError(f"{path.name}: parsed as {type(parsed).__name__}, not a configuration object")
+        raise RuntimeError(f"{path}: parsed as {type(parsed).__name__}, not a configuration object")
     return parsed
 
 
@@ -385,7 +409,7 @@ def detect(config: dict[str, Any], candidates: list[Path], base: Path) -> tuple[
         if not selected:
             problems.append(
                 f"{label}: managerFilePatterns {file_patterns} select none of "
-                f"{[path.name for path in candidates]} — the manager reads nothing"
+                f"{[source_name(path, base) for path in candidates]} — the manager reads nothing"
             )
             continue
 
@@ -430,7 +454,7 @@ def detect(config: dict[str, Any], candidates: list[Path], base: Path) -> tuple[
                     groups = match.groupdict()
                     hits += 1
                     found = Detection(
-                        source=path.name,
+                        source=source_name(path, base),
                         variable=str(groups.get("varName") or ""),
                         dep_name=str(groups.get("depName") or ""),
                         current_value=str(groups.get("currentValue") or ""),
@@ -450,7 +474,7 @@ def detect(config: dict[str, Any], candidates: list[Path], base: Path) -> tuple[
                     ]
                     if empty:
                         problems.append(
-                            f"{label}: pattern {text_pattern!r} matched in {path.name} with no "
+                            f"{label}: pattern {text_pattern!r} matched in {source_name(path, base)} with no "
                             f"{', '.join(empty)} — the group is missing from the pattern or captured "
                             f"nothing, so the reference carries no dependency"
                         )
@@ -458,7 +482,7 @@ def detect(config: dict[str, Any], candidates: list[Path], base: Path) -> tuple[
                     captured = str(groups.get("datasource") or "") or str(datasource_template or "")
                     if captured != DATASOURCE:
                         problems.append(
-                            f"{label}: pattern {text_pattern!r} matched in {path.name} resolving "
+                            f"{label}: pattern {text_pattern!r} matched in {source_name(path, base)} resolving "
                             f"datasource {captured!r}, not {DATASOURCE!r}"
                         )
                         continue
@@ -466,8 +490,8 @@ def detect(config: dict[str, Any], candidates: list[Path], base: Path) -> tuple[
             if hits == 0:
                 problems.append(
                     f"{label}: matchStrings pattern {text_pattern!r} matched nothing in "
-                    f"{[path.name for path in selected]} — a manager whose regex matches nothing "
-                    f"proposes nothing and still reports a clean run"
+                    f"{[source_name(path, base) for path in selected]} — a manager whose regex matches "
+                    f"nothing proposes nothing and still reports a clean run"
                 )
     return detections, problems
 
@@ -546,12 +570,18 @@ def restated_versionings(config: dict[str, Any]) -> dict[str, set[str]]:
     return stated
 
 
-def check(config_path: Path, compose: Path, dotenv: Path, workflow: Path) -> tuple[int, int, list[str]]:
-    """Prove the configuration detects every pin, in both files.
+def check(config_path: Path, composes: list[Path], dotenv: Path, workflow: Path) -> tuple[int, int, list[str]]:
+    """Prove the configuration detects every pin, in the dotenv and in some compose file.
+
+    The compose half is a list, not a file. Services are being extracted into
+    `services/<name>/compose.yaml`, so a pin's compose half may live in any of them and
+    `managerFilePatterns` has to select every one — a pattern set that reached only the
+    root file would leave the bot editing `.env.example` alone for every extracted
+    service, which is the one-file pull request `lint-pins` rejects.
 
     Args:
         config_path: The Renovate configuration.
-        compose: The compose file holding the `${NAME_VERSION:-tag}` fallbacks.
+        composes: The compose files holding the `${NAME_VERSION:-tag}` fallbacks.
         dotenv: The template holding the annotated `NAME_VERSION=tag` declarations.
         workflow: The CI workflow whose `pull_request` trigger validates a bot pull request.
 
@@ -563,14 +593,21 @@ def check(config_path: Path, compose: Path, dotenv: Path, workflow: Path) -> tup
         RuntimeError: If a file cannot be read or a pattern cannot be compiled.
     """
     config = load_config(config_path)
-    detections, problems = detect(config, [dotenv, compose], config_path.parent)
+    base = config_path.parent
+    detections, problems = detect(config, [dotenv, *composes], base)
     stated = restated_versionings(config)
 
-    from_dotenv = {item.variable: item for item in detections if item.source == dotenv.name}
-    from_compose: dict[str, set[str]] = {}
+    dotenv_source = source_name(dotenv, base)
+    compose_sources = {source_name(path, base) for path in composes}
+    named = ", ".join(sorted(compose_sources))
+
+    from_dotenv = {item.variable: item for item in detections if item.source == dotenv_source}
+    # Keyed by (source, dep_name), not dep_name alone: every module file is called
+    # compose.yaml, so a diagnostic that says "a compose file" names none of them.
+    from_compose: dict[str, set[tuple[str, str]]] = {}
     for item in detections:
-        if item.source == compose.name:
-            from_compose.setdefault(item.variable, set()).add(item.dep_name)
+        if item.source in compose_sources:
+            from_compose.setdefault(item.variable, set()).add((item.source, item.dep_name))
 
     for number, name, annotated in declarations(dotenv):
         if not annotated:
@@ -587,16 +624,17 @@ def check(config_path: Path, compose: Path, dotenv: Path, workflow: Path) -> tup
             continue
         if name not in from_compose:
             problems.append(
-                f"{compose.name}: '{name}' is detected in {dotenv.name} but nowhere in "
-                f"{compose.name} — a pull request would move one file alone, which lint-pins rejects"
+                f"{dotenv.name}:{number}: '{name}' is detected in {dotenv.name} but in no "
+                f"compose file ({named}) — a pull request would move one file alone, which "
+                f"lint-pins rejects"
             )
             continue
         annotated_repo = from_dotenv[name].dep_name
-        for compose_repo in sorted(from_compose[name]):
+        for compose_source, compose_repo in sorted(from_compose[name]):
             if compose_repo != annotated_repo:
                 problems.append(
                     f"'{name}' disagrees on depName: {dotenv.name} annotates "
-                    f"'{annotated_repo}', {compose.name} names '{compose_repo}' — the two halves "
+                    f"'{annotated_repo}', {compose_source} names '{compose_repo}' — the two halves "
                     f"of the pin would be tracked as two different images"
                 )
 
@@ -610,7 +648,7 @@ def check(config_path: Path, compose: Path, dotenv: Path, workflow: Path) -> tup
             problems.append(
                 f"'{name}' annotates versioning {wanted!r} but no packageRules entry restates it "
                 f"for '{annotated_repo}' (rules state {sorted(stated.get(annotated_repo, set()))}) — "
-                f"the {compose.name} half would use the default versioning and the two halves would "
+                f"the compose half would use the default versioning and the two halves would "
                 f"disagree about the update"
             )
 
@@ -630,32 +668,35 @@ def main(argv: list[str]) -> int:
     way, so proving it fails on a planted defect never involves editing a tracked file.
 
     Args:
-        argv: Either empty, or exactly the Renovate configuration, the compose file, the
-            dotenv template and the CI workflow.
+        argv: Either empty, or the Renovate configuration, the root compose file, the
+            dotenv template and the CI workflow, optionally followed by further compose
+            files. The first four keep their positions so the self-test's four-argument
+            fixture contract is unchanged.
 
     Returns:
-        Process exit status: 0 when every pin is detected in both files, 1 otherwise.
+        Process exit status: 0 when every pin is detected in both halves, 1 otherwise.
     """
-    if len(argv) not in (0, 4):
+    if argv and len(argv) < 4:
         sys.stderr.write(
             "assert-renovate: usage: assert_renovate.py "
-            "[<renovate config> <compose file> <dotenv file> <ci workflow>]\n"
+            "[<renovate config> <compose file> <dotenv file> <ci workflow> [<compose file>...]]\n"
         )
         return 1
     if argv:
-        config_path, compose, dotenv, workflow = (Path(arg) for arg in argv)
+        config_path, compose, dotenv, workflow = (Path(arg) for arg in argv[:4])
+        composes = [compose, *(Path(arg) for arg in argv[4:])]
     else:
         config_path = REPO / "renovate.json"
-        compose = REPO / "compose.yaml"
+        composes = [REPO / "compose.yaml", *sorted((REPO / "services").glob("*/compose.yaml"))]
         dotenv = REPO / ".env.example"
         workflow = REPO / ".github" / "workflows" / "ci.yml"
-    for path in (config_path, compose, dotenv, workflow):
+    for path in (config_path, *composes, dotenv, workflow):
         if not path.is_file():
             sys.stderr.write(f"assert-renovate: no such file: {path}\n")
             return 1
 
     try:
-        dependencies, references, problems = check(config_path, compose, dotenv, workflow)
+        dependencies, references, problems = check(config_path, composes, dotenv, workflow)
     except RuntimeError as exc:
         sys.stderr.write(f"assert-renovate: {exc}\n")
         return 1
@@ -675,7 +716,7 @@ def main(argv: list[str]) -> int:
 
     sys.stdout.write(
         f"assert-renovate: OK {dependencies} dependencies detected over {references} references "
-        f"in {dotenv.name} and {compose.name}\n"
+        f"in {dotenv.name} and {', '.join(source_name(path, config_path.parent) for path in composes)}\n"
     )
     return 0
 

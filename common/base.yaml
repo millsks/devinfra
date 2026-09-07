@@ -1,0 +1,34 @@
+# The one fragment every Module extends. Never included.
+#
+# YAML anchors are document-scoped and `include:` is applied after parsing, so an
+# alias cannot cross a file boundary — a module file cannot reach the `x-defaults`
+# anchor in the root compose file. `extends` can, so shared configuration lives
+# here and every module service pulls it in with:
+#
+#   extends:
+#     file: ../../common/base.yaml
+#     service: defaults
+#
+# This file is an `extends` source only: it is never named in an `include:` list,
+# because including it would add a service called `defaults` to the model. It is
+# not a Compose project on its own either — `docker compose -f common/base.yaml
+# config` fails on the undeclared `devinfra` network, and that is expected: the
+# network is declared by whichever project extends it.
+#
+# Only `restart`, `logging` and `networks` may appear here. `depends_on`, `links`,
+# `volumes_from` and `network_mode: service:*` are forbidden: `extends` copies
+# those keys but does not import the services they name, so every consumer would
+# fail with "depends on undefined service". See
+# docs/adr/0001-modules-via-compose-include.md.
+#
+# A one-shot helper must override `restart: "no"`, or it inherits
+# `unless-stopped` from here and restart-loops forever.
+services:
+  defaults:
+    restart: unless-stopped
+    logging:
+      driver: json-file
+      options:
+        max-size: "10m"
+        max-file: "3"
+    networks: [devinfra]

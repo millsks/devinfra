@@ -174,14 +174,19 @@ pixi run keycloak-export     # write the live realm back over the JSON
 ## Repository layout
 
 ```
-compose.yaml                    the stack
+compose.yaml                    the stack: the `include:` registry, the twelve
+                                services not yet extracted, and the volume and
+                                network declarations
+common/base.yaml                restart, logging and networks; every module's
+                                `extends` target, never itself included
 .env.example                    every tunable, with defaults
 pixi.toml / pixi.lock           validation tasks and their pinned tools
 pyproject.toml                  ruff and mypy settings (no package here)
 .yamllint.yaml                  YAML lint rules
 .gitattributes                  LF line endings on every checkout
 .github/workflows/ci.yml        CI: the static gate, and the stack on Docker and Podman
-renovate.json                   what the update bot reads: one regex manager over both files above
+renovate.json                   what the update bot reads: one regex manager over
+                                .env.example, compose.yaml and every module file
 .githooks/pre-commit            commit-time: execs `pixi run precommit`, nothing else
 .githooks/pre-merge-commit      the same, for the merge commits pre-commit never sees
 .githooks/commit-msg            commit-time: execs `pixi run commit-msg`, nothing else
@@ -206,17 +211,21 @@ scripts/keycloak-export.sh      live realm back over the JSON
 scripts/token.sh                mint an access token via the CLI client
 scripts/smoke-test.sh           end-to-end verification; SMOKE_STRICT=1 forbids skips
 scripts/lint-compose.sh         `config -q` for every combination of declared profiles
-scripts/assert_config.py        bind address, host-port collisions and image pinning
+scripts/assert_config.py        bind address, host-port collisions, image pinning, and
+                                identifier-only module volume/network stanzas
 scripts/lint_json.py            the JSON check, one file per diagnostic
-scripts/assert_pins.py          .env.example and the compose.yaml fallback must agree
+scripts/assert_pins.py          .env.example and every compose fallback must agree
 scripts/assert_renovate.py      the bot's own regexes must still detect every pin
 scripts/check_commit_msg.py     the commit-message contract, where it can be tested
 scripts/podman-socket.sh        stops Docker and enables Podman's API socket (CI)
 scripts/assert-podman.sh        proves Podman itself reports the running containers
 scripts/lint_selftest.py        proves the lint surface and the scripts hold
+services/                       one directory per extracted service; the rest are
+                                still inlined in compose.yaml
+  postgres/compose.yaml         the Postgres service, pulled in by `include:`
+  postgres/conf/postgresql.conf dev-tuned config (loaded via config_file)
+  postgres/seed/                extensions + extra databases, first boot only
 docker/
-  postgres/postgresql.conf      dev-tuned config (loaded via config_file)
-  postgres/initdb/              extensions + extra databases, first boot only
   redis/redis.conf              AOF + RDB persistence, noeviction
   keycloak/realms/              realm imported on first boot
   minio/                        buckets provisioned by the minio-init container
@@ -258,8 +267,8 @@ docker/
 | `pixi run config` | Render the resolved compose configuration | `make config` |
 | `pixi run lint` | Validate compose, rendered config, pins, the update bot, shell, YAML, JSON, Python | `make lint` |
 | `pixi run lint-compose` | `config -q` for every combination of declared profiles | — |
-| `pixi run lint-config` | Assert the *rendered* config's ports and image tags | — |
-| `pixi run lint-pins` | Assert every pin agrees between `.env.example` and `compose.yaml` | — |
+| `pixi run lint-config` | Assert the *rendered* config's ports and image tags, and each module's identifier-only volume and network stanzas | — |
+| `pixi run lint-pins` | Assert every pin agrees between `.env.example` and the compose files | — |
 | `pixi run lint-renovate` | Assert the update bot's regexes still detect every image pin | — |
 | `pixi run test` | Prove the checks and scripts hold their contracts | — |
 | `pixi run ci` | The done-gate: lint + test | — |
@@ -401,7 +410,7 @@ Renovate has no manager that can read this stack's pins: its `docker-compose`
 manager skips the `repo:${VAR:-tag}` form, and Dependabot cannot read a dotenv
 file at all. So a `customManagers` regex in `renovate.json` reads both places a
 tag lives, and each declaration in `.env.example` is immediately preceded by an
-annotation naming the repository `compose.yaml` uses for it:
+annotation naming the repository the compose half uses for it:
 
 ```sh
 # renovate: datasource=docker depName=redis
@@ -425,8 +434,8 @@ run, which looks exactly like "everything is current". `pixi run lint-renovate`
 — part of `pixi run lint`, and therefore of `pixi run ci` — refuses that. It
 applies `renovate.json`'s *own* `matchStrings` to the files its *own*
 `managerFilePatterns` select and fails if any pattern matches nothing, if a
-declaration is unannotated, if an annotation names a repository `compose.yaml`
-disagrees with, or if `ci.yml`'s `pull_request` trigger ever grows a `paths:`
+declaration is unannotated, if an annotation names a repository no compose file
+agrees with, or if `ci.yml`'s `pull_request` trigger ever grows a `paths:`
 filter a bot pull request could fall through. It needs no network, no Node and
 no token, so CI runs it on every change.
 
@@ -550,10 +559,12 @@ misbehaves under Podman turns the run red rather than going unrecorded.
 
 ### Deviations worth knowing
 
-- **`max-file` is inert.** `compose.yaml`'s `x-logging` sets `max-size: "10m"`
-  and `max-file: "3"`. Podman's compat API accepts unknown log options without
-  complaint and reads only `path`, `max-size` and `tag`, so under Podman you get
-  one rotated log file rather than three. Nothing fails and nothing warns.
+- **`max-file` is inert.** `compose.yaml`'s `x-logging` and `common/base.yaml`'s
+  `defaults` — the two sources every service reads, one inlined and one extracted
+  — both set `max-size: "10m"` and `max-file: "3"`. Podman's compat API accepts
+  unknown log options without complaint and reads only `path`, `max-size` and
+  `tag`, so under Podman you get one rotated log file rather than three. Nothing
+  fails and nothing warns.
 - **`restart: unless-stopped` does not survive a reboot** unless you also
   `systemctl enable podman-restart.service`. Podman honours the policy while it
   is running; it has no always-on daemon to reapply it at boot.
@@ -608,7 +619,8 @@ These are the things that cost time when building this stack:
   `/var/lib/postgresql/data`; 18 moved it to `/var/lib/postgresql/18/docker` and
   declares the volume one level up. Using the wrong path for your major version
   gives you a database that silently loses everything on `down`, with no error
-  anywhere. Change the mount in `compose.yaml` if you ever move to 18.
+  anywhere. Change the mount in `services/postgres/compose.yaml` if you ever
+  move to 18.
 - **pgAdmin validates `PGADMIN_DEFAULT_EMAIL`** and refuses to start otherwise.
   It rejects both bare `dev@localhost` and special-use TLDs (`.local`, `.test`),
   hence `dev@example.com`.

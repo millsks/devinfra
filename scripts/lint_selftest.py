@@ -631,6 +631,28 @@ def main() -> int:
     uncovered = sorted(path for path in shell_sources if path not in covered)
     expect("lint-shell covers every script at any depth", not uncovered, f"unlinted: {uncovered}")
 
+    # common/base.yaml and compose.yaml's anchors are two sources of one truth until
+    # every service is extracted: the twelve inlined services read `x-defaults`, the
+    # module reads `defaults`. A logging or restart change applied to one and not the
+    # other lands on some services and silently skips the rest, and nothing renders
+    # both in a way a diff would show. So they are compared here, resolved.
+    base_model = yaml.safe_load((REPO / "common" / "base.yaml").read_text(encoding="utf-8"))
+    root_model = yaml.safe_load((REPO / "compose.yaml").read_text(encoding="utf-8"))
+    shared = base_model.get("services", {}).get("defaults")
+    anchored = root_model.get("x-defaults")
+    expect("common/base.yaml declares a 'defaults' service", isinstance(shared, dict), f"got {shared!r}")
+    expect("compose.yaml still declares the x-defaults anchor", isinstance(anchored, dict), f"got {anchored!r}")
+    expect(
+        "the shared fragment and the root anchors resolve to the same configuration",
+        shared == anchored,
+        f"common/base.yaml defaults {shared!r} != compose.yaml x-defaults {anchored!r}",
+    )
+    expect(
+        "the shared fragment declares only restart, logging and networks",
+        isinstance(shared, dict) and set(shared) == {"restart", "logging", "networks"},
+        f"common/base.yaml defaults declares {sorted(shared) if isinstance(shared, dict) else shared!r}",
+    )
+
     # --- Every task fails on a real defect. Planted fixtures, never edits in place. ---
     defects: list[tuple[str, Path, str]] = [
         ("lint-shell", REPO / "scripts" / "zz_selftest_defect.sh", '#!/usr/bin/env bash\nv="$1"\necho $v\n'),
@@ -669,8 +691,14 @@ def main() -> int:
 
     # --- Every glob-driven task fails when its pattern matches nothing. ---
     empties: list[tuple[str, list[Path]]] = [
-        ("lint-shell", sorted((REPO / "docker" / "postgres" / "initdb").glob("*.sh"))),
+        ("lint-shell", sorted((REPO / "services" / "postgres" / "seed").glob("*.sh"))),
         ("lint-yaml", sorted((REPO / "docker").rglob("*.yaml")) + sorted((REPO / "docker").rglob("*.yml"))),
+        # The two module halves of the lint-yaml glob, pinned one term per entry. Hiding
+        # both at once would let either `common/*.y*ml` or `services/**/*.y*ml` be deleted
+        # from pixi.toml with every case here still passing, because the other term would
+        # empty the file set on its own.
+        ("lint-yaml", sorted((REPO / "common").rglob("*.y*ml"))),
+        ("lint-yaml", sorted((REPO / "services").glob("*/compose.yaml"))),
         ("lint-json", sorted((REPO / "docker").rglob("*.json"))),
     ]
     for task, targets in empties:
@@ -1394,8 +1422,20 @@ def main() -> int:
 
         # --- assert_config: the rules NFR-2, NFR-4 and AD-17 state, read from the
         # rendered model. Each fixture is what `config --format json` would return.
+        base_logging = yaml.safe_load((REPO / "common" / "base.yaml").read_text(encoding="utf-8"))["services"][
+            "defaults"
+        ]["logging"]
+
         def rendered(services: dict[str, object]) -> str:
-            return json.dumps({"name": "devinfra", "services": services})
+            # Every real service renders with the shared logging options, whether it reads
+            # them from the `x-logging` anchor or from common/base.yaml through `extends`,
+            # so the stub document carries them too. A service written here without them is
+            # stating that defect deliberately.
+            filled = {
+                name: ({"logging": base_logging, **body} if isinstance(body, dict) else body)
+                for name, body in services.items()
+            }
+            return json.dumps({"name": "devinfra", "services": filled})
 
         def port(host_ip: str, published: str, target: int) -> dict[str, object]:
             return {
@@ -1414,6 +1454,111 @@ def main() -> int:
         )
         r = pixi("lint-config", env=fresh(document=clean_doc))
         expect("lint-config accepts a clean rendered config", r.returncode == 0, f"output: {(r.stdout + r.stderr)!r}")
+        expect(
+            "lint-config passes the tracked modules' volume and network stanzas",
+            "module file(s) declare identifiers only" in r.stdout,
+            f"stdout: {r.stdout!r}",
+        )
+
+        # AD-5, and the one rule the rendered model cannot express: the root file wins
+        # only on keys it sets, so a module's own `name:` renders straight through and
+        # `config -q` accepts it — Postgres would mount a different Docker volume and
+        # orphan devinfra_postgres-data with no error anywhere. Planted as a second
+        # module rather than an edit to services/postgres/, which is never touched.
+        defect_module = REPO / "services" / "zz-selftest-defect"
+        # A hard kill skips both `finally` blocks below, so the directory can outlive a
+        # run. It must then neither abort the next one nor need removing by hand: it is
+        # reused, and torn down whole rather than by an rmdir that a surviving fixture
+        # file would defeat.
+        defect_module.mkdir(exist_ok=True)
+        try:
+            for stanza, body in (
+                ("volumes", "volumes:\n  postgres-data:\n    name: somewhere-else\n"),
+                ("volumes", "volumes:\n  postgres-data:\n    driver_opts:\n      type: tmpfs\n"),
+                ("networks", "networks:\n  devinfra:\n    driver: host\n"),
+                # `configs:` and `secrets:` merge exactly as the other two do, so a body
+                # under either wins from the module in the same way.
+                ("configs", "configs:\n  zz-selftest:\n    file: ./elsewhere.conf\n"),
+                # The other half of AD-5: an identifier the root never declares is a *new*
+                # resource. Body-less, so only the membership rule can reject it.
+                ("volumes", "volumes:\n  postgres-dataa:\n"),
+            ):
+                fixture = defect_module / "compose.yaml"
+                with planted(fixture, "services:\n  zz-selftest-defect:\n    image: alpine:3.22\n" + body):
+                    r = pixi("lint-config", env=fresh(document=clean_doc))
+                    expect(
+                        f"lint-config rejects a module {stanza} entry the root does not sanction",
+                        r.returncode != 0,
+                        "exited 0",
+                    )
+                    expect(
+                        f"lint-config names the module file and the {stanza} stanza",
+                        "services/zz-selftest-defect/compose.yaml" in r.stderr and stanza in r.stderr,
+                        f"stderr: {r.stderr!r}",
+                    )
+                    # stdout and stderr interleave by buffering, so a run that emitted its
+                    # per-combination OK lines as it earned them would end on a wall of
+                    # `OK` with the data-loss diagnostic scrolled off above it.
+                    expect(
+                        f"lint-config signs off on nothing when the {stanza} stanza is bad",
+                        "OK" not in r.stdout,
+                        f"stdout: {r.stdout!r}",
+                    )
+
+            # A module file that is not UTF-8 must be a named diagnostic, not an
+            # interpreter traceback — the contract lint-json, commit-msg and lint-renovate
+            # already hold. `read_model` reads text, so it is where the byte is met.
+            undecodable = defect_module / "compose.yaml"
+            undecodable.write_bytes(b"services:\n  zz: {image: alpine:3.22}\n# caf\xe9\n")
+            try:
+                r = pixi("lint-config", env=fresh(document=clean_doc))
+                expect("lint-config rejects a module file that is not UTF-8", r.returncode != 0, "exited 0")
+                expect(
+                    "lint-config names the undecodable module without a traceback",
+                    # `read_model` raises with the path as constructed, so the separators
+                    # are the platform's — compare on the directory name, not a spelling.
+                    "zz-selftest-defect" in r.stderr and "not valid UTF-8" in r.stderr and "Traceback" not in r.stderr,
+                    f"stderr: {r.stderr!r}",
+                )
+            finally:
+                undecodable.unlink(missing_ok=True)
+        finally:
+            shutil.rmtree(defect_module, ignore_errors=True)
+
+        # The module scan's own guard. Without a case, the `if not modules` return could be
+        # deleted and every assertion above would still pass: the clean case looks for
+        # "module file(s) declare identifiers only", which "OK 0 module file(s) ..." also
+        # satisfies. A pass over an empty module set verifies nothing about AD-5.
+        module_files = sorted((REPO / "services").glob("*/compose.yaml"))
+        expect("there are module files to hide", bool(module_files), "found no services/*/compose.yaml")
+        with moved_aside(module_files):
+            r = pixi("lint-config", env=fresh(document=clean_doc))
+            expect("lint-config refuses an empty module set", r.returncode != 0, "a pass over zero modules")
+            expect(
+                "lint-config names the empty module set",
+                "services/*/compose.yaml" in r.stderr,
+                f"stderr: {r.stderr!r}",
+            )
+
+        # The rendered half of the same contract: a module that lost its `extends` block
+        # renders valid, keeps its image and its ports, and quietly drops the shared
+        # logging options and `restart: unless-stopped` with it.
+        unshared = rendered(
+            {
+                "postgres": {
+                    "image": "pgvector/pgvector:0.8.1-pg17",
+                    "ports": [port("127.0.0.1", "5432", 5432)],
+                    "logging": {},
+                }
+            }
+        )
+        r = pixi("lint-config", env=fresh(document=unshared))
+        expect("lint-config rejects a service that reaches neither logging source", r.returncode != 0, "exited 0")
+        expect(
+            "lint-config names the service whose logging is not the shared one",
+            "postgres" in r.stderr and "logging" in r.stderr,
+            f"stderr: {r.stderr!r}",
+        )
 
         env = fresh(profiles=two, document=clean_doc)
         env["COMPOSE_PROFILES"] = "admin,observability"
@@ -1597,6 +1742,84 @@ def main() -> int:
         expect("lint-pins rejects a declared pin compose never references", r.returncode != 0, "exited 0")
         expect("lint-pins names the unreferenced variable", "LOKI_VERSION" in r.stderr, f"stderr: {r.stderr!r}")
 
+        # --- The compose half is more than one file. ---
+        # A service extracted into services/<name>/compose.yaml takes its pin with it,
+        # so the pin is declared once in .env.example and referenced only in the module.
+        # The reverse scan therefore has to run over the *union* of every file's
+        # references: file by file it would report the module's pin missing from the
+        # root and the root's twelve missing from the module, and go red on a correct
+        # repository — which is how a check stops being read.
+        module_dir = pins_dir / "services" / "postgres"
+        module_dir.mkdir(parents=True, exist_ok=True)
+        module_fixture = module_dir / "compose.yaml"
+
+        def pins_pair(root_body: str, module_body: str, dotenv_body: str) -> subprocess.CompletedProcess[str]:
+            root_fixture = pins_dir / "compose.yaml"
+            dotenv_fixture = pins_dir / ".env.example"
+            for fixture, body in (
+                (root_fixture, root_body),
+                (module_fixture, module_body),
+                (dotenv_fixture, dotenv_body),
+            ):
+                fixture.write_text(body, encoding="utf-8", newline="\n")
+            return tool([sys.executable, str(PINNER), str(root_fixture), str(module_fixture), str(dotenv_fixture)])
+
+        module_compose = "services:\n  postgres:\n    image: pgvector/pgvector:${POSTGRES_VERSION:-0.8.6-pg17}\n"
+        module_env = clean_env + "POSTGRES_VERSION=0.8.6-pg17\n"
+
+        # The contrast that gives the case its meaning: the same declaration against the
+        # root file alone is exactly the "declared but never referenced" defect above.
+        r = pins(clean_compose, module_env)
+        expect("lint-pins rejects a module's pin when the module is not read", r.returncode != 0, "exited 0")
+        expect("lint-pins names the pin no file it read references", "POSTGRES_VERSION" in r.stderr, f"{r.stderr!r}")
+
+        r = pins_pair(clean_compose, module_compose, module_env)
+        expect(
+            "lint-pins accepts a pin referenced only in a module file",
+            r.returncode == 0,
+            f"output: {(r.stdout + r.stderr)!r}",
+        )
+        expect(
+            "lint-pins counts references across every compose file it was given",
+            "OK 4 pin references agree" in r.stdout,
+            f"stdout: {r.stdout!r}",
+        )
+
+        # Every module file is called compose.yaml, so a diagnostic naming the basename
+        # names none of them. The path as given is what a reader can act on.
+        r = pins_pair(clean_compose, module_compose.replace(":-0.8.6-pg17}", ":-0.8.6-pg18}"), module_env)
+        expect("lint-pins rejects drift inside a module file", r.returncode != 0, "exited 0")
+        expect(
+            "lint-pins identifies the module by path, not by a bare compose.yaml",
+            # The fixture is outside the repository, so the diagnostic carries the path
+            # exactly as it was given — separators and all. Comparing against a hardcoded
+            # POSIX spelling would fail spuriously on win-64, a platform pixi.toml declares.
+            str(module_fixture) in r.stderr and "POSTGRES_VERSION" in r.stderr,
+            f"stderr: {r.stderr!r}",
+        )
+
+        # …and that assertion rides the fallback branch, because the fixture is outside
+        # the repository. The branch `pixi run lint-pins` actually takes is the other one,
+        # so it needs a module inside the repository to name. Without this case `label()`
+        # could return `path.name` again and every case above would still pass — the
+        # regression the multi-file rewrite exists to prevent.
+        repo_module = REPO / "services" / "zz-selftest-defect"
+        repo_module.mkdir(exist_ok=True)
+        try:
+            with planted(
+                repo_module / "compose.yaml",
+                "services:\n  zz-selftest-defect:\n    image: pgvector/pgvector:${POSTGRES_VERSION:-0.0.0-selftest}\n",
+            ):
+                r = pixi("lint-pins")
+                expect("lint-pins rejects drift in a tracked module file", r.returncode != 0, "exited 0")
+                expect(
+                    "lint-pins names a tracked module by its repo-relative path",
+                    "services/zz-selftest-defect/compose.yaml" in r.stderr,
+                    f"stderr: {r.stderr!r}",
+                )
+        finally:
+            shutil.rmtree(repo_module, ignore_errors=True)
+
         r = pins("services:\n  redis:\n    image: redis:8-alpine\n", clean_env)
         expect("lint-pins refuses an empty match set", r.returncode != 0, "a pass over zero pins")
 
@@ -1639,13 +1862,25 @@ def main() -> int:
         # added with a hardcoded tag leaves the check reporting OK over the pins it
         # does see. Tying the reported count to the number of `image:` keys is what
         # makes either regression go red.
+        #
+        # Every compose file, not just the root one: a service extracted into
+        # services/<name>/compose.yaml takes its `image:` key with it, so counting the
+        # root file alone would let the total fall by one per extraction and call it
+        # correct — the check would go green on a module whose pin nothing reads.
+        tracked_composes = [REPO / "compose.yaml", *sorted((REPO / "services").glob("*/compose.yaml"))]
+        expect(
+            "the module compose files are found where the tasks look for them",
+            len(tracked_composes) > 1,
+            f"only {[str(path) for path in tracked_composes]} — services/*/compose.yaml matched nothing",
+        )
         image_keys = sum(
             1
-            for line in (REPO / "compose.yaml").read_text(encoding="utf-8").splitlines()
+            for path in tracked_composes
+            for line in path.read_text(encoding="utf-8").splitlines()
             if line.lstrip().startswith("image:")
         )
         expect(
-            "lint-pins compares one pin for every image in the tracked compose file",
+            "lint-pins compares one pin for every image across the tracked compose files",
             f"OK {image_keys} pin references agree" in r.stdout,
             f"{image_keys} 'image:' keys, stdout: {r.stdout!r}",
         )
@@ -1659,31 +1894,35 @@ def main() -> int:
         tracked_renovate = (REPO / "renovate.json").read_text(encoding="utf-8")
         tracked_ci = (REPO / ".github" / "workflows" / "ci.yml").read_text(encoding="utf-8")
 
+        def write_renovate_fixtures(
+            config_body: str,
+            dotenv_body: str,
+            compose_body: str,
+            workflow_body: str = tracked_ci,
+        ) -> None:
+            for name, body in (
+                ("renovate.json", config_body),
+                (".env.example", dotenv_body),
+                ("compose.yaml", compose_body),
+                ("ci.yml", workflow_body),
+            ):
+                (renovate_dir / name).write_text(body, encoding="utf-8", newline="\n")
+
         def renovate(
             config_body: str,
             dotenv_body: str,
             compose_body: str,
             workflow_body: str = tracked_ci,
         ) -> subprocess.CompletedProcess[str]:
-            config_fixture = renovate_dir / "renovate.json"
-            dotenv_fixture = renovate_dir / ".env.example"
-            compose_fixture = renovate_dir / "compose.yaml"
-            workflow_fixture = renovate_dir / "ci.yml"
-            for fixture, body in (
-                (config_fixture, config_body),
-                (dotenv_fixture, dotenv_body),
-                (compose_fixture, compose_body),
-                (workflow_fixture, workflow_body),
-            ):
-                fixture.write_text(body, encoding="utf-8", newline="\n")
+            write_renovate_fixtures(config_body, dotenv_body, compose_body, workflow_body)
             return tool(
                 [
                     sys.executable,
                     str(RENOVATOR),
-                    str(config_fixture),
-                    str(compose_fixture),
-                    str(dotenv_fixture),
-                    str(workflow_fixture),
+                    str(renovate_dir / "renovate.json"),
+                    str(renovate_dir / "compose.yaml"),
+                    str(renovate_dir / ".env.example"),
+                    str(renovate_dir / "ci.yml"),
                 ]
             )
 
@@ -1909,6 +2148,90 @@ def main() -> int:
         expect(
             "lint-renovate names the pin missing from compose.yaml",
             "SILO_VERSION" in r.stderr,
+            f"stderr: {r.stderr!r}",
+        )
+
+        # --- The compose half is more than one file. ---
+        # A service extracted into services/<name>/compose.yaml holds its own half of the
+        # pin, so managerFilePatterns has to select the module file too. The module is
+        # passed as a fifth path, which is what the task does with every
+        # services/*/compose.yaml; the first four keep their positions.
+        module_renovate_dir = renovate_dir / "services" / "postgres"
+        module_renovate_dir.mkdir(parents=True, exist_ok=True)
+
+        def renovate_module(config_body: str, dotenv_body: str, module_body: str) -> subprocess.CompletedProcess[str]:
+            module_fixture = module_renovate_dir / "compose.yaml"
+            module_fixture.write_text(module_body, encoding="utf-8", newline="\n")
+            # The fixtures only; running the four-path form here as well would spend a
+            # second subprocess whose result nothing reads.
+            write_renovate_fixtures(config_body, dotenv_body, annotated_compose)
+            return tool(
+                [
+                    sys.executable,
+                    str(RENOVATOR),
+                    str(renovate_dir / "renovate.json"),
+                    str(renovate_dir / "compose.yaml"),
+                    str(renovate_dir / ".env.example"),
+                    str(renovate_dir / "ci.yml"),
+                    str(module_fixture),
+                ]
+            )
+
+        module_annotated_env = annotated_env + (
+            "# renovate: datasource=docker depName=pgvector/pgvector\nPOSTGRES_VERSION=0.8.6-pg17\n"
+        )
+        module_annotated_compose = (
+            "services:\n  postgres:\n    image: pgvector/pgvector:${POSTGRES_VERSION:-0.8.6-pg17}\n"
+        )
+
+        r = renovate_module(tracked_renovate, module_annotated_env, module_annotated_compose)
+        expect(
+            "lint-renovate accepts a pin whose compose half lives in a module",
+            r.returncode == 0,
+            f"output: {(r.stdout + r.stderr)!r}",
+        )
+        # 3 = the two variables annotated_env declares plus POSTGRES_VERSION. 7 = the six
+        # references those first two carry across .env.example and the root fixture, plus
+        # the module's one. Both must move when either fixture body changes: a count that
+        # tracked the fixtures automatically could not tell a lost module reference from a
+        # smaller fixture.
+        expect(
+            "lint-renovate counts the module's reference too",
+            "OK 3 dependencies detected over 7 references" in r.stdout,
+            f"stdout: {r.stdout!r}",
+        )
+
+        # Thirteen module files will all be called compose.yaml, so the depName
+        # disagreement above has to say *which* one names the other repository. Without
+        # this case the diagnostic could go back to "a compose file" and the case above,
+        # whose fixture is the root file, would not notice.
+        r = renovate_module(
+            tracked_renovate,
+            module_annotated_env,
+            module_annotated_compose.replace("pgvector/pgvector:", "pgvector/elsewhere:"),
+        )
+        expect("lint-renovate rejects a depName a module disagrees with", r.returncode != 0, "exited 0")
+        expect(
+            "lint-renovate names the module that disagrees, not 'a compose file'",
+            "services/postgres/compose.yaml names 'pgvector/elsewhere'" in r.stderr,
+            f"stderr: {r.stderr!r}",
+        )
+
+        # …and the module pattern is load-bearing, not decoration. Every module file is
+        # named compose.yaml, so the root file's own pattern must not reach one: with only
+        # the two original patterns the bot sees the .env.example half of the module's pin
+        # and nothing else, and would open the one-file pull request lint-pins rejects.
+        root_only = [
+            entry
+            for entry in json.loads(tracked_renovate)["customManagers"][0]["managerFilePatterns"]
+            if "services" not in entry
+        ]
+        expect("the tracked patterns name the module directory", len(root_only) == 2, f"patterns: {root_only}")
+        r = renovate_module(remanaged(managerFilePatterns=root_only), module_annotated_env, module_annotated_compose)
+        expect("lint-renovate rejects file patterns blind to a module", r.returncode != 0, "exited 0")
+        expect(
+            "lint-renovate names the pin detected in one half only",
+            "POSTGRES_VERSION" in r.stderr,
             f"stderr: {r.stderr!r}",
         )
 

@@ -46,7 +46,7 @@ development_status:
   epic-1-retrospective: optional
 
   epic-2: backlog
-  2-1-the-shared-fragment-and-the-first-module: backlog
+  2-1-the-shared-fragment-and-the-first-module: done
   2-2-the-remaining-core-modules: backlog
   2-3-the-admin-and-observability-modules: backlog
   2-4-every-module-carries-its-own-contract-enforced: backlog

@@ -163,11 +163,11 @@ description = "Validate the compose configuration for every combination of the d
 cmd = "./scripts/lint-compose.sh"
 
 [tasks.lint-config]
-description = "Assert the rendered config binds locally, collides on no host port and pins every image"
+description = "Assert the rendered config binds locally, collides on no host port, pins every image, shares one logging policy, and every module stanza names a root-declared identifier only"
 cmd = "python scripts/assert_config.py"
 
 [tasks.lint-pins]
-description = "Assert every image pin agrees between .env.example and the compose.yaml fallback"
+description = "Assert every image pin agrees between .env.example and the compose fallbacks, module files included"
 cmd = "python scripts/assert_pins.py"
 
 [tasks.lint-renovate]
@@ -176,11 +176,11 @@ cmd = "python scripts/assert_renovate.py"
 
 [tasks.lint-shell]
 description = "shellcheck every shell script in the repository, the git hooks included"
-cmd = "shellcheck scripts/**/*.sh docker/postgres/initdb/*.sh .githooks/*"
+cmd = "shellcheck scripts/**/*.sh services/**/*.sh .githooks/*"
 
 [tasks.lint-yaml]
-description = "yamllint the compose file, the CI workflow and every service YAML config"
-cmd = "yamllint --strict -c .yamllint.yaml .yamllint.yaml compose.yaml .github/workflows/*.y*ml docker/**/*.y*ml"
+description = "yamllint the compose files, the shared fragment, the CI workflow and every service YAML config"
+cmd = "yamllint --strict -c .yamllint.yaml .yamllint.yaml compose.yaml common/**/*.y*ml services/**/*.y*ml .github/workflows/*.y*ml docker/**/*.y*ml"
 
 [tasks.lint-json]
 description = "Validate every JSON config parses"

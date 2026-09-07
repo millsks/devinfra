@@ -1,0 +1,57 @@
+# PostgreSQL 17 — primary datastore, Celery result backend option,
+# and Keycloak's persistence layer.
+#
+# Pulled into the model by the `include:` list in the root compose.yaml. Shared
+# configuration arrives through `extends` rather than a YAML anchor: anchors are
+# document-scoped and cannot cross a file boundary.
+#
+# Every relative path here is resolved against *this* directory, not the project
+# directory, so `./conf` and `./seed` are the module's own. `project_directory`
+# is deliberately not used — it would re-base every relative path in the file.
+#
+# The `volumes:` and `networks:` stanzas below carry the identifier and nothing
+# else. Driver keys live in the root compose.yaml, which wins on every key it
+# sets explicitly; a module adding one would silently win instead. See
+# docs/adr/0004-volume-names-are-frozen.md.
+services:
+  postgres:
+    extends:
+      file: ../../common/base.yaml
+      service: defaults
+    image: pgvector/pgvector:${POSTGRES_VERSION:-0.8.6-pg17}
+    container_name: devinfra-postgres
+    ports:
+      - "${BIND_ADDRESS:-127.0.0.1}:${POSTGRES_PORT:-5432}:5432"
+    environment:
+      POSTGRES_USER: ${POSTGRES_USER:-devinfra}
+      POSTGRES_PASSWORD: ${POSTGRES_PASSWORD:-devinfra}
+      POSTGRES_DB: ${POSTGRES_DB:-devinfra}
+      POSTGRES_EXTRA_DATABASES: ${POSTGRES_EXTRA_DATABASES:-}
+      # scram-sha-256 for anything reaching the container over TCP.
+      POSTGRES_HOST_AUTH_METHOD: scram-sha-256
+      POSTGRES_INITDB_ARGS: "--auth-host=scram-sha-256 --data-checksums"
+    volumes:
+      # The mount path is version-specific. PostgreSQL 17 keeps PGDATA at
+      # /var/lib/postgresql/data; 18 moved it to /var/lib/postgresql/18/docker
+      # and declares the volume one level up at /var/lib/postgresql. If you ever
+      # move to 18, this path must change too or the database stops persisting
+      # without any error.
+      - postgres-data:/var/lib/postgresql/data
+      - ./conf/postgresql.conf:/etc/postgresql/postgresql.conf:ro
+      - ./seed:/docker-entrypoint-initdb.d:ro
+    command: ["postgres", "-c", "config_file=/etc/postgresql/postgresql.conf"]
+    healthcheck:
+      # -h forces a TCP connection so the check also proves the listener is up,
+      # not just the local socket.
+      test: ["CMD-SHELL", "pg_isready -h 127.0.0.1 -U ${POSTGRES_USER:-devinfra} -d ${POSTGRES_DB:-devinfra}"]
+      interval: 10s
+      timeout: 5s
+      retries: 10
+      start_period: 30s
+    shm_size: 256mb
+
+volumes:
+  postgres-data:
+
+networks:
+  devinfra:
