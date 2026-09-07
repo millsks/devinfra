@@ -14,13 +14,13 @@ preserves your data — only an explicit `pixi run destroy` throws it away.
 | **Silo** | 2026-09-03 | S3-compatible object storage (maintained MinIO fork) | http://localhost:9101 (API `:9100`) |
 | **Mailpit** | 1.31 | Catches all outbound SMTP | http://localhost:8025 (SMTP `:1025`) |
 | **pgAdmin** | 9.17 | PostgreSQL web console | http://localhost:5050 |
-| **RedisInsight** | 2.70 | Redis web console | http://localhost:5540 |
+| **RedisInsight** | 3.8 | Redis web console | http://localhost:5540 |
 | **Flower** | 2.1 | Celery task monitoring | http://localhost:5555 |
 | **OTel Collector** | 0.160 | Single OTLP ingest point | `localhost:4317` (gRPC) / `:4318` (HTTP) |
 | **Prometheus** | 3.14 | Metrics | http://localhost:9090 |
-| **Loki** | 3.5 | Logs | http://localhost:3100 |
-| **Tempo** | 2.9 | Traces | http://localhost:3200 |
-| **Grafana** | 12.2 | Dashboards over all three signals | http://localhost:3000 |
+| **Loki** | 3.7 | Logs | http://localhost:3100 |
+| **Tempo** | 3.0 | Traces | http://localhost:3200 |
+| **Grafana** | 13.2 | Dashboards over all three signals | http://localhost:3000 |
 
 All ports bind to `127.0.0.1` by default, so the stack is not exposed to your
 network. Change `BIND_ADDRESS` in `.env` if you need otherwise.
@@ -181,8 +181,7 @@ pyproject.toml                  ruff and mypy settings (no package here)
 .yamllint.yaml                  YAML lint rules
 .gitattributes                  LF line endings on every checkout
 .github/workflows/ci.yml        CI: the static gate, and the stack on Docker and Podman
-.github/workflows/renovate.yml  the update bot, on a schedule; opens image-bump PRs
-renovate.json                   what the bot reads: one regex manager over the two files above
+renovate.json                   what the update bot reads: one regex manager over both files above
 .githooks/pre-commit            commit-time: execs `pixi run precommit`, nothing else
 .githooks/pre-merge-commit      the same, for the merge commits pre-commit never sees
 .githooks/commit-msg            commit-time: execs `pixi run commit-msg`, nothing else
@@ -390,11 +389,11 @@ for why `core.hooksPath` rather than the `pre-commit` framework.
 
 ## Keeping images current
 
-Every pinned tag is watched by [Renovate](https://docs.renovatebot.com).
-`.github/workflows/renovate.yml` runs the bot weekly (and on demand from the
-Actions tab); each image whose upstream has moved arrives as its own pull
-request, which `ci.yml` validates exactly like a human's. Nothing is merged
-automatically — the bot proposes, CI gates, you decide.
+Every pinned tag is watched by [Renovate](https://docs.renovatebot.com), running
+as the Mend-hosted GitHub App installed on this repository. Each image whose
+upstream has moved arrives as its own pull request, which `ci.yml` validates
+exactly like a human's. Nothing is merged automatically — the bot proposes, CI
+gates, you decide.
 
 ### The annotation contract
 
@@ -440,14 +439,26 @@ npx --yes renovate --platform=local --dry-run=extract
 
 ### What the operator must supply
 
-The bot authenticates with a repository secret named **`RENOVATE_TOKEN`** — a
-fine-grained personal access token or a GitHub App installation token with
-`contents: write`, `pull-requests: write` and `issues: write` (the last for the
-dependency dashboard issue) on this repository. It is deliberately *not* the
-workflow's own `GITHUB_TOKEN`: a pull request opened with that token triggers no
-`pull_request` workflow, so the bot's proposals would arrive looking validated
-with nothing having run. Without the secret the bot cannot authenticate and
-proposes nothing, so set it before relying on the schedule.
+Nothing. The App holds its own installation credentials, so there is no secret to
+mint, scope or rotate here — the repository ships `renovate.json` and the App
+supplies everything else. That is also why there is no workflow of our own: a
+self-hosted run and the App would both read this configuration, propose the same
+updates and race each other over identical branch names (`renovate/grafana-loki-3.x`
+is one branch, not two), so exactly one of them may exist. The App is the one.
+
+It runs on Mend's schedule rather than one written down here, which means the
+cadence is not this repository's to state. What the App is currently seeing is:
+the **Dependency Dashboard** issue it maintains lists every dependency the
+`customManagers` regexes detected, so if a pin you expect is missing from that
+issue, the regex stopped matching it — check the dashboard before assuming a tag
+is simply current.
+
+Its pull requests are checked like anyone else's. `renovate[bot]` is a separate
+app installation, not Actions' own `GITHUB_TOKEN`, so its pull requests do trigger
+`ci.yml` — `validate`, `stack` and `stack-podman` all run on them, and a bump that
+breaks the stack is red before you look at it. (A pull request opened with a
+workflow's `GITHUB_TOKEN` triggers no `pull_request` workflow at all; that is the
+trap the App sidesteps by not being a workflow.)
 
 One thing a bot pull request cannot do for you: the service table at the top of
 this README abbreviates versions (`8.10`, `12.2`), so no regex can maintain it.
@@ -475,16 +486,29 @@ that a hosted runner does not reliably provide. It needs one thing more, because
 `podman.socket` is created `root:root` mode `0660` and a non-root user cannot
 open it: a drop-in handing it to a group you are in.
 
+The drop-in sets `DirectoryMode` as well as `SocketMode`, and both are load-bearing.
+`podman.socket`'s runtime directory is created `root:root` `0700`, and a socket
+inside a directory you cannot traverse is unreachable however permissive the socket
+itself is — worse, `test -e` on that path answers false, so the socket reads as
+absent rather than as walled off, and every later step fails naming nothing.
+`DirectoryMode` governs only a directory systemd creates, so one that already exists
+— which it does whenever `podman.socket` was active before you started — keeps the
+mode it has and has to be widened by hand.
+
 ```sh
 sudo mkdir -p /etc/systemd/system/podman.socket.d
-printf '[Socket]\nSocketGroup=docker\nSocketMode=0660\n' \
+printf '[Socket]\nSocketGroup=docker\nSocketMode=0660\nDirectoryMode=0755\n' \
   | sudo tee /etc/systemd/system/podman.socket.d/devinfra-socket-group.conf
 sudo systemctl daemon-reload
 sudo systemctl enable podman.socket
 sudo systemctl restart podman.socket   # restart, not `enable --now`: an already-active
                                        # socket ignores a new drop-in until it restarts
+sudo chmod 0755 /run/podman            # no-op if systemd just created it; the fix if
+                                       # the directory was already there at 0700
 export DOCKER_HOST=unix:///run/podman/podman.sock
 ```
+
+`scripts/podman-socket.sh` is this same sequence, and is what CI runs.
 
 **macOS.** `podman machine start` reports the connection details but does not
 export anything into your shell, so set it yourself:

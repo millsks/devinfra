@@ -6,10 +6,13 @@
     "read it; scripts/assert_renovate.py is one such parser and is what proves the regexes",
     "below still match something. See docs/adr/0010-image-updates-are-proposed-by-regex-over-the-dotenv-template.md",
     "for why neither the Compose manager nor Dependabot is an option here.",
-    "prHourlyLimit and prConcurrentLimit are 0 (unlimited) because the weekly schedule in",
-    ".github/workflows/renovate.yml is already the rate limit. Renovate's defaults of 2 and 10",
-    "would cap a run at two proposals; story 1.5 alone left four images behind, so the default",
-    "would silently withhold half of them and the repository would look more current than it is."
+    "prHourlyLimit and prConcurrentLimit are 0 (unlimited) because withholding a proposal is",
+    "the one failure this configuration cannot afford. Renovate's defaults of 2 and 10 would cap",
+    "a run at two pull requests and hold the rest back silently; story 1.5 alone left four images",
+    "behind, so the default would defer half of them with no signal anywhere, and the repository",
+    "would look more current than it is. Nothing here needs a rate limit instead: this is a",
+    "13-image stack, one pull request per image, and the hosted Renovate App runs it on Mend's",
+    "own schedule rather than on anything this repository triggers."
   ],
   "enabledManagers": ["custom.regex"],
   "dependencyDashboard": true,

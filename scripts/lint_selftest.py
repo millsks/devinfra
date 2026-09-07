@@ -1241,10 +1241,17 @@ def main() -> int:
             "systemctl",
             "restart",
             "podman.socket",
+            # DirectoryMode only governs a directory systemd creates; an existing
+            # one keeps its mode, so the script widens it directly. Without this
+            # the socket is present and listening yet `test -e` reports false,
+            # which is exactly how the first hosted stack-podman run failed.
+            "chmod",
+            "0755",
+            str(socket_file.parent),
         ]
         # The whole unit body, not just the line that matters today: any other change
         # to what is written into /etc/systemd should be a deliberate edit here too.
-        dropin_body = "[Socket]\nSocketGroup=docker\nSocketMode=0660\n"
+        dropin_body = "[Socket]\nSocketGroup=docker\nSocketMode=0660\nDirectoryMode=0755\n"
 
         def fresh_socket(ci: str | None, allow: str | None, socket: Path) -> dict[str, str]:
             env = fresh()
@@ -1289,8 +1296,10 @@ def main() -> int:
             recorded(list_record) == privileged,
             f"recorded {recorded(list_record)}",
         )
-        # podman.socket is created root:root 0660; without this the non-root runner
-        # user cannot open it and every later step fails with a connection error.
+        # podman.socket is created root:root 0660 inside a root:root 0700 directory.
+        # SocketGroup/SocketMode make the socket openable; DirectoryMode makes the
+        # directory holding it traversable. Both are needed — a socket behind an
+        # untraversable directory is unreachable however permissive it is itself.
         expect(
             "podman-socket writes exactly the SocketGroup drop-in",
             (list_stdin.read_text(encoding="utf-8") if list_stdin.exists() else "") == dropin_body,
@@ -2204,7 +2213,10 @@ def main() -> int:
         if isinstance(triggers, dict):
             if path.name == "ci.yml":
                 # The gate, and the only workflow a change is checked by. It must run on
-                # both events a change can arrive as.
+                # both events a change can arrive as. The `pull_request` half is what the
+                # hosted Renovate App depends on: `renovate[bot]` is a separate installation,
+                # so its pull requests trigger this workflow like anyone's, and every image
+                # bump it proposes is checked before it can be merged.
                 for event in ("push", "pull_request"):
                     expect(f"{path.name} runs on {event}", event in triggers, f"triggers: {sorted(triggers)}")
             else:
@@ -2290,56 +2302,6 @@ def main() -> int:
             f"the {job_name} job starts exactly the profiles the model declares",
             {name.strip() for name in job_profiles.split(",") if name.strip()} == model_profiles,
             f"workflow: {job_profiles!r}; model: {sorted(model_profiles)}",
-        )
-
-    # --- The update bot is something the repository runs, not something someone remembers. ---
-    # Every assertion here is about how the bot's pull requests reach the gate above. A bot
-    # that runs and opens pull requests nothing checks is worse than no bot: the proposals
-    # look validated because the repository has CI, and they are not.
-    bot_name = "renovate.yml"
-    bot = workflows.get(bot_name)
-    expect("the repository ships the update-bot workflow", bot is not None, f"no {bot_name} in {workflow_dir}")
-    if bot is not None:
-        bot_text = (workflow_dir / bot_name).read_text(encoding="utf-8")
-        bot_steps = [step for job in (bot.get("jobs") or {}).values() for step in job.get("steps") or []]
-        uses = [str(step.get("uses")) for step in bot_steps if step.get("uses") is not None]
-        actions = [ref for ref in uses if ref.split("@")[0] == "renovatebot/github-action"]
-        expect(f"{bot_name} runs the Renovate action", bool(actions), f"uses: {uses}")
-        # A floating ref would silently change what the bot does between runs, which is the
-        # same class of drift the image pins themselves exist to remove.
-        expect(
-            f"{bot_name} pins the Renovate action",
-            all(re.fullmatch(r"renovatebot/github-action@(v\d+(?:\.\d+)*|[0-9a-f]{40})", ref) for ref in actions),
-            f"uses: {actions}",
-        )
-        # The token is the whole mechanism. A pull request opened with GITHUB_TOKEN triggers
-        # no `pull_request` workflow, so the bot's own proposals would arrive with no checks
-        # at all — pinned here rather than left to whoever configures the secret.
-        secret_names = set(re.findall(r"\$\{\{\s*secrets\.([A-Za-z0-9_]+)\s*\}\}", bot_text))
-        expect(
-            f"{bot_name} authenticates with a repository secret",
-            bool(secret_names),
-            "no secrets.* reference found",
-        )
-        expect(
-            f"{bot_name} does not authenticate with GITHUB_TOKEN",
-            "GITHUB_TOKEN" not in secret_names and "github.token" not in bot_text,
-            f"secrets referenced: {sorted(secret_names)}",
-        )
-        # Restated on the parsed model as well as in the universal loop above: this is the
-        # property that keeps the bot from becoming a second gate.
-        bot_triggers = bot.get("on", bot.get(True))
-        expect(
-            f"{bot_name} is scheduled or hand-started only",
-            isinstance(bot_triggers, dict)
-            and bool({"schedule", "workflow_dispatch"} & set(bot_triggers))
-            and not {"push", "pull_request"} & set(bot_triggers),
-            f"on: {bot_triggers!r}",
-        )
-        expect(
-            f"{bot_name} names the configuration lint-renovate checks",
-            "renovate.json" in bot_text,
-            "the workflow names no configuration file",
         )
 
     # The Podman job's runtime switch is one environment variable. Without it the job

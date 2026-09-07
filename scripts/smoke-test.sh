@@ -261,6 +261,36 @@ fi
 # ===========================================================================
 section "Observability pipeline (OTLP -> Tempo / Loki / Prometheus)"
 # ===========================================================================
+# Readiness first, and from the host. Loki 3.7 and Tempo 3.0 ship distroless
+# images holding nothing but their own binary, so compose.yaml can carry no
+# healthcheck for either and wait-healthy.sh can only see that the container is
+# running. Asserting /ready here restores the gate and puts it ahead of the
+# round-trip below, so a backend that never came up reads as itself rather than
+# as a trace or log line that never landed.
+assert_ready() {
+    local label="$1" url="$2"
+    for _ in $(seq 1 60); do
+        if curl -sf "$url" >/dev/null 2>&1; then
+            pass "$label"
+            return
+        fi
+        sleep 2
+    done
+    fail "$label" "${url} did not report ready within 120s"
+}
+
+if running loki; then
+    assert_ready "Loki reports ready" "http://${BIND}:${LOKI_PORT}/ready"
+else
+    skip "loki not running"
+fi
+
+if running tempo; then
+    assert_ready "Tempo reports ready" "http://${BIND}:${TEMPO_PORT}/ready"
+else
+    skip "tempo not running"
+fi
+
 if running otel-collector; then
     TRACE_ID="$(openssl rand -hex 16)"
     SPAN_ID="$(openssl rand -hex 8)"
