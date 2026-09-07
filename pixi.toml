@@ -17,13 +17,138 @@ mypy = "2.3.*"
 [environments]
 default = ["dev"]
 
+# ---------------------------------------------------------------------------
+# Lifecycle. Every target the Makefile exposed has an equivalent here; the
+# Makefile now forwards to these. Non-trivial logic lives in scripts/, so it can
+# be run standalone and tested — a Makefile recipe can be neither.
+#
+# pixi does not load .env into a task's environment the way `include .env` did
+# for make. `docker compose` still reads .env itself, so the compose-only tasks
+# below are unaffected; the scripts that interpolate a value at shell level load
+# .env themselves through scripts/lib/common.sh.
+# ---------------------------------------------------------------------------
+[tasks.init]
+description = "Create .env from the template if it does not exist"
+cmd = "./scripts/init-env.sh"
+
+[tasks.start]
+description = "Start the stack without waiting (profiles from COMPOSE_PROFILES)"
+depends-on = ["init"]
+cmd = "docker compose up -d"
+
+[tasks.up]
+description = "Start the stack, wait for health, print endpoints"
+depends-on = ["start", "wait", "urls"]
+
+[tasks.up-core]
+description = "Start only postgres, redis, keycloak, minio, mailpit"
+depends-on = ["init"]
+cmd = "./scripts/up-core.sh"
+
+[tasks.down]
+description = "Stop and remove containers, PRESERVING all data volumes"
+cmd = "docker compose --profile admin --profile observability down"
+
+[tasks.stop]
+description = "Stop containers without removing them"
+cmd = "docker compose --profile admin --profile observability stop"
+
+[tasks.restart]
+description = "Recreate the stack, preserving data"
+depends-on = ["down", "up"]
+
+[tasks.destroy]
+description = "DELETE ALL DATA - remove containers and every named volume"
+cmd = "./scripts/destroy.sh"
+
+[tasks.pull]
+description = "Pull newer images for every pinned tag"
+cmd = "docker compose --profile admin --profile observability pull"
+
+[tasks.wait]
+description = "Block until every container is running and every healthcheck is healthy"
+cmd = "./scripts/wait-healthy.sh"
+
+# ---------------------------------------------------------------------------
+# Inspection
+# ---------------------------------------------------------------------------
+[tasks.ps]
+description = "Show container status and health"
+cmd = "./scripts/ps.sh"
+
+[tasks.logs]
+description = "Tail logs for all services, or one: pixi run logs keycloak"
+args = [{ arg = "service", default = "" }]
+cmd = "./scripts/logs.sh '{{ service }}'"
+
+[tasks.smoke]
+description = "Run the end-to-end smoke test against the running stack"
+cmd = "./scripts/smoke-test.sh"
+
+[tasks.urls]
+description = "Print every service endpoint"
+cmd = "./scripts/urls.sh"
+
+[tasks.help]
+description = "List every task with its description"
+cmd = "pixi task list"
+
+# ---------------------------------------------------------------------------
+# Shells
+# ---------------------------------------------------------------------------
+[tasks.psql]
+description = "Open a psql shell: pixi run psql keycloak"
+args = [{ arg = "db", default = "" }]
+cmd = "./scripts/psql.sh '{{ db }}'"
+
+[tasks.redis-cli]
+description = "Open a redis-cli shell: pixi run redis-cli 1 to select a db"
+args = [{ arg = "n", default = "" }]
+cmd = "./scripts/redis-cli.sh '{{ n }}'"
+
+[tasks.mc]
+description = "Open a shell with the MinIO client configured"
+cmd = "./scripts/mc.sh"
+
+# ---------------------------------------------------------------------------
+# Data operations
+# ---------------------------------------------------------------------------
+[tasks.backup]
+description = "Dump all Postgres databases to backups/"
+cmd = "./scripts/backup.sh"
+
+[tasks.restore]
+description = "Restore a dump: pixi run restore backups/postgres-....sql.gz"
+args = [{ arg = "file", default = "" }]
+cmd = "./scripts/restore.sh '{{ file }}'"
+
+[tasks.keycloak-reimport]
+description = "Re-import the realm after editing the JSON (DESTROYS realm state)"
+cmd = "./scripts/keycloak-reimport.sh"
+
+[tasks.keycloak-export]
+description = "Export the live realm back to docker/keycloak/realms/"
+cmd = "./scripts/keycloak-export.sh"
+
+[tasks.token]
+description = "Mint an access token: pixi run token dev dev"
+args = [{ arg = "user", default = "dev" }, { arg = "password", default = "dev" }]
+cmd = "./scripts/token.sh '{{ user }}' '{{ password }}'"
+
+[tasks.config]
+description = "Render the fully resolved compose configuration"
+cmd = "docker compose --profile admin --profile observability config"
+
+# ---------------------------------------------------------------------------
+# Validation
+# ---------------------------------------------------------------------------
 [tasks.lint-compose]
 description = "Validate the compose configuration for the admin + observability profiles"
 cmd = "docker compose --profile admin --profile observability config -q"
 
 [tasks.lint-shell]
-description = "shellcheck every shell script in the repository"
-cmd = "shellcheck scripts/*.sh docker/postgres/initdb/*.sh"
+description = "shellcheck every shell script in the repository, at any depth"
+cmd = "shellcheck scripts/**/*.sh docker/postgres/initdb/*.sh"
 
 [tasks.lint-yaml]
 description = "yamllint the compose file and every service YAML config"
