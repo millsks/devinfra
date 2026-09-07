@@ -6,12 +6,16 @@
 # ones a contributor runs locally. A workflow that declared its own versions
 # would be a second, drifting definition of what CI checks.
 #
-# Both jobs are time-bounded. `timeout-minutes` enforces the 15-minute rule
+# Every job is time-bounded. `timeout-minutes` enforces the 15-minute rule
 # rather than measuring it: a breach cancels the job and turns the run red,
 # which is the signal to tier the matrix — never to drop a check.
+#
+# Three jobs: the static gate, the stack under Docker, and the same stack under
+# Podman. The two stack jobs run the same pixi tasks with the same profiles; the
+# only difference is where the Docker API lives.
 name: CI
 
-# Neither job needs more than the checkout, so the token is read-only and is not
+# No job needs more than the checkout, so the token is read-only and is not
 # left on disk for later steps to pick up.
 permissions:
   contents: read
@@ -86,4 +90,47 @@ jobs:
 
       - name: Container logs
         if: failure()
-        run: docker compose --profile admin --profile observability logs --no-color --tail=200
+        run: pixi run dump-logs
+
+  stack-podman:
+    name: stack-podman
+    # Pinned, not ubuntu-latest: the label moves to 24.04's successor with a
+    # different Podman and a different Compose major, and this job's whole value
+    # is that it says which runtime versions the stack was proved against.
+    # ubuntu-24.04 ships Podman and the Compose plugin preinstalled, so nothing
+    # here installs anything.
+    runs-on: ubuntu-24.04
+    timeout-minutes: 15
+    env:
+      # The same profiles the Docker job starts. The self-test pins this to the
+      # set the model declares, so no service is silently excluded from the
+      # Podman run — an exclusion has to be written here, with its reason in
+      # the README.
+      COMPOSE_PROFILES: admin,observability
+      # This is the whole runtime switch. The Compose client is the same stock
+      # binary the `stack` job uses; only the API it talks to changes, so
+      # depends_on ordering, health gating and `ps --format` stay identical
+      # between the two jobs. ci-podman-socket also stops Docker, so there is no
+      # daemon left to fall back to.
+      DOCKER_HOST: unix:///run/podman/podman.sock
+    steps:
+      - name: Check out the repository
+        uses: actions/checkout@v4
+        with:
+          persist-credentials: false
+
+      - name: Set up pixi
+        uses: prefix-dev/setup-pixi@v0.8.1
+        with:
+          cache: true
+
+      - name: Start the stack under Podman and prove it ran there
+        run: pixi run ci-stack-podman
+
+      - name: Container status
+        if: failure()
+        run: pixi run ps
+
+      - name: Container logs
+        if: failure()
+        run: pixi run dump-logs

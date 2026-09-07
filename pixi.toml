@@ -25,9 +25,14 @@ default = ["dev"]
 # be run standalone and tested — a Makefile recipe can be neither.
 #
 # pixi does not load .env into a task's environment the way `include .env` did
-# for make. `docker compose` still reads .env itself, so the compose-only tasks
-# below are unaffected; the scripts that interpolate a value at shell level load
-# .env themselves through scripts/lib/common.sh.
+# for make. The container runtime still reads .env itself; the scripts that
+# interpolate a value at shell level load it through scripts/lib/common.sh.
+#
+# No task body names a container runtime. Every one of them goes through
+# ./scripts/compose.sh, which expands ${DEVINFRA_COMPOSE:-docker compose} —
+# pixi.toml has no shell expansion of its own, so a task naming `docker compose`
+# here would ignore that seam and run Docker whatever the environment selected.
+# That is what lets the Podman CI job run these same tasks unmodified.
 # ---------------------------------------------------------------------------
 [tasks.init]
 description = "Create .env from the template if it does not exist"
@@ -36,7 +41,7 @@ cmd = "./scripts/init-env.sh"
 [tasks.start]
 description = "Start the stack without waiting (profiles from COMPOSE_PROFILES)"
 depends-on = ["init"]
-cmd = "docker compose up -d"
+cmd = "./scripts/compose.sh up -d"
 
 [tasks.up]
 description = "Start the stack, wait for health, print endpoints"
@@ -49,11 +54,11 @@ cmd = "./scripts/up-core.sh"
 
 [tasks.down]
 description = "Stop and remove containers, PRESERVING all data volumes"
-cmd = "docker compose --profile admin --profile observability down"
+cmd = "./scripts/compose.sh --profile admin --profile observability down"
 
 [tasks.stop]
 description = "Stop containers without removing them"
-cmd = "docker compose --profile admin --profile observability stop"
+cmd = "./scripts/compose.sh --profile admin --profile observability stop"
 
 [tasks.restart]
 description = "Recreate the stack, preserving data"
@@ -65,7 +70,7 @@ cmd = "./scripts/destroy.sh"
 
 [tasks.pull]
 description = "Pull newer images for every pinned tag"
-cmd = "docker compose --profile admin --profile observability pull"
+cmd = "./scripts/compose.sh --profile admin --profile observability pull"
 
 [tasks.wait]
 description = "Block until every container is running and every healthcheck is healthy"
@@ -82,6 +87,10 @@ cmd = "./scripts/ps.sh"
 description = "Tail logs for all services, or one: pixi run logs keycloak"
 args = [{ arg = "service", default = "" }]
 cmd = "./scripts/logs.sh '{{ service }}'"
+
+[tasks.dump-logs]
+description = "Print a bounded, uncoloured log dump for every service (CI diagnostics)"
+cmd = "./scripts/compose.sh --profile admin --profile observability logs --no-color --tail=200"
 
 [tasks.smoke]
 description = "Run the end-to-end smoke test against the running stack"
@@ -144,7 +153,7 @@ cmd = "./scripts/token.sh '{{ user }}' '{{ password }}'"
 
 [tasks.config]
 description = "Render the fully resolved compose configuration"
-cmd = "docker compose --profile admin --profile observability config"
+cmd = "./scripts/compose.sh --profile admin --profile observability config"
 
 # ---------------------------------------------------------------------------
 # Validation
@@ -191,3 +200,21 @@ depends-on = ["lint", "test"]
 [tasks.ci-stack]
 description = "Start the stack, wait for health and run the strict smoke suite"
 depends-on = ["init", "start", "wait", "smoke-strict"]
+
+# ---------------------------------------------------------------------------
+# Podman. The runtime is selected by where the Docker API lives, not by a second
+# set of task bodies: ci-stack-podman reuses init/start/wait/smoke-strict exactly
+# as ci-stack does, and the containers they create are then proved to be Podman's.
+# See docs/adr/0009-podman-is-verified-through-the-docker-compatible-socket.md.
+# ---------------------------------------------------------------------------
+[tasks.ci-podman-socket]
+description = "Stop Docker and enable Podman's API socket (CI, or an explicit opt-in)"
+cmd = "./scripts/podman-socket.sh"
+
+[tasks.assert-podman]
+description = "Prove Podman itself reports every container this run created"
+cmd = "./scripts/assert-podman.sh"
+
+[tasks.ci-stack-podman]
+description = "The stack half of CI again, against Podman, proved to have run there"
+depends-on = ["ci-podman-socket", "init", "start", "wait", "smoke-strict", "assert-podman"]

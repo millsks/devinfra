@@ -30,6 +30,12 @@ network. Change `BIND_ADDRESS` in `.env` if you need otherwise.
 - **Docker** (or a compatible engine) with the Compose plugin — runs the stack,
   and resolves the model for `pixi run lint`: `lint-compose` and `lint-config`
   both ask Compose to render the configuration, so the lint surface needs it too.
+- **Podman 5.0 or newer** works too, and CI proves it on every change — the
+  Compose plugin is still the client, pointed at Podman's API socket. 5.x is the
+  floor because the compatibility argument rests on it: `--url` implying
+  `--remote`, `start_period` honoured by the healthcheck loop, and unknown log
+  options stored rather than rejected. See
+  [Running under Podman](#running-under-podman).
 - **[pixi](https://pixi.sh)** — provisions the validation tooling (`shellcheck`,
   `yamllint`, `python`, `ruff`, `mypy`, `pyyaml`) from the committed `pixi.lock`,
   so `pixi run lint` checks the same versions on every machine, and CI checks
@@ -173,9 +179,10 @@ pixi.toml / pixi.lock           validation tasks and their pinned tools
 pyproject.toml                  ruff and mypy settings (no package here)
 .yamllint.yaml                  YAML lint rules
 .gitattributes                  LF line endings on every checkout
-.github/workflows/ci.yml        CI: the static gate and the real-stack gate
+.github/workflows/ci.yml        CI: the static gate, and the stack on Docker and Podman
 Makefile                        deprecated shims forwarding to pixi tasks
 scripts/lib/common.sh           .env loading and defaults, sourced by the rest
+scripts/compose.sh              the container runtime, honouring DEVINFRA_COMPOSE
 scripts/wait-healthy.sh         blocks until healthy; non-zero on timeout
 scripts/urls.sh                 every service endpoint
 scripts/init-env.sh             .env from the template, never overwriting
@@ -195,6 +202,8 @@ scripts/smoke-test.sh           end-to-end verification; SMOKE_STRICT=1 forbids 
 scripts/lint-compose.sh         `config -q` for every combination of declared profiles
 scripts/assert_config.py        bind address, host-port collisions and image pinning
 scripts/lint_json.py            the JSON check, one file per diagnostic
+scripts/podman-socket.sh        stops Docker and enables Podman's API socket (CI)
+scripts/assert-podman.sh        proves Podman itself reports the running containers
 scripts/lint_selftest.py        proves the lint surface and the scripts hold
 docker/
   postgres/postgresql.conf      dev-tuned config (loaded via config_file)
@@ -224,6 +233,7 @@ docker/
 | `pixi run pull` | Pull newer images for every pinned tag | `make pull` |
 | `pixi run wait` | Block until every healthcheck passes | `make wait` |
 | `pixi run ps` | Status and health of every container | `make ps` |
+| `pixi run dump-logs` | Bounded, uncoloured log dump for every service | — |
 | `pixi run logs keycloak` | Tail one service (omit the name for all) | `make logs S=keycloak` |
 | `pixi run smoke` | End-to-end verification | `make smoke` |
 | `pixi run smoke-strict` | The same suite with a skip scored as a failure | — |
@@ -243,6 +253,9 @@ docker/
 | `pixi run test` | Prove the checks and scripts hold their contracts | — |
 | `pixi run ci` | The done-gate: lint + test | — |
 | `pixi run ci-stack` | Start the stack, wait for health, run the strict smoke suite | — |
+| `pixi run ci-stack-podman` | The same, under Podman, proved to have run there | — |
+| `pixi run assert-podman` | Assert Podman reports every running container | — |
+| `pixi run ci-podman-socket` | Stop Docker and enable Podman's socket (CI only) | — |
 
 Every script behind these tasks also runs standalone — `./scripts/urls.sh`,
 `./scripts/wait-healthy.sh` — so none of this logic is trapped in a task runner.
@@ -254,16 +267,22 @@ request. It declares no tool version and installs nothing: every step is a
 `pixi run <task>` invocation, so the checks that run on a hosted runner are the
 same ones you run locally, at the versions `pixi.lock` pins.
 
-Two jobs, in parallel:
+Three jobs, in parallel:
 
 | Job | Runs | Bound |
 |---|---|---|
 | `validate` | `pixi run ci` — compose config for every profile combination, the rendered-config assertions, shell, YAML, JSON and Python lint, and the self-test | 10 minutes |
 | `stack` | `pixi run ci-stack` — starts every profile, blocks until every healthcheck passes, then runs the smoke suite in strict mode | 15 minutes |
+| `stack-podman` | `pixi run ci-stack-podman` — the same tasks with the same profiles against Podman, then asserts Podman itself is running the containers | 15 minutes |
+
+The two stack jobs share their task list exactly; only the API the Compose client
+talks to differs. `stack-podman` pins `ubuntu-24.04` rather than `ubuntu-latest`,
+because the label moves to a release with a different Podman and a different
+Compose major, which would silently change what the job proves.
 
 The time bound is enforced, not measured: `timeout-minutes` cancels a job that
-overruns and turns the run red. If the `stack` job ever breaches it, split it
-into core and full-profile jobs — never drop a check.
+overruns and turns the run red. If a stack job ever breaches it, split it into
+core and full-profile jobs — never drop a check.
 
 Nothing in the workflow can report success having checked nothing. There is no
 `continue-on-error`, no `|| true` and no `if: always()`; the only conditional
@@ -278,6 +297,102 @@ want when you started a partial selection. CI starts *every* profile, so there a
 skip is evidence the stack did not come up. `SMOKE_STRICT=1` — what
 `pixi run smoke-strict` sets — scores every skip as a failure naming the absent
 service. Nothing else about any check changes.
+
+## Running under Podman
+
+The stack runs unmodified under Podman, and CI proves it on every change rather
+than asserting it here. The client stays the stock Compose plugin; only the
+Docker API it talks to changes, so `depends_on` ordering, health gating and
+`ps --format` output are identical on both runtimes. The reasoning, and what was
+rejected, is in
+[ADR 0009](docs/adr/0009-podman-is-verified-through-the-docker-compatible-socket.md).
+
+**Linux.** Enable Podman's API socket and point `DOCKER_HOST` at it:
+
+```sh
+systemctl --user enable --now podman.socket
+export DOCKER_HOST=unix://$XDG_RUNTIME_DIR/podman/podman.sock
+pixi run up
+```
+
+Rootful is what CI uses — rootless healthchecks depend on a user systemd manager
+that a hosted runner does not reliably provide. It needs one thing more, because
+`podman.socket` is created `root:root` mode `0660` and a non-root user cannot
+open it: a drop-in handing it to a group you are in.
+
+```sh
+sudo mkdir -p /etc/systemd/system/podman.socket.d
+printf '[Socket]\nSocketGroup=docker\nSocketMode=0660\n' \
+  | sudo tee /etc/systemd/system/podman.socket.d/devinfra-socket-group.conf
+sudo systemctl daemon-reload
+sudo systemctl enable podman.socket
+sudo systemctl restart podman.socket   # restart, not `enable --now`: an already-active
+                                       # socket ignores a new drop-in until it restarts
+export DOCKER_HOST=unix:///run/podman/podman.sock
+```
+
+**macOS.** `podman machine start` reports the connection details but does not
+export anything into your shell, so set it yourself:
+
+```sh
+podman machine start
+export DOCKER_HOST="unix://$(podman machine inspect --format '{{.ConnectionInfo.PodmanSocket.Path}}')"
+```
+
+**Either, without `DOCKER_HOST`.** Every task routes through `scripts/compose.sh`,
+which honours `DEVINFRA_COMPOSE`, so this is the equivalent local form:
+
+```sh
+DEVINFRA_COMPOSE="podman compose" pixi run up
+```
+
+`podman compose` is itself a wrapper that finds `docker-compose` and sets
+`DOCKER_HOST`, so the two forms are the same path with one less indirection.
+
+### No service is excluded
+
+No service is excluded from the Podman run, and there is no quiet way to exclude
+one. The self-test pins the `stack-podman` job's `COMPOSE_PROFILES` to the
+profile set the model declares, so dropping a profile from that job reds the
+gate; the five core services carry no profile at all, so they cannot be dropped
+that way even in principle; and `smoke-strict` scores an absent service as a
+failure regardless.
+
+So excluding a service is a reviewed change, not a configuration tweak. The route
+the gate permits, in one commit: give the service its own profile in
+`compose.yaml`, leave that profile out of the `stack-podman` job's
+`COMPOSE_PROFILES`, update the self-test's profile-set assertion and the strict
+smoke suite so both expect the exclusion, and record the service and the reason
+here. Never remove it from the Docker job.
+
+Whether every service passes is the job's answer, not this file's: it starts the
+whole stack, blocks on health and runs the strict smoke suite, so a service that
+misbehaves under Podman turns the run red rather than going unrecorded.
+
+### Deviations worth knowing
+
+- **`max-file` is inert.** `compose.yaml`'s `x-logging` sets `max-size: "10m"`
+  and `max-file: "3"`. Podman's compat API accepts unknown log options without
+  complaint and reads only `path`, `max-size` and `tag`, so under Podman you get
+  one rotated log file rather than three. Nothing fails and nothing warns.
+- **`restart: unless-stopped` does not survive a reboot** unless you also
+  `systemctl enable podman-restart.service`. Podman honours the policy while it
+  is running; it has no always-on daemon to reapply it at boot.
+- **`pixi run ci-podman-socket` reconfigures the machine.** It stops
+  `docker.socket` and `docker.service` and writes a `SocketGroup=docker` drop-in
+  under `/etc/systemd/system` — necessary on a hosted runner, wrong on a
+  workstation. It refuses to run unless `CI` is truthy or you pass
+  `DEVINFRA_ALLOW_RUNTIME_SETUP=1`. You do not need it locally; the two forms
+  above are enough. `pixi run ci-stack-podman` chains it, so run that on a
+  throwaway machine only. To undo it:
+
+  ```sh
+  sudo rm -f /etc/systemd/system/podman.socket.d/devinfra-socket-group.conf
+  sudo systemctl daemon-reload
+  sudo systemctl disable --now podman.socket
+  sudo systemctl start docker.socket docker.service
+  unset DOCKER_HOST
+  ```
 
 ## Data and persistence
 
