@@ -83,6 +83,14 @@ jobs:
       - name: Start the stack, wait for health, run the strict smoke suite
         run: pixi run ci-stack
 
+      # The same suite again over a stack that has been taken down and brought back.
+      # Containers go, volumes stay, so anything that passed above only because it was
+      # written into a volume on first init fails here — which is the difference between
+      # a provisioned dashboard and one somebody saved. A step rather than a job: the
+      # cycle is only meaningful against the stack the step above left running.
+      - name: Cycle the stack and run the strict smoke suite again
+        run: pixi run ci-stack-cycle
+
       # Diagnostics, not work: they run only after the step above has already
       # failed the job, and cannot turn a red run green.
       - name: Container status

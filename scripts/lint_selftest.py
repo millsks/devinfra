@@ -26,8 +26,10 @@ which is the property the whole lint surface exists to hold.
 
 from __future__ import annotations
 
+import base64
 import contextlib
 import gzip
+import http.server
 import json
 import os
 import re
@@ -35,7 +37,9 @@ import shutil
 import subprocess
 import sys
 import tempfile
+import threading
 import tomllib
+import urllib.parse
 from collections.abc import Iterator
 from pathlib import Path
 from typing import Any
@@ -197,6 +201,42 @@ esac
 exit "$code"
 """
 
+
+#: What each backend's native API returns through Grafana's datasource proxy when the
+#: panel's query matches something. Written out rather than captured from a live stack,
+#: so the shapes the checker reads — Prometheus `data.result`, Loki `data.result`, Tempo
+#: `traces` — are stated here and a checker that started reading a different key fails.
+PROXY_ROWS: dict[str, dict[str, Any]] = {
+    "prometheus": {
+        "status": "success",
+        "data": {
+            "resultType": "vector",
+            "result": [{"metric": {"__name__": "devinfra_smoke_counter_total"}, "value": [1, "1"]}],
+        },
+    },
+    "loki": {
+        "status": "success",
+        "data": {
+            "resultType": "streams",
+            "result": [{"stream": {"service_name": "zz-selftest"}, "values": [["1", "smoke-ok"]]}],
+        },
+    },
+    "tempo": {"traces": [{"traceID": "0123456789abcdef", "rootServiceName": "zz-selftest"}]},
+}
+
+#: The same shapes with nothing in them — a backend that answered, and had no data. This
+#: is the state a "No data" panel is in, and the one the whole check exists to fail on.
+#:
+#: Tempo's empty answer omits `traces` entirely rather than sending `[]`: it is a repeated
+#: protobuf field, so a build that renders an empty search result as `{}` is answering
+#: correctly, and a checker that read that as a malformed body would report ERROR and skip
+#: the retry budget the lagging search index is the reason for. The pinned build sends the
+#: explicit empty list, which the live run covers; this is the other half.
+PROXY_EMPTY: dict[str, dict[str, Any]] = {
+    "prometheus": {"status": "success", "data": {"resultType": "vector", "result": []}},
+    "loki": {"status": "success", "data": {"resultType": "streams", "result": []}},
+    "tempo": {},
+}
 
 #: A stub standing in for `podman` and for `sudo`: it records and does nothing else.
 #:
@@ -419,6 +459,112 @@ def moved_aside(paths: list[Path]) -> Iterator[None]:
     finally:
         for hidden, original in moved:
             hidden.rename(original)
+
+
+#: The native endpoint each datasource answers on behind Grafana's proxy, and the name of
+#: the parameter that carries the panel's query. The stub 404s anything else, so a checker
+#: that started asking Prometheus for `api/v1/query_range`, or spelling Tempo's parameter
+#: `query` instead of `q`, fails the offline cases instead of staying green against a stub
+#: that answers every path the same way. Written out here because these three shapes are
+#: the whole reason the proxy can be stubbed at all.
+NATIVE_ENDPOINTS: dict[str, tuple[str, str]] = {
+    "prometheus": ("api/v1/query", "query"),
+    "loki": ("loki/api/v1/query_range", "query"),
+    "tempo": ("api/search", "q"),
+}
+
+
+@contextlib.contextmanager
+def stub_grafana(mode: str) -> Iterator[tuple[str, list[str]]]:
+    """Serve a stand-in for Grafana's datasource proxy, yielding its base URL.
+
+    A stub rather than a real Grafana because the property under test is the checker's
+    own contract — what it does with a result, with nothing, and with a refusal — and
+    that must be provable without a container runtime. The proxy speaks each backend's
+    native API, which is exactly why it can be stubbed at all: three fixed JSON shapes,
+    no query model to emulate.
+
+    Args:
+        mode: `results` answers every proxy call with one row, `empty` with none, and
+            `error` with HTTP 400 and a body whose first line names the reason. The two
+            `-once` modes answer the *first* call for each datasource that way and every
+            call after it with a row, which is how a backend that has not ingested yet
+            and a query that is simply malformed are told apart: the checker must retry
+            the first and must not retry the second. `error-later` and `empty-later`
+            are the mirrors of the two: the first call answers with a row and every one
+            after it refuses or answers with nothing, which is what a signal whose
+            *second* panel is broken looks like.
+
+    Yields:
+        The base URL to hand `--grafana-url`, and a list that accumulates the
+        `Authorization` header of every request served — empty string when a request
+        carried none — so the credential half of the URL can be asserted on.
+    """
+    seen: dict[str, int] = {}
+    authorizations: list[str] = []
+    counting = threading.Lock()
+
+    def nth(uid: str) -> int:
+        """Count this datasource's calls, returning how many came before this one.
+
+        Args:
+            uid: Datasource UID the proxy path named.
+
+        Returns:
+            The zero-based index of this call.
+        """
+        with counting:
+            before = seen.get(uid, 0)
+            seen[uid] = before + 1
+        return before
+
+    class Handler(http.server.BaseHTTPRequestHandler):
+        """Answer any datasource-proxy path according to the enclosing mode."""
+
+        def do_GET(self) -> None:
+            """Reply to one proxied query."""
+            with counting:
+                authorizations.append(self.headers.get("Authorization", ""))
+            found = re.match(r"^/api/datasources/proxy/uid/([^/]+)/([^?]*)(?:\?(.*))?$", self.path)
+            if found is None or found.group(1) not in NATIVE_ENDPOINTS:
+                self.send_error(404, "not a datasource proxy path")
+                return
+            native, parameter = NATIVE_ENDPOINTS[found.group(1)]
+            if found.group(2) != native or parameter not in urllib.parse.parse_qs(found.group(3) or ""):
+                # Not "no data": a request this datasource's real API would not recognise.
+                self.send_error(404, f"expected {native} carrying '{parameter}'")
+                return
+            first = nth(found.group(1)) == 0
+            if mode == "error" or (mode == "error-once" and first) or (mode == "error-later" and not first):
+                body = b"parse error at 1:2: syntax error: unexpected }\nthe panel query is malformed\n"
+                self.send_response(400)
+                self.send_header("Content-Type", "text/plain")
+                self.send_header("Content-Length", str(len(body)))
+                self.end_headers()
+                self.wfile.write(body)
+                return
+            empty_now = mode == "empty" or (mode == "empty-once" and first) or (mode == "empty-later" and not first)
+            table = PROXY_EMPTY if empty_now else PROXY_ROWS
+            payload = json.dumps(table[found.group(1)]).encode("utf-8")
+            self.send_response(200)
+            self.send_header("Content-Type", "application/json")
+            self.send_header("Content-Length", str(len(payload)))
+            self.end_headers()
+            self.wfile.write(payload)
+
+        def log_message(self, format: str, *args: Any) -> None:
+            """Swallow the default request log, which would bury the case output."""
+            return
+
+    server = http.server.ThreadingHTTPServer(("127.0.0.1", 0), Handler)
+    thread = threading.Thread(target=server.serve_forever, daemon=True)
+    thread.start()
+    try:
+        yield f"http://127.0.0.1:{server.server_port}", authorizations
+    finally:
+        server.shutdown()
+        server.server_close()
+        thread.join(timeout=10)
 
 
 @contextlib.contextmanager
@@ -2781,12 +2927,31 @@ def main() -> int:
         finally:
             shutil.rmtree(materialised, ignore_errors=True)
 
-        # ...and the directory sources that are legitimate stay legitimate. Grafana's
-        # drop-zone is the case the rule above has to not break: it holds nothing but
-        # .gitkeep, which is also the only reason git tracks the directory at all.
+        # ...and the directory sources that are legitimate stay legitimate. A directory
+        # holding nothing but .gitkeep is the case the rule above has to not break, and it
+        # is the way out the diagnostic itself recommends. Planted rather than pointed at a
+        # tracked directory: services/grafana/dashboards/ used to be the example and now
+        # ships a provisioned dashboard, so a case named for .gitkeep would have quietly
+        # stopped testing the thing it says. Removed whole in a finally, as `materialised` is.
+        gitkeep_only = REPO / "services" / "pgadmin" / "conf" / "zz_selftest_gitkeep_only"
+        gitkeep_only.mkdir(exist_ok=True)
+        try:
+            (gitkeep_only / ".gitkeep").write_text("", encoding="utf-8", newline="\n")
+            r = pixi("lint-config", env=fresh(document=bound(gitkeep_only, "/dashboards")))
+            expect(
+                "lint-config accepts a directory source that carries only .gitkeep",
+                r.returncode == 0,
+                f"output: {(r.stdout + r.stderr)!r}",
+            )
+        finally:
+            shutil.rmtree(gitkeep_only, ignore_errors=True)
+
+        # The shipped drop-zone is no longer near-empty, and that is the point of the
+        # story: it carries the provisioned dashboard. Asserted separately from the rule
+        # above so the two cannot be confused for one another again.
         r = pixi("lint-config", env=fresh(document=bound(REPO / "services" / "grafana" / "dashboards", "/dashboards")))
         expect(
-            "lint-config accepts a directory source that carries only .gitkeep",
+            "lint-config accepts the populated dashboards drop-zone",
             r.returncode == 0,
             f"output: {(r.stdout + r.stderr)!r}",
         )
@@ -3791,7 +3956,11 @@ def main() -> int:
             env["PATH"] = str(minimal)
             r = run_script("smoke-test.sh", env=env)
             expect("smoke-test fails when a required tool is missing", r.returncode != 0, "exited 0")
-            for needed in ("curl", "openssl", "base64"):
+            # `python3` is the DEVINFRA_PYTHON default, and it is in the list for the same
+            # reason the other three are: a deferred check written in Python fails a dozen
+            # assertions for one reason nothing reports when the interpreter is absent.
+            # Named here so dropping it from REQUIRED_TOOLS cannot pass unnoticed.
+            for needed in ("curl", "openssl", "base64", "python3"):
                 expect(f"smoke-test names {needed} as missing", needed in r.stderr, f"stderr: {r.stderr!r}")
             expect(
                 "smoke-test preflight runs before any check",
@@ -3864,6 +4033,517 @@ def main() -> int:
             r = pixi("smoke-strict", env=fresh())
             expect("the smoke-strict task fails on an absent service", r.returncode != 0, "exited 0")
             expect("the smoke-strict task prints no SKIP line", "SKIP" not in r.stdout, f"stdout: {r.stdout!r}")
+
+            # --- The `defer` seam: a check one Module registers, run after all of them. ---
+            # A check whose subject is a side effect another Module's checks produce cannot
+            # run where it is written, because the Modules are enumerated in glob order and
+            # nothing may reorder them (ADR 0015). Planted over a real Module's script the
+            # way the unparseable-body case is, so no new directory appears for lint-config
+            # to reject for unrelated reasons.
+            donor = REPO / "services" / "postgres" / "smoke.sh"
+            donor_body = donor.read_text(encoding="utf-8")
+            expect("there is a Module script to plant over", bool(donor_body), f"{donor} is empty")
+            deferring_a_pass = (
+                "# shellcheck shell=bash\n"
+                "zz_selftest_deferred() { pass 'zz-deferred-ran'; }\n"
+                "defer zz_selftest_deferred\n"
+                "pass 'zz-inline-ran'\n"
+            )
+            with moved_aside([donor]), planted(donor, deferring_a_pass):
+                r = run_script("smoke-test.sh", env=fresh(stdout="postgres\nredis\n"))
+                expect(
+                    "the driver runs a function a Module deferred",
+                    "zz-deferred-ran" in r.stdout,
+                    f"stdout: {r.stdout!r}",
+                )
+                # The ordering is the whole reason the seam exists, so it is asserted rather
+                # than assumed: the deferred line must come after the last Module's section,
+                # not merely somewhere in the output.
+                last_module = module_owners[-1]
+                expect(
+                    "a deferred function runs after every Module's script",
+                    "zz-deferred-ran" in r.stdout
+                    and "zz-inline-ran" in r.stdout
+                    and r.stdout.index("zz-inline-ran")
+                    < r.stdout.rindex(last_module)
+                    < r.stdout.index("zz-deferred-ran"),
+                    f"last Module {last_module!r}; stdout: {r.stdout!r}",
+                )
+
+            # …and its verdict is counted, not merely printed. A driver that registered the
+            # function and never invoked it would exit 0 here having reported nothing about
+            # a check the Module declared — the silent skip in its newest form. Only
+            # postgres is running, so the deferred failure is the only one there can be.
+            deferring_a_failure = (
+                "# shellcheck shell=bash\n"
+                "zz_selftest_deferred_fail() { fail 'zz-deferred-failed' 'by design'; }\n"
+                "defer zz_selftest_deferred_fail\n"
+                "pass 'zz-inline-ran'\n"
+            )
+            with moved_aside([donor]), planted(donor, deferring_a_failure):
+                r = run_script("smoke-test.sh", env=fresh(stdout="postgres\n"))
+                expect(
+                    "a deferred failure fails the suite",
+                    r.returncode != 0,
+                    "exited 0 — a registered function that never ran would look exactly like this",
+                )
+                expect(
+                    "a deferred failure is reported by name",
+                    "zz-deferred-failed" in r.stdout,
+                    f"stdout: {r.stdout!r}",
+                )
+
+            # A name no function answers to. A typo, or a module script that stopped
+            # part-way through and never reached the definition, would otherwise print
+            # `command not found` on stderr, count nothing, and leave the suite exiting 0
+            # with the registered check reporting neither pass, fail nor skip.
+            deferring_a_typo = "# shellcheck shell=bash\ndefer zz_selftest_no_such_function\npass 'zz-inline-ran'\n"
+            with moved_aside([donor]), planted(donor, deferring_a_typo):
+                r = run_script("smoke-test.sh", env=fresh(stdout="postgres\n"))
+                expect(
+                    "a deferred name that is not a function fails the suite",
+                    r.returncode != 0,
+                    "exited 0 — the registered check reported nothing at all",
+                )
+                expect(
+                    "the driver names the deferred function it could not call",
+                    "zz_selftest_no_such_function" in r.stdout,
+                    f"stdout: {r.stdout!r}",
+                )
+
+            # The FR-5 arm of the deferred dashboard check, which no other case reaches:
+            # CI starts every Module, so only a partial Selection gets here. Grafana alone
+            # is running, so the injecting Modules are absent and the check must skip
+            # naming them rather than fail on backends nobody started. The exit status is
+            # deliberately not asserted — with only grafana "running", the datasource
+            # curls in its own smoke.sh reach a real host port and are not hermetic; the
+            # skip line is the part that is.
+            r = run_script("smoke-test.sh", env=fresh(stdout="grafana\n"))
+            expect(
+                "the deferred dashboard check skips when the injecting Modules are absent",
+                "dashboard panels return data —" in r.stdout and "otel-collector" in r.stdout,
+                f"stdout: {r.stdout!r}",
+            )
+            expect(
+                "the deferred dashboard check asserts nothing when it skips",
+                "dashboard panel for" not in r.stdout,
+                f"stdout: {r.stdout!r}",
+            )
+
+            # --- The panel-render check itself, against a stub Grafana. ---
+            # A provisioned dashboard that loads is not a dashboard that works: every panel
+            # can resolve to empty while Grafana renders tidy "No data" boxes and every
+            # provisioning assertion still passes. These cases pin the four verdicts and the
+            # two refusals, with no container runtime anywhere: the checker reaches the
+            # backends through Grafana's datasource proxy, which speaks each backend's
+            # native API and can therefore be stubbed with three fixed JSON shapes.
+            checker = str(REPO / "scripts" / "check_dashboards.py")
+            shipped_dir = REPO / "services" / "grafana" / "dashboards"
+            marker = "zz-selftest-marker"
+
+            def check_dashboards(*args: str) -> subprocess.CompletedProcess[str]:
+                return tool([sys.executable, checker, "--service", marker, *args], cwd=REPO)
+
+            # The shipped dashboard, read directly rather than through the checker: an
+            # expectation derived from the thing under test agrees with whatever it says,
+            # including a dashboard that quietly lost a signal.
+            #
+            # Panel *targets* only, mirroring what the checker resolves. A whole-document
+            # walk also collects the `service` template variable's own `uid: prometheus`,
+            # which means "the shipped dashboards cover all three signals" would still
+            # pass with the metrics panel deleted — the exact regression the case exists
+            # to catch.
+            def target_uid(source: object) -> str | None:
+                if isinstance(source, dict) and isinstance(source.get("uid"), str):
+                    return str(source["uid"])
+                return source if isinstance(source, str) else None
+
+            def panels_of(node: dict[str, Any]) -> Iterator[dict[str, Any]]:
+                for panel in node.get("panels") or []:
+                    if isinstance(panel, dict):
+                        yield panel
+                        yield from panels_of(panel)
+
+            def datasource_uids(document: dict[str, Any]) -> set[str]:
+                found: set[str] = set()
+                for panel in panels_of(document):
+                    panel_uid = target_uid(panel.get("datasource"))
+                    for target in panel.get("targets") or []:
+                        if not isinstance(target, dict):
+                            continue
+                        uid = target_uid(target.get("datasource")) or panel_uid
+                        if uid is not None:
+                            found.add(uid)
+                return found
+
+            shipped_dashboards = sorted(shipped_dir.glob("*.json"))
+            expect("the Grafana Module ships a dashboard", bool(shipped_dashboards), f"{shipped_dir} holds no *.json")
+            shipped_uids: set[str] = set()
+            shipped_titles: list[str] = []
+            for path in shipped_dashboards:
+                document = json.loads(path.read_text(encoding="utf-8"))
+                shipped_uids |= datasource_uids(document)
+                shipped_titles += [
+                    panel["title"]
+                    for panel in document.get("panels", [])
+                    if isinstance(panel, dict) and isinstance(panel.get("title"), str)
+                ]
+            pinned = {"prometheus", "loki", "tempo"}
+            expect(
+                "the shipped dashboards name only the pinned datasource UIDs",
+                shipped_uids <= pinned,
+                f"{sorted(shipped_uids - pinned)} is not provisioned in datasources.yaml",
+            )
+            expect(
+                "the shipped dashboards cover all three signals",
+                pinned <= shipped_uids,
+                f"no panel targets {sorted(pinned - shipped_uids)}",
+            )
+
+            # `allowUiUpdates` is not cosmetic and its default is the wrong one here.
+            # With UI updates allowed, "Save dashboard" in the browser writes a second
+            # copy into the grafana-data volume that the tracked file no longer describes
+            # — and Grafana reports `meta.provisioned: false` even for a dashboard the
+            # file provider loaded, so the smoke suite's "provisioned from the bind mount"
+            # assertion has nothing observable to stand on. Verified against
+            # grafana/grafana:13.2.1, not assumed.
+            provider = yaml.safe_load(
+                (REPO / "services" / "grafana" / "conf" / "provisioning" / "dashboards" / "dashboards.yaml").read_text(
+                    encoding="utf-8"
+                )
+            )
+            providers = provider.get("providers") or []
+            expect("the Grafana Module provisions dashboards from a file provider", bool(providers), f"{provider!r}")
+            expect(
+                "the dashboard provider keeps the tracked file the only source of truth",
+                all(entry.get("allowUiUpdates") is False for entry in providers),
+                f"{[entry.get('allowUiUpdates') for entry in providers]} — a UI save would fork into grafana-data "
+                f"and meta.provisioned would report false for a file-provisioned dashboard",
+            )
+
+            # The credential form `services/grafana/smoke.sh` actually passes. urllib does
+            # not act on `user:pass@host`, so the checker has to split the userinfo out and
+            # send an Authorization header itself; without a case, a Grafana that required
+            # a login would answer 401 for every panel and nothing here would have said so.
+            with stub_grafana("results") as (url, authorizations):
+                credentialed = url.replace("http://", "http://zzuser:zz%3Apass@")
+                r = check_dashboards("--dashboards-dir", str(shipped_dir), "--grafana-url", credentialed)
+                expect(
+                    "check-dashboards accepts a userinfo URL",
+                    r.returncode == 0,
+                    f"exit {r.returncode}: {(r.stdout + r.stderr)!r}",
+                )
+                sent = sorted(set(authorizations))
+                expect(
+                    "check-dashboards turns the URL's userinfo into an Authorization header",
+                    bool(sent)
+                    and all(value.startswith("Basic ") for value in sent)
+                    and all(
+                        base64.b64decode(value.removeprefix("Basic ")).decode("utf-8") == "zzuser:zz:pass"
+                        for value in sent
+                    ),
+                    f"headers seen: {sent!r}",
+                )
+
+            with stub_grafana("results") as (url, _):
+                r = check_dashboards("--dashboards-dir", str(shipped_dir), "--grafana-url", url)
+                expect(
+                    "check-dashboards exits 0 when every signal answers with data",
+                    r.returncode == 0,
+                    f"exit {r.returncode}: {(r.stdout + r.stderr)!r}",
+                )
+                for signal in ("traces", "logs", "metrics"):
+                    expect(
+                        f"check-dashboards reports {signal} OK",
+                        f"{signal}: OK" in r.stdout,
+                        f"stdout: {r.stdout!r}",
+                    )
+                # The variable substitution is what makes the check about *this run's*
+                # telemetry rather than about whatever is lying in the backends. A query
+                # that kept its variable is matched by the label-value spelling
+                # `$service"`, which the panel titles — reported verbatim, as the reader
+                # will search for them in the JSON — cannot produce.
+                expect(
+                    "check-dashboards substitutes the dashboard's $service variable",
+                    marker in r.stdout and '$service"' not in r.stdout,
+                    f"stdout: {r.stdout!r}",
+                )
+
+            with stub_grafana("empty") as (url, _):
+                r = check_dashboards(
+                    "--dashboards-dir", str(shipped_dir), "--grafana-url", url, "--budget-seconds", "0"
+                )
+                expect("check-dashboards fails when a panel returns nothing", r.returncode != 0, "exited 0")
+                expect(
+                    "check-dashboards names the dashboard, the panel and the query it ran",
+                    all(f"{signal}: EMPTY" in r.stdout for signal in ("traces", "logs", "metrics"))
+                    and all(path.name in r.stdout for path in shipped_dashboards)
+                    and all(title in r.stdout for title in shipped_titles)
+                    and marker in r.stdout,
+                    f"panels {shipped_titles!r}; stdout: {r.stdout!r}",
+                )
+
+            # A first empty answer is not yet evidence of a broken panel: Tempo's search
+            # API can lag a by-ID lookup by a block flush and Prometheus needs at least one
+            # scrape interval, so the checker retries an empty signal on a bounded budget.
+            # The stub answers the first call for each datasource with nothing and every
+            # call after it with a row, so the pair below separates the two things a single
+            # case would confuse — that the retry happens at all, and that the first answer
+            # really was empty rather than the stub always saying yes.
+            with stub_grafana("empty-once") as (url, _):
+                r = check_dashboards(
+                    "--dashboards-dir",
+                    str(shipped_dir),
+                    "--grafana-url",
+                    url,
+                    "--budget-seconds",
+                    "30",
+                    "--interval-seconds",
+                    "0",
+                )
+                expect(
+                    "check-dashboards retries a signal that was empty on the first attempt",
+                    r.returncode == 0 and all(f"{signal}: OK" in r.stdout for signal in ("traces", "logs", "metrics")),
+                    f"exit {r.returncode}: {(r.stdout + r.stderr)!r}",
+                )
+
+            with stub_grafana("empty-once") as (url, _):
+                r = check_dashboards(
+                    "--dashboards-dir", str(shipped_dir), "--grafana-url", url, "--budget-seconds", "0"
+                )
+                expect(
+                    "check-dashboards reports EMPTY when the budget allows no retry",
+                    r.returncode != 0 and "EMPTY" in r.stdout,
+                    f"exit {r.returncode}: {r.stdout!r} — the retry case above would then prove nothing",
+                )
+
+            # ...and the other half of that bargain: a malformed query stays malformed, so
+            # an ERROR is terminal. The same stub, refusing only the first call per
+            # datasource: a checker that retried an ERROR the way it retries an EMPTY would
+            # get a row on the second attempt and report three passing panels.
+            with stub_grafana("error-once") as (url, _):
+                r = check_dashboards(
+                    "--dashboards-dir",
+                    str(shipped_dir),
+                    "--grafana-url",
+                    url,
+                    "--budget-seconds",
+                    "30",
+                    "--interval-seconds",
+                    "0",
+                )
+                expect(
+                    "check-dashboards never retries a query the proxy refused",
+                    r.returncode != 0 and "ERROR" in r.stdout,
+                    f"exit {r.returncode}: {r.stdout!r}",
+                )
+
+            # A signal with two panels, the second of which is broken. Every panel for a
+            # signal has to be run, not just enough of them to find data: stopping at the
+            # first that returned rows leaves the broken one unqueried, and "a panel edited
+            # into a broken query fails this check" is what the CHANGELOG, the gotchas and
+            # ADR 0015 all promise. `error-later` answers the first call per datasource
+            # with a row and refuses every one after it, which is exactly that shape.
+            two_panel_dir = stubs / "dashboards-two-panels"
+            two_panel_dir.mkdir(exist_ok=True)
+            (two_panel_dir / "two-metrics.json").write_text(
+                json.dumps(
+                    {
+                        "uid": "zz-selftest-two",
+                        "title": "two metrics panels",
+                        "panels": [
+                            {
+                                "id": 1,
+                                "title": "the working panel",
+                                "datasource": {"type": "prometheus", "uid": "prometheus"},
+                                "targets": [{"refId": "A", "expr": '{service_name="$service"}'}],
+                            },
+                            {
+                                "id": 2,
+                                "title": "the broken panel",
+                                "datasource": {"type": "prometheus", "uid": "prometheus"},
+                                "targets": [{"refId": "A", "expr": '{{{service_name="$service"}'}],
+                            },
+                        ],
+                    }
+                ),
+                encoding="utf-8",
+                newline="\n",
+            )
+            with stub_grafana("error-later") as (url, _):
+                r = check_dashboards(
+                    "--dashboards-dir", str(two_panel_dir), "--grafana-url", url, "--budget-seconds", "0"
+                )
+                expect(
+                    "check-dashboards runs every panel for a signal, not just until one returns data",
+                    r.returncode != 0 and "metrics: ERROR" in r.stdout and "the broken panel" in r.stdout,
+                    f"exit {r.returncode}: {r.stdout!r} — a first-hit OK hides the second panel entirely",
+                )
+
+            # ...and the same shape with the second panel merely *empty* rather than
+            # refused. A signal whose first panel has data and whose second renders a "No
+            # data" box is a broken dashboard: reducing to the first panel that found rows
+            # would report OK and leave the reader staring at the empty box this story
+            # exists to remove. The same stub, inverted.
+            with stub_grafana("empty-later") as (url, _):
+                r = check_dashboards(
+                    "--dashboards-dir", str(two_panel_dir), "--grafana-url", url, "--budget-seconds", "0"
+                )
+                expect(
+                    "check-dashboards reports a signal EMPTY when any of its panels returned nothing",
+                    r.returncode != 0 and "metrics: EMPTY" in r.stdout and "the broken panel" in r.stdout,
+                    f"exit {r.returncode}: {r.stdout!r} — a sibling panel with data must not mask an empty one",
+                )
+
+            # Three panel-discovery rules that the shipped dashboard, being one flat list
+            # of visible targets pinned by `datasource` objects, exercises not at all:
+            # descending into a collapsed row, skipping a target the panel author hid, and
+            # reading the bare-string `datasource` a Grafana 8 export writes. Posed in one
+            # fixture against `error-later`, which answers the first call per datasource
+            # with a row and refuses every one after: `logs: OK` therefore holds only if
+            # the folded child was found (else MISSING) *and* the hidden target was not run
+            # (else the second call refuses and the signal is ERROR).
+            row_dir = stubs / "dashboards-row"
+            row_dir.mkdir(exist_ok=True)
+            (row_dir / "folded.json").write_text(
+                json.dumps(
+                    {
+                        "uid": "zz-selftest-row",
+                        "title": "a collapsed row",
+                        "panels": [
+                            {
+                                "id": 1,
+                                "type": "row",
+                                "title": "folded away",
+                                "collapsed": True,
+                                "panels": [
+                                    {
+                                        "id": 2,
+                                        "title": "the folded panel",
+                                        "datasource": "loki",
+                                        "targets": [
+                                            {"refId": "A", "expr": '{service_name="$service"}'},
+                                            {"refId": "B", "expr": "{nonsense=", "hide": True},
+                                        ],
+                                    }
+                                ],
+                            }
+                        ],
+                    }
+                ),
+                encoding="utf-8",
+                newline="\n",
+            )
+            with stub_grafana("error-later") as (url, _):
+                r = check_dashboards("--dashboards-dir", str(row_dir), "--grafana-url", url, "--budget-seconds", "0")
+                expect(
+                    "check-dashboards runs a panel folded inside a collapsed row, and skips a hidden target",
+                    "logs: OK" in r.stdout and "the folded panel" in r.stdout,
+                    f"stdout: {r.stdout!r} — MISSING means the row was never descended, "
+                    f"ERROR means the hidden target was run",
+                )
+
+            # Only `$service` is substituted, and only when that is the whole variable
+            # name. `service_name` is the label every shipped panel filters on, so
+            # `$service_name` is a name someone will write: a plain string replace turns it
+            # into `<marker>_name` and the backend answers a valid query about a label
+            # value nobody emits — an EMPTY whose reason has nothing to do with the panel.
+            # The reported query is the substituted one, so the raw name surviving in the
+            # output is the assertion.
+            prefix_dir = stubs / "dashboards-prefix-variable"
+            prefix_dir.mkdir(exist_ok=True)
+            (prefix_dir / "other-variable.json").write_text(
+                json.dumps(
+                    {
+                        "uid": "zz-selftest-prefix",
+                        "title": "a variable whose name starts with service",
+                        "panels": [
+                            {
+                                "id": 1,
+                                "title": "two variables",
+                                "datasource": {"type": "prometheus", "uid": "prometheus"},
+                                "targets": [{"refId": "A", "expr": '{service_name="$service",tier="$service_tier"}'}],
+                            }
+                        ],
+                    }
+                ),
+                encoding="utf-8",
+                newline="\n",
+            )
+            with stub_grafana("results") as (url, _):
+                r = check_dashboards("--dashboards-dir", str(prefix_dir), "--grafana-url", url)
+                expect(
+                    "check-dashboards substitutes $service without eating a longer variable name",
+                    f'service_name="{marker}"' in r.stdout and "$service_tier" in r.stdout,
+                    f"stdout: {r.stdout!r}",
+                )
+
+            with stub_grafana("error") as (url, _):
+                r = check_dashboards(
+                    "--dashboards-dir", str(shipped_dir), "--grafana-url", url, "--budget-seconds", "0"
+                )
+                expect("check-dashboards fails when the proxy refuses a query", r.returncode != 0, "exited 0")
+                expect(
+                    "check-dashboards names the status and the reason",
+                    "ERROR" in r.stdout and "HTTP 400" in r.stdout and "syntax error" in r.stdout,
+                    f"stdout: {r.stdout!r}",
+                )
+
+            # A dashboards directory tracked only by its .gitkeep is the state this story
+            # found the repository in, and it must never read as three passing panels.
+            empty_dir = stubs / "dashboards-none"
+            empty_dir.mkdir(exist_ok=True)
+            (empty_dir / ".gitkeep").write_text("", encoding="utf-8", newline="\n")
+            r = check_dashboards("--dashboards-dir", str(empty_dir), "--grafana-url", "http://127.0.0.1:1")
+            expect("check-dashboards refuses a directory with no dashboards", r.returncode != 0, "exited 0")
+            expect(
+                "check-dashboards names the empty directory",
+                empty_dir.name in r.stderr,
+                f"stderr: {r.stderr!r}",
+            )
+
+            broken_dir = stubs / "dashboards-broken"
+            broken_dir.mkdir(exist_ok=True)
+            (broken_dir / "broken.json").write_text('{\n  "panels": [\n', encoding="utf-8", newline="\n")
+            r = check_dashboards("--dashboards-dir", str(broken_dir), "--grafana-url", "http://127.0.0.1:1")
+            expect("check-dashboards refuses a dashboard that does not parse", r.returncode != 0, "exited 0")
+            expect(
+                "check-dashboards names the unparseable file and the parse error",
+                "broken.json" in r.stderr and "invalid JSON" in r.stderr,
+                f"stderr: {r.stderr!r}",
+            )
+
+            # A signal no panel targets is a hole in the UI, not a signal that passed by
+            # having nothing to ask. Reported without a request being made at all.
+            partial_dir = stubs / "dashboards-partial"
+            partial_dir.mkdir(exist_ok=True)
+            (partial_dir / "metrics-only.json").write_text(
+                json.dumps(
+                    {
+                        "uid": "zz-selftest-partial",
+                        "title": "metrics only",
+                        "panels": [
+                            {
+                                "id": 1,
+                                "type": "timeseries",
+                                "title": "only metrics",
+                                "datasource": {"type": "prometheus", "uid": "prometheus"},
+                                "targets": [{"refId": "A", "expr": '{service_name="$service"}'}],
+                            }
+                        ],
+                    }
+                ),
+                encoding="utf-8",
+                newline="\n",
+            )
+            with stub_grafana("results") as (url, _):
+                r = check_dashboards("--dashboards-dir", str(partial_dir), "--grafana-url", url)
+                expect("check-dashboards fails when a signal has no panel", r.returncode != 0, "exited 0")
+                expect(
+                    "check-dashboards names each signal no panel covers",
+                    "traces: MISSING" in r.stdout and "logs: MISSING" in r.stdout and "metrics: OK" in r.stdout,
+                    f"stdout: {r.stdout!r}",
+                )
 
             # --- Selection, against the real runtime. ---
             # The stub has no profile semantics at all, so only Compose itself can say
@@ -4280,20 +4960,23 @@ def main() -> int:
     # job to `pixi run ps` would satisfy every assertion above while CI stopped
     # starting the stack at all.
     ci_jobs = workflows.get("ci.yml", {}).get("jobs", {})
+    # The stack job runs the suite twice, and the order is the contract: `ci-stack-cycle`
+    # takes the stack down and brings it back, so it proves nothing at all unless the run
+    # that started it came first.
     expected_work = {
-        "validate": "pixi run ci",
-        "stack": "pixi run ci-stack",
-        "stack-podman": "pixi run ci-stack-podman",
+        "validate": ["pixi run ci"],
+        "stack": ["pixi run ci-stack", "pixi run ci-stack-cycle"],
+        "stack-podman": ["pixi run ci-stack-podman"],
     }
     expect("ci.yml declares exactly the three CI jobs", set(ci_jobs) == set(expected_work), f"{set(ci_jobs)}")
-    for job_name, expected_command in expected_work.items():
+    for job_name, expected_commands in expected_work.items():
         job = ci_jobs.get(job_name, {})
         work = [
             str(step.get("run")).strip()
             for step in job.get("steps") or []
             if step.get("run") is not None and str(step.get("if", "")).strip() != "failure()"
         ]
-        expect(f"CI job {job_name} runs exactly ['{expected_command}']", work == [expected_command], f"runs {work}")
+        expect(f"CI job {job_name} runs exactly {expected_commands}", work == expected_commands, f"runs {work}")
 
     # Both stack jobs must start every Module. Equality against `config --profiles` is
     # what this used to say, and it cannot survive Selection: there are seventeen declared
@@ -4354,7 +5037,7 @@ def main() -> int:
 
     # Every task CI invokes must exist, or the workflow fails on the runner for a
     # reason no local check would have surfaced.
-    for task_name in ("ci", "ci-stack", "ci-stack-podman", "ps", "dump-logs"):
+    for task_name in ("ci", "ci-stack", "ci-stack-cycle", "ci-stack-podman", "ps", "dump-logs"):
         expect(f"pixi declares the {task_name} task CI invokes", task_name in tasks, "no such task")
 
     # --- The gate must actually reach every check. ---
@@ -4373,6 +5056,15 @@ def main() -> int:
         "`pixi run ci-stack` starts the stack, waits and runs the strict suite",
         {"start", "wait", "smoke-strict"} <= set(chain("ci-stack")),
         f"ci-stack depends on {chain('ci-stack')}",
+    )
+    # The cycle is `down` and then the same tasks again, in that order. Written as an
+    # equality because the value is entirely in the sequence: a chain that lost `down`
+    # would still pass a subset check while proving nothing about volume state, and one
+    # that ran `down` last would leave CI's diagnostics with nothing to inspect.
+    expect(
+        "`pixi run ci-stack-cycle` takes the stack down, brings it back and re-runs the strict suite",
+        chain("ci-stack-cycle") == ["down", "start", "wait", "smoke-strict"],
+        f"ci-stack-cycle depends on {chain('ci-stack-cycle')}",
     )
     # The same tasks, in the same order, plus the socket setup that puts the Docker
     # API at Podman and the gate that proves the containers ended up there. Order is

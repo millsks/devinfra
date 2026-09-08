@@ -23,6 +23,7 @@ a superseding ADR, never by editing a decided one.
 | [0012](0012-every-module-carries-its-own-contract.md) | Every Module carries its own contract | Accepted |
 | [0013](0013-selection-is-resolved-to-its-dependency-closure.md) | Selection is resolved to its dependency closure | Accepted |
 | [0014](0014-bundles-are-a-core-owned-registry.md) | Bundles are a Core-owned registry of names, not of members | Accepted |
+| [0015](0015-deferred-smoke-checks.md) | A smoke check whose subject is another Module's side effect is deferred by the driver | Accepted |
 
 ## Related
 

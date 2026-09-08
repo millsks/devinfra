@@ -1,5 +1,19 @@
 # Dashboard provider. Drop any dashboard JSON into services/grafana/dashboards/
 # and it is picked up within 30s without restarting Grafana.
+#
+# The tracked file is the only source of truth for a dashboard loaded here, which is
+# what `allowUiUpdates: false` below buys and why it is not a nicety. With UI updates
+# allowed, "Save dashboard" in the browser writes a *second* copy into the grafana-data
+# volume that the file no longer describes: the stack then shows one thing and the
+# repository says another, with nothing to reconcile them, and a `pixi run destroy`
+# silently reverts whatever anyone had built. It is also the only spelling under which
+# Grafana reports `meta.provisioned: true` — with UI updates allowed the flag is false
+# even for a dashboard the file provider loaded — so it is what makes "this came from
+# the read-only bind mount, not from volume state" an observable the smoke suite can
+# assert on rather than a claim.
+#
+# Editing in the browser still works; exporting the JSON back into
+# services/grafana/dashboards/ is how a change is kept.
 
 apiVersion: 1
 
@@ -10,7 +24,7 @@ providers:
     type: file
     disableDeletion: false
     updateIntervalSeconds: 30
-    allowUiUpdates: true
+    allowUiUpdates: false
     options:
       path: /var/lib/grafana/dashboards
       foldersFromFilesStructure: true

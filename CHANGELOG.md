@@ -100,9 +100,45 @@ can act on.
 - `pixi run lint-compose` and `lint-config` validate eighteen Selections rather
   than sixteen — the two new Bundles arrived through the resolver's own
   enumeration, with no list edited.
+- **The Grafana dashboard provider now sets `allowUiUpdates: false`.** The tracked JSON
+  is the only source of truth for a provisioned dashboard: a browser "Save dashboard"
+  used to fork a second copy into the `grafana-data` volume that no file described.
+
+  **What changes.** Dashboards provisioned from `services/grafana/dashboards/` can no
+  longer be saved from the Grafana UI. Editing in the browser still works — exporting the
+  JSON back into that directory is how a change is kept.
+
+  **Why.** It is also the only spelling under which Grafana reports `"provisioned":true`
+  for a file-provisioned dashboard, which is the observable the new smoke assertion stands
+  on. Verified against `grafana/grafana:13.2.1`.
 
 ### Added
 
+- **A provisioned Grafana dashboard, `devinfra overview`** — one panel per signal
+  (Tempo traces, Loki logs, Prometheus metrics) over a `service` dropdown, pinned to
+  the provisioned datasource UIDs. It is loaded by the existing file provider from
+  the read-only `services/grafana/dashboards/` bind mount, so it is there on a fresh
+  volume, there again after `pixi run down && pixi run up`, and always exactly what
+  the tracked JSON says — never a copy living in `grafana-data`. Grafana no longer
+  opens on an empty folder while telemetry it can already reach sits in all three
+  backends.
+- **The smoke suite renders those panels.** `pixi run smoke` now asserts the dashboard
+  reports `"provisioned":true`, then runs each panel's *own* query — read out of the
+  dashboard JSON by the new `scripts/check_dashboards.py`, never restated — through
+  Grafana's datasource proxy against the trace, log and metric the suite itself
+  injects. A panel that returns nothing, or a panel edited into a broken query, is a
+  named failure rather than a "No data" box nobody notices. A Selection without
+  `otel-collector`, `prometheus`, `loki` or `tempo` skips it naming what is absent,
+  and `SMOKE_STRICT=1` scores that skip as a failure like any other.
+- **`pixi run ci-stack-cycle`** — takes the stack down, brings it back and re-runs the
+  strict smoke suite. Containers go and volumes stay, so anything that passed only
+  because it was written into a volume on first init fails here. CI's `stack` job runs
+  it as a second step, after `ci-stack`.
+- **`defer <function-name>` in `scripts/smoke-test.sh`** — a Module script may register
+  a check to run after every Module's script has been sourced, for the one shape of
+  check whose subject is a side effect another Module's checks produce. The driver
+  still names no Module. See
+  [ADR 0015](docs/adr/0015-deferred-smoke-checks.md).
 - **Bundles** — a Core-owned registry of the Selection names that are not Modules,
   in the root `compose.yaml`'s `x-bundles:` block, each with a description and an
   approximate memory footprint:

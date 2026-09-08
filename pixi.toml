@@ -231,6 +231,17 @@ depends-on = ["lint", "test"]
 description = "Start the stack, wait for health and run the strict smoke suite"
 depends-on = ["init", "start", "wait", "smoke-strict"]
 
+# The second half of the same gate, and the only thing that proves provisioning is
+# provisioning: `down` removes the containers and keeps the volumes, so a dashboard or a
+# datasource that only exists because it was written into a volume on first init survives
+# this, while one that is re-read from its read-only bind mount is re-read here. Composed
+# entirely of tasks ci-stack already runs, so there is no second definition of what a
+# cycle is. Run after ci-stack, never instead of it — the first run is what leaves a
+# started stack for `down` to take away.
+[tasks.ci-stack-cycle]
+description = "Cycle the stack and re-run the strict smoke suite: proves nothing checked depends on first-init volume state"
+depends-on = ["down", "start", "wait", "smoke-strict"]
+
 # ---------------------------------------------------------------------------
 # Commit-time checks. The hooks in .githooks/ carry no logic and name no tool:
 # each is an `exec pixi run <task>` over a task declared here, so a commit is
