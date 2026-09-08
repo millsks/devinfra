@@ -2,7 +2,7 @@
 """Expand a requested Selection into the Modules it needs, before Compose sees it.
 
 This is the closure half of `scripts/select.sh` (AD-16). A Selection is a set of names a
-developer asks for — Module names such as `keycloak`, or group names such as `admin` — and
+developer asks for — Module names such as `keycloak`, or Bundle names such as `admin` — and
 what Compose has to be given instead is **every Module in the transitive `depends_on`
 closure of that request**. Selecting `keycloak` alone cannot work otherwise: Postgres does
 not carry the `keycloak` profile, and it cannot be made to without Keycloak editing
@@ -10,7 +10,7 @@ Postgres's file, which AD-15 forbids.
 
 Three properties define the output.
 
-* **It is always a set of Module names, never a group name.** Emitting `admin` would
+* **It is always a set of Module names, never a Bundle name.** Emitting `admin` would
   re-enter Compose's own profile semantics and select the three admin services without the
   Postgres and Redis they talk to — the exact failure AD-16 exists to prevent. Emitting the
   closure as Module names makes "exactly two containers" a property of the string, checkable
@@ -74,12 +74,23 @@ REPO = Path(__file__).resolve().parent.parent
 
 #: The request that names every Module, for the lifecycle operations that must act on the
 #: whole stack — `down`, `stop`, `pull`, `dump-logs`, `config`, `destroy`. Spelled as a flag
-#: so it can never collide with a Module or group name.
+#: so it can never collide with a Module or Bundle name.
 ALL_MODULES_REQUEST = "--all"
 
 #: The flag that prints the Selections this repository validates, one request per line, for
 #: the two enumerations that used to walk the profile power set.
 SELECTIONS_REQUEST = "--selections"
+
+#: The line a checkout whose `.env` predates Selection is told to add. Three Bundle names
+#: that between them cover every Module, so pasting it starts exactly what a bare
+#: `docker compose up` started before Selection existed (AD-18).
+#:
+#: A literal, and deliberately not read out of `.env.example` or the root `compose.yaml`:
+#: this is the message a reader sees *because* their environment is not yet in a state this
+#: resolver can trust, and reaching for another file to compose the advice would be a second
+#: way for it to fail. `lint_selftest.py` pins it against `.env.example` instead, so the two
+#: cannot drift without a named failure.
+LEGACY_UPGRADE_SELECTION = "core,admin,observability"
 
 
 def module_composes() -> list[Path]:
@@ -284,7 +295,7 @@ def closure(graph: Graph, request: list[str]) -> tuple[str, ...]:
 
     Args:
         graph: The Module dependency graph.
-        request: The names asked for, Module or group.
+        request: The names asked for, Module or Bundle.
 
     Returns:
         Every Module in the transitive `depends_on` closure, sorted.
@@ -298,9 +309,17 @@ def closure(graph: Graph, request: list[str]) -> tuple[str, ...]:
     if not request:
         raise RuntimeError(
             "no Selection was requested — COMPOSE_PROFILES is unset or empty.\n"
-            "  Set COMPOSE_PROFILES in .env to a comma-separated list of Module or group "
+            "  Set COMPOSE_PROFILES in .env to a comma-separated list of Module or Bundle "
             "names, or pass them as arguments.\n"
-            "  `pixi run init` ships a working default; a .env that lost the variable must "
+            # The concrete line, not only the variable. A .env predating Selection has no
+            # COMPOSE_PROFILES at all, and its owner's question is "what do I write?", not
+            # "which variable is missing?". This value is the whole stack — what the
+            # checkout started before Selection existed — so pasting it is a no-op upgrade
+            # and narrowing it afterwards is a deliberate choice (AD-18, ADR 0014).
+            f"  Add this line to .env to start what this stack started before Selection "
+            f"existed:\n"
+            f"    COMPOSE_PROFILES={LEGACY_UPGRADE_SELECTION}\n"
+            "  `pixi run init` ships that default; a .env that lost the variable must "
             "fail rather than start nothing and report success (AD-18).\n"
             f"  Valid names: {', '.join(graph.names())}"
         )
@@ -331,11 +350,16 @@ def selections(graph: Graph) -> list[Selection]:
     """List the Selections this repository actually validates.
 
     These replace the profile power set both `lint-compose.sh` and `assert_config.py` used
-    to walk: fifteen declared profiles is 32 768 renders, and a cap would be arbitrary. The
-    Selections that exist are the ones the resolver can name — one per Module (AD-6's
-    closure-validity, which is what makes a Module liftable), one per group, and the whole
+    to walk: seventeen declared profiles is 131 072 renders, and a cap would be arbitrary.
+    The Selections that exist are the ones the resolver can name — one per Module (AD-6's
+    closure-validity, which is what makes a Module liftable), one per Bundle, and the whole
     stack. Every duplicate-published-port collision is still caught, because the full
     Selection contains every Module.
+
+    The non-Module profiles are derived, never listed, which is why the Bundles ADR 0014
+    registers became Selections here with no change to this function. This does not read
+    the registry: `assert_config.py` is what refuses a profile the registry does not
+    register, so by the time a model passes lint-config the two sets are the same.
 
     Args:
         graph: The Module dependency graph.
@@ -347,8 +371,8 @@ def selections(graph: Graph) -> list[Selection]:
         RuntimeError: If any of those requests does not resolve.
     """
     resolved = [Selection(module, closure(graph, [module])) for module in graph.modules]
-    groups = sorted(set(graph.profiles) - set(graph.modules))
-    resolved += [Selection(group, closure(graph, [group])) for group in groups]
+    bundles = sorted(set(graph.profiles) - set(graph.modules))
+    resolved += [Selection(bundle, closure(graph, [bundle])) for bundle in bundles]
     resolved.append(Selection(ALL_MODULES_REQUEST, graph.modules))
     return resolved
 
@@ -358,7 +382,7 @@ def main(argv: list[str]) -> int:
 
     Args:
         argv: Arguments after the program name: `--all`, `--selections`, or the requested
-            Module and group names, which may arrive comma-joined in one argument.
+            Module and Bundle names, which may arrive comma-joined in one argument.
 
     Returns:
         Process exit status: 0 with the Selection on stdout, 1 with a diagnostic on stderr

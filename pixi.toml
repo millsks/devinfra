@@ -54,7 +54,7 @@ description = "Start the stack, wait for health, print endpoints"
 depends-on = ["start", "wait", "urls"]
 
 [tasks.up-core]
-description = "Start only postgres, redis, keycloak, minio, mailpit"
+description = "Start only the core Bundle: the data layer, Keycloak, object storage and Mailpit"
 depends-on = ["init"]
 cmd = "./scripts/up-core.sh"
 
@@ -180,11 +180,11 @@ env = { DEVINFRA_SELECT_ALL = "1" }
 # Validation
 # ---------------------------------------------------------------------------
 [tasks.lint-compose]
-description = "Validate the compose configuration for every Selection: each Module, each group, and every Module at once"
+description = "Validate the compose configuration for every Selection: each Module, each Bundle, and every Module at once"
 cmd = "./scripts/lint-compose.sh"
 
 [tasks.lint-config]
-description = "Assert the rendered config binds locally, collides on no host port, pins every image, shares one logging policy, every service carries its own Module profile, and every module stanza names a root-declared identifier only, redeclaring no resource the root declares with keys"
+description = "Assert the rendered config binds locally, collides on no host port, pins every image, shares one logging policy, every service carries its own Module profile and no profile the x-bundles registry does not register, every registered Bundle is joined and dependency-closed, and every module stanza names a root-declared identifier only, redeclaring no resource the root declares with keys"
 cmd = "python scripts/assert_config.py"
 
 [tasks.lint-pins]

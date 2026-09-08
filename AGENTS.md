@@ -26,13 +26,22 @@ Docker Compose stack of local development infrastructure — Postgres, Redis, Ke
   services. `x-requires:` names the provider Module and the provider's own endpoint keys, and needs the
   matching `depends_on`. Every service a Module owns declares that Module's name in `profiles:`, and
   a helper's profile set equals its primary's.
-- `COMPOSE_PROFILES` is a **Selection** — Module and group names — expanded to its transitive
+- `COMPOSE_PROFILES` is a **Selection** — Module and Bundle names — expanded to its transitive
   `depends_on` closure by `scripts/select.sh` before Compose sees it (ADR 0013). Every service
   carries its own Module name in `profiles:`, so nothing starts unless the Selection asks for it and
   an empty Selection is refused, not proceeded with. `pixi run select <names>` prints a closure.
   Every script that calls `compose` resolves first, through `select_profiles`/`select_ambient` in
   `scripts/lib/common.sh`; `lint-compose.sh` and `smoke-test.sh` are the two documented exceptions.
   A raw `docker compose --profile <module>` bypassing the resolver is expected to fail.
+- **Bundles** are the Selection names that are not Modules, and the root `compose.yaml`'s
+  `x-bundles:` registry is the only place one becomes legal (ADR 0014). Names, descriptions and
+  memory footprints live there; **membership never does** — each service declares the Bundles it
+  joins in its own `profiles:`, so a `modules:` key in a registry entry is forbidden. A service may
+  declare only its own Module name and registered Bundle names. Every registered Bundle is
+  dependency-closed by declaration, so the raw name already selects everything it needs.
+  `pixi run lint-config` fails a Bundle nothing joins, a profile nothing registers, and a Bundle
+  whose members depend outside it. `scripts/resolve_selection.py` never reads the root file — the
+  registry is a validation input, read by `scripts/assert_config.py`.
 - Changing anything under `services/<name>/` — read that Module's own `gotchas.md` first, then README
   "Gotchas worth knowing"; between them they document the traps that cost real time.
 - Architecture rules binding future changes: `_bmad-output/planning-artifacts/architecture/architecture-devinfra-2026-09-06/ARCHITECTURE-SPINE.md` (21 decisions). Rationale in `docs/adr/`.

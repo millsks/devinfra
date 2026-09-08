@@ -42,7 +42,7 @@ services:
       service: defaults
     image: pgvector/pgvector:${POSTGRES_VERSION:-0.8.6-pg17}
     container_name: devinfra-postgres
-    profiles: [postgres]
+    profiles: [postgres, minimal, core, admin]
     ports:
       - "${BIND_ADDRESS:-127.0.0.1}:${POSTGRES_PORT:-5432}:5432"
     environment:

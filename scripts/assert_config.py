@@ -8,8 +8,8 @@ source file can still render bound to every interface. Only the rendered output 
 the runtime will actually do.
 
 Five properties, one pass per Selection — the Selections `scripts/resolve_selection.py`
-names, one per Module, one per group profile and one for every Module at once (ADR 0013).
-That replaced the power set over the declared profiles: fifteen declared profiles is 32 768
+names, one per Module, one per registered Bundle and one for every Module at once (ADR 0013).
+That replaced the power set over the declared profiles: seventeen declared profiles is 131 072
 renders, and a cap on it would be arbitrary. Every duplicate-published-port collision is
 still caught, because the full Selection contains every Module.
 
@@ -34,8 +34,10 @@ still caught, because the full Selection contains every Module.
   Empty directories are rejected too, because Docker's own repair for a missing source is
   what an existence-only check would then accept forever.
 
-Three properties are read from the module files' own text instead, because the rendered model
-cannot express them.
+Four properties are read from the source files' own text instead, because the rendered model
+cannot express them. Three come from the module files; the fourth is root-sourced, because
+Compose discards a top-level `x-` key from an included file and the Bundle registry is a
+claim the root makes about the whole stack.
 
 * Every `volumes:`, `networks:`, `configs:` and `secrets:` entry in a `services/*/compose.yaml`
   names an identifier the root file already declares, and carries nothing else (AD-5). A module
@@ -67,6 +69,17 @@ cannot express them.
   check is presence-based throughout: it asks whether the six things exist, never whether
   their content was warranted — but a marker with no justification is the silent skip in
   file form, so an empty one is refused, as is a probe declared only to be turned off.
+* The root `compose.yaml`'s `x-bundles:` registry is the closed vocabulary of Selection names
+  that are not Modules (ADR 0014), and it is reconciled against the module files in both
+  directions. A registered Bundle no Module joins is a name a developer can ask for that
+  resolves to nothing; a `profiles:` entry no registry entry names is the gap that let a
+  typo'd profile invent a Selection silently; and a Bundle whose members reach outside
+  themselves through `depends_on` is closed only because `select.sh` expands it at runtime,
+  which AD-16 requires it not to be. The registry also carries each Bundle's approximate
+  memory footprint (NFR-7), where CI can require it rather than trusting prose. It is read
+  through `bundle_registry()`, never through `root_declarations()`: that coerces a
+  non-mapping to `{}`, so a malformed registry would read as "no Bundles" and every check
+  over it would pass vacuously.
 
 A Selection that renders no services is a failure, not a pass, and so is a module scan
 that found no module file: a check that walked an empty set has verified nothing, which is
@@ -88,6 +101,7 @@ import sys
 from pathlib import Path
 
 from resolve_selection import (
+    Graph,
     Selection,
     build_graph,
     depends_on_names,
@@ -115,6 +129,16 @@ BASE_FRAGMENT = REPO / "common" / "base.yaml"
 
 #: The files every Module carries beside its compose.yaml, unconditionally.
 MODULE_FILES = ("smoke.sh", "gotchas.md")
+
+#: The root `compose.yaml` key that registers the Bundle names (AD-7, ADR 0014). Names only:
+#: membership lives in each service's own `profiles:`, so it cannot drift from what starts.
+BUNDLE_KEY = "x-bundles"
+
+#: What a registry entry declares, exactly — no more and no less. `memory` is NFR-7's
+#: footprint, required here rather than left to the README so CI can insist on it. A
+#: `modules:` key would be a second, hand-maintained membership list, which is precisely
+#: what AD-7 exists to prevent, so an unexpected key is a failure rather than an extra.
+BUNDLE_ENTRY_KEYS = ("description", "memory")
 
 #: A published host port comes from a `SOMETHING_PORT` interpolation, which is what ties an
 #: `x-endpoints:` key to the port it names. Both Compose spellings are matched: `${NAME}` and
@@ -285,6 +309,117 @@ def root_declarations(stanza: str) -> dict[str, object]:
     """
     declared = read_model(REPO / "compose.yaml").get(stanza)
     return dict(declared) if isinstance(declared, dict) else {}
+
+
+def bundle_registry() -> dict[str, dict[str, str]]:
+    """Read the Bundle registry the root `compose.yaml` declares, refusing anything else.
+
+    Deliberately not `root_declarations()`: that coerces a non-mapping to `{}`, which is the
+    right answer for an absent `volumes:` and exactly the wrong one here. A registry that is
+    a list, a string, or simply gone would read as "no Bundles registered", every check over
+    it would iterate an empty set, and the closed vocabulary would silently open — the
+    pass-over-nothing this repository keeps removing. Absent, malformed and present are three
+    different answers, and only the third is acceptable.
+
+    Returns:
+        Each registered Bundle name mapped to its entry, with `description` and `memory`
+        as non-empty strings.
+
+    Raises:
+        RuntimeError: If the root file cannot be read, declares no registry, declares one
+            that is not a mapping, or declares an entry that is not a mapping of exactly
+            `description` and `memory` to non-empty strings.
+    """
+    where = f"compose.yaml: {BUNDLE_KEY}"
+    declared = read_model(REPO / "compose.yaml").get(BUNDLE_KEY)
+    if declared is None:
+        raise RuntimeError(
+            f"{where}: is not declared — it is the only place a Bundle name becomes legal "
+            f"(ADR 0014), so without it every profile that is not a Module name is "
+            f"unregistered and the vocabulary check has nothing to check against"
+        )
+    if not isinstance(declared, dict) or not declared:
+        kind = "empty" if isinstance(declared, dict) else f"{type(declared).__name__}, not a mapping"
+        raise RuntimeError(
+            f"{where}: parsed as {kind} of Bundle name to entry — read as 'no Bundles' this "
+            f"would pass every check below over an empty set while the registry it is "
+            f"supposed to hold is unreadable"
+        )
+
+    registry: dict[str, dict[str, str]] = {}
+    for raw_name, entry in declared.items():
+        name = str(raw_name)
+        if not isinstance(entry, dict):
+            raise RuntimeError(
+                f"{where}.{name}: parsed as {type(entry).__name__}, not a mapping of "
+                f"{list(BUNDLE_ENTRY_KEYS)} — a Bundle states what it is for and what it costs"
+            )
+        unexpected = sorted(str(key) for key in entry if str(key) not in BUNDLE_ENTRY_KEYS)
+        if unexpected:
+            raise RuntimeError(
+                f"{where}.{name}: declares {unexpected}, which a registry entry may not carry — "
+                f"it registers a name and nothing more. Membership is declared per service in "
+                f"its own profiles: (AD-7); a list of members here would be a second, "
+                f"hand-maintained answer to what starts, free to drift from what does"
+            )
+        fields: dict[str, str] = {}
+        for key in BUNDLE_ENTRY_KEYS:
+            value = entry.get(key)
+            if not isinstance(value, str) or not value.strip():
+                raise RuntimeError(
+                    f"{where}.{name}: declares no non-empty '{key}:' — it is {value!r}. Every "
+                    f"registered Bundle says what it is for and roughly what it costs to run "
+                    f"(NFR-7), stated here where CI can require it rather than only in prose"
+                )
+            fields[key] = value
+        registry[name] = fields
+    return registry
+
+
+def bundle_membership(registry: dict[str, dict[str, str]], graph: Graph) -> list[str]:
+    """Reconcile the registry against the membership the module files declare.
+
+    Two directions, and the registry alone can state neither. Every registered Bundle is
+    joined by at least one Module, so a name a developer can ask for always resolves to
+    something; and every registered Bundle is **dependency-closed by declaration** — the set
+    of Modules whose services declare it is closed under `depends_on` (AD-16, ADR 0014). The
+    second is the one that matters: `admin` used to work only because `select.sh` expanded it
+    at runtime, so a Bundle handed straight to Compose selected consoles without the database
+    they read. Closed by declaration means the raw name is already the whole answer.
+
+    The third direction — a `profiles:` entry naming nothing the registry registers — lives in
+    `module_contract()`, because only there is the offending module file and service in hand.
+
+    Args:
+        registry: The registry, as `bundle_registry()` returns it.
+        graph: The Module dependency graph, whose `profiles` index is the membership.
+
+    Returns:
+        One diagnostic per registered Bundle that is joined by nothing or is not closed.
+    """
+    problems: list[str] = []
+    for name in sorted(registry):
+        members = set(graph.profiles.get(name, ()))
+        if not members:
+            problems.append(
+                f"compose.yaml: {BUNDLE_KEY}.{name} is registered but no Module joins it — no "
+                f"services/*/compose.yaml declares '{name}' in a profiles: list, so "
+                f"`./scripts/select.sh {name}` names a Bundle that resolves to nothing. Register "
+                f"names that exist: add '{name}' to the profiles: of the Modules that belong to "
+                f"it, or drop the entry"
+            )
+            continue
+        for module in sorted(members):
+            outside = sorted(target for target in graph.edges.get(module, ()) if target not in members)
+            for target in outside:
+                problems.append(
+                    f"compose.yaml: {BUNDLE_KEY}.{name} is not dependency-closed — Module "
+                    f"'{module}' joins it and depends on '{target}', which does not. Every "
+                    f"registered Bundle is closed by declaration, not by the resolver expanding "
+                    f"it (AD-16): add '{name}' to the profiles: of every service "
+                    f"services/{target}/compose.yaml owns, or take '{name}' off '{module}'"
+                )
+    return problems
 
 
 def shared_logging() -> dict[str, object]:
@@ -478,7 +613,7 @@ def published_ports(services: dict[str, object]) -> tuple[set[str], list[str]]:
     return found, literal
 
 
-def module_contract(paths: list[Path]) -> list[str]:
+def module_contract(paths: list[Path], bundles: frozenset[str]) -> list[str]:
     """Assert every Module carries its own contract, and that no service escapes one.
 
     Six things per Module, and the check is presence-based: it asks whether each exists,
@@ -504,8 +639,16 @@ def module_contract(paths: list[Path]) -> list[str]:
     not expressed as `depends_on` does not exist (ADR 0002) — without that, the declaration
     would be free to drift away from the runtime edge it describes.
 
+    The profile vocabulary is closed, which is the second half of that sixth leg. A service
+    may declare its own Module name and registered Bundle names, and nothing else. Before the
+    registry existed the "another Module's name" rule was the only thing said about the list,
+    so a bogus profile alongside the correct ones — a typo, a name from a branch that never
+    landed — passed every check and quietly entered the resolver's vocabulary as a Selection
+    nobody registered and nothing describes.
+
     Args:
         paths: The module compose files to read.
+        bundles: The Bundle names the root registry registers, from `bundle_registry()`.
 
     Returns:
         One diagnostic per contract leg a Module fails to hold.
@@ -638,7 +781,7 @@ def module_contract(paths: list[Path]) -> list[str]:
                     f"actually gate on the request"
                 )
             #    …and the reverse direction, which matters just as much. A service may
-            #    carry its own Module name and group names, and nothing else: another
+            #    carry its own Module name and registered Bundle names, and nothing else: another
             #    Module's name in the list makes this Module part of *that* Module's
             #    Selection. `pgadmin` writing `profiles: [pgadmin, postgres, admin]`
             #    renders valid and passes every other gate, while
@@ -650,9 +793,27 @@ def module_contract(paths: list[Path]) -> list[str]:
                     problems.append(
                         f"{where}: module '{module}' declares the service '{name}' with the profile "
                         f"'{profile}', which is another Module's name — a service may carry its own "
-                        f"Module name and group names only. This one joins the '{profile}' Selection, "
-                        f"so `./scripts/select.sh {profile}` would start '{module}' too, and no "
-                        f"request for '{profile}' alone can leave it out (AD-15, AD-16)"
+                        f"Module name and registered Bundle names only. This one joins the "
+                        f"'{profile}' Selection, so `./scripts/select.sh {profile}` would start "
+                        f"'{module}' too, and no request for '{profile}' alone can leave it out "
+                        f"(AD-15, AD-16)"
+                    )
+                #    …and the vocabulary is closed at the other end too. A profile that is
+                #    neither this Module's own name nor a name the root registry registers
+                #    is a Selection nobody declared: `select.sh` accepts it, because its
+                #    vocabulary *is* this profile index, so a typo becomes a request name
+                #    that resolves to whatever happened to carry it, with no description and
+                #    no footprint anywhere (ADR 0014). Reported after the Module-name rule
+                #    so a name that is both keeps the more specific diagnostic as well.
+                elif profile != module and profile not in bundles:
+                    problems.append(
+                        f"{where}: module '{module}' declares the service '{name}' with the profile "
+                        f"'{profile}', which is neither its own Module name nor a Bundle the root "
+                        f"compose.yaml registers under {BUNDLE_KEY}: — the registered Bundles are "
+                        f"{sorted(bundles)}. A service may carry its own Module name and registered "
+                        f"Bundle names only; anything else enters the resolver's vocabulary as a "
+                        f"Selection nothing declares and nothing describes. Register '{profile}' in "
+                        f"{BUNDLE_KEY}:, or fix the spelling"
                     )
         #    …and a helper carries exactly what its primary carries. A helper selected by a
         #    different set is a service that starts without the primary it exists to serve,
@@ -882,8 +1043,13 @@ def main() -> int:
         return 1
 
     try:
+        # Read first: the registry is what makes the profile vocabulary closed, so a
+        # contract pass that ran without it would accept every profile it was supposed to
+        # reject. A registry that is absent or malformed is fatal here rather than a
+        # finding, for the same reason — there is nothing to check the module files against.
+        registry = bundle_registry()
         problems: list[str] = identifier_only(modules)
-        problems += module_contract(modules)
+        problems += module_contract(modules, frozenset(registry))
     except RuntimeError as exc:
         sys.stderr.write(f"assert-config: {exc}\n")
         return 1
@@ -893,16 +1059,22 @@ def main() -> int:
     passed: list[str] = [
         f"OK {len(modules)} module file(s) declare identifiers only, and redeclare no keyed root resource",
         f"OK {len(modules)} module file(s) carry the Module contract, and declare no service they do not own",
+        f"OK {len(registry)} registered Bundle(s): "
+        + ", ".join(f"{name} ({registry[name]['memory']})" for name in sorted(registry))
+        + " — each joined by at least one Module and each dependency-closed by declaration",
     ]
 
     try:
         logging = shared_logging()
         # The Selections come from the resolver, never from a list here: one per Module,
-        # one per group profile, and every Module at once (ADR 0013). That replaced the
-        # power set over the declared profiles, which at fifteen profiles is 32 768
-        # renders and would never finish.
+        # one per registered Bundle, and every Module at once (ADR 0013). That replaced
+        # the power set over the declared profiles, which at seventeen profiles is
+        # 131 072 renders and would never finish.
         graph = build_graph(modules)
         wanted = selections(graph)
+        # The registry, reconciled against the membership the module files declare. The
+        # graph is what holds that index, so this is the first point both halves exist.
+        problems += bundle_membership(registry, graph)
         # …and the model's own profile enumeration is reconciled against it, which is the
         # one thing the static parse cannot see for itself: a profile Compose reports and
         # the resolver cannot name is a Selection nothing would ever validate. Read
@@ -947,7 +1119,9 @@ def main() -> int:
 
     for line in passed:
         sys.stdout.write(f"assert-config: {line}\n")
-    sys.stdout.write(f"assert-config: OK — {len(wanted)} Selection(s), bind address {expected_bind}\n")
+    sys.stdout.write(
+        f"assert-config: OK — {len(wanted)} Selection(s), {len(registry)} Bundle(s), bind address {expected_bind}\n"
+    )
     return 0
 
 

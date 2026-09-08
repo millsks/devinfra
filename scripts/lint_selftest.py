@@ -651,11 +651,12 @@ def main() -> int:
     shared = base_model.get("services", {}).get("defaults")
     expect("common/base.yaml declares a 'defaults' service", isinstance(shared, dict), f"got {shared!r}")
     root_keys = set(root_model)
+    root_expected = {"name", "include", "volumes", "networks", "x-bundles"}
     expect(
-        "compose.yaml declares name, include, volumes and networks and nothing else",
-        root_keys == {"name", "include", "volumes", "networks"},
-        f"unexpected {sorted(root_keys - {'name', 'include', 'volumes', 'networks'})}, "
-        f"missing {sorted({'name', 'include', 'volumes', 'networks'} - root_keys)} — a service or a "
+        "compose.yaml declares name, x-bundles, include, volumes and networks and nothing else",
+        root_keys == root_expected,
+        f"unexpected {sorted(root_keys - root_expected)}, "
+        f"missing {sorted(root_expected - root_keys)} — a service or a "
         f"shared fragment back in the root file sits outside every per-module check and outside "
         f"the `include:` list that is supposed to be the record of what the stack runs",
     )
@@ -664,6 +665,156 @@ def main() -> int:
         isinstance(shared, dict) and set(shared) == {"restart", "logging", "networks"},
         f"common/base.yaml defaults declares {sorted(shared) if isinstance(shared, dict) else shared!r}",
     )
+
+    # --- The Bundle registry (ADR 0014). ---
+    # Names only, and the *only* place a Bundle name becomes legal. Asserted positively
+    # here as well as negatively below, because every negative case plants a mutated root
+    # file: if the shipped registry were itself absent or empty, every one of those cases
+    # would still red for its own reason while the real file registered nothing.
+    bundle_registry = root_model.get("x-bundles")
+    expect(
+        "compose.yaml declares a non-empty x-bundles registry",
+        isinstance(bundle_registry, dict) and bool(bundle_registry),
+        f"x-bundles is {bundle_registry!r} — read as 'no Bundles' the vocabulary would silently open",
+    )
+    registry_entries: dict[str, Any] = bundle_registry if isinstance(bundle_registry, dict) else {}
+    for bundle_name, entry in sorted(registry_entries.items()):
+        expect(
+            f"the {bundle_name} Bundle entry declares exactly a description and a memory footprint",
+            isinstance(entry, dict)
+            and set(entry) == {"description", "memory"}
+            and all(isinstance(entry[key], str) and entry[key].strip() for key in ("description", "memory")),
+            f"x-bundles.{bundle_name} is {entry!r} — every Bundle states what it is for and roughly "
+            f"what it costs (NFR-7), and a members list here would be a second, hand-maintained "
+            f"answer to what starts (AD-7)",
+        )
+    # …and the registry is exactly the non-Module vocabulary, computed independently from
+    # the module files rather than read back out of the resolver. A Bundle registered but
+    # joined by nothing, or a profile joined but registered nowhere, fails here as well as
+    # in lint-config — this is the reading that says *which* name is on the wrong side.
+    declared_profile_names: set[str] = set()
+    module_dir_names: set[str] = set()
+    for module_path in sorted((REPO / "services").glob("*/compose.yaml")):
+        module_dir_names.add(module_path.parent.name)
+        module_body = yaml.safe_load(module_path.read_text(encoding="utf-8")) or {}
+        for service_body in (module_body.get("services") or {}).values():
+            if isinstance(service_body, dict) and isinstance(service_body.get("profiles"), list):
+                declared_profile_names.update(str(name) for name in service_body["profiles"])
+    non_module_profiles = declared_profile_names - module_dir_names
+    expect(
+        "the module files declare Bundle profiles at all",
+        bool(non_module_profiles),
+        "every declared profile is a Module name, so the registry reconciliation below checks nothing",
+    )
+    expect(
+        "the x-bundles registry names exactly the profiles that are not Module names",
+        set(registry_entries) == non_module_profiles,
+        f"registered but joined by no Module: {sorted(set(registry_entries) - non_module_profiles)}; "
+        f"joined but registered nowhere: {sorted(non_module_profiles - set(registry_entries))}",
+    )
+    # The footprint lives in the registry so CI can require it (NFR-7); README.md,
+    # .env.example and CHANGELOG.md restate it, because those are where a developer
+    # deciding what to start — or deciding whether to upgrade — actually looks. Four
+    # statements of one number is drift waiting to happen, so all four are pinned to agree.
+    #
+    # Each footprint is bound to *its own* Bundle, by parsing each table into a
+    # name -> footprint mapping and comparing mappings. Two substring searches over the
+    # whole file would not do it: swap admin's and observability's figures and both strings
+    # still occur somewhere, so the check passes over prose that now says the wrong thing
+    # about both. An unanchored search also cannot tell a table row from a figure restated
+    # in a nearby sentence, which is why the prose around these tables names no figures of
+    # its own and points at the table instead.
+    registry_footprints = {
+        name: str(entry["memory"])
+        for name, entry in registry_entries.items()
+        if isinstance(entry, dict) and isinstance(entry.get("memory"), str)
+    }
+
+    # The Bundle table only: other tables in the same documents have the same row shape,
+    # so the parse starts at this table's header and stops at the first line that is not a
+    # row. Without that anchor `| \`pixi run init\` | ... |` joins the mapping. The rows are
+    # indented inside a list item in CHANGELOG.md and flush left in README.md, so both the
+    # header and the row test are taken on the stripped line.
+    def markdown_footprints(document: str) -> dict[str, str]:
+        found: dict[str, str] = {}
+        lines = document.splitlines()
+        for index, line in enumerate(lines):
+            if not line.strip().startswith("| Bundle | Memory |"):
+                continue
+            for row in lines[index + 1 :]:
+                if not row.strip().startswith("|"):
+                    break
+                cells = re.match(r"^\|\s*`([^`]+)`\s*\|\s*([^|]+?)\s*\|", row.strip())
+                if cells:
+                    found[cells.group(1)] = cells.group(2)
+            break
+        return found
+
+    readme_text = (REPO / "README.md").read_text(encoding="utf-8")
+    changelog_text = (REPO / "CHANGELOG.md").read_text(encoding="utf-8")
+    readme_footprints = markdown_footprints(readme_text)
+    changelog_footprints = markdown_footprints(changelog_text)
+    # `#   <name>  <footprint>  <description>` — the same table as a dotenv comment.
+    env_footprints = dict(
+        re.findall(
+            r"^#\s{2,}([a-z][a-z-]*)\s{2,}(~[\d.]+\s*[KMG]B)\s{2,}\S",
+            (REPO / ".env.example").read_text(encoding="utf-8"),
+            re.MULTILINE,
+        )
+    )
+    for where, found in (
+        ("README.md", readme_footprints),
+        (".env.example", env_footprints),
+        ("CHANGELOG.md", changelog_footprints),
+    ):
+        # A parse that matched nothing would make the equality below fail loudly rather
+        # than pass, but it would blame the *content* for what is really a broken parse,
+        # so the two are separated: this says the table is still where the check looks.
+        expect(
+            f"{where} still carries a Bundle table this check can read",
+            bool(found),
+            f"parsed no Bundle rows out of {where} — the table moved or changed shape, so the "
+            f"footprint pin below would be reporting on nothing",
+        )
+        expect(
+            f"{where}'s Bundle table states the footprint the registry declares, Bundle by Bundle",
+            found == registry_footprints,
+            f"{where} says {found}, the x-bundles registry says {registry_footprints} — "
+            f"differing for {sorted(k for k in set(found) | set(registry_footprints) if found.get(k) != registry_footprints.get(k))}. "
+            f"The registry and the prose are statements of one number and must agree",
+        )
+    # …and the line a legacy checkout is told to add is the one .env.example actually
+    # ships. resolve_selection.py holds it as a literal on purpose — it is the advice
+    # given precisely when the environment cannot be trusted — so the agreement is pinned
+    # here rather than by having the refusal read another file to compose its own message.
+    shipped_selection = ""
+    for line in (REPO / ".env.example").read_text(encoding="utf-8").splitlines():
+        if line.startswith("COMPOSE_PROFILES="):
+            shipped_selection = line.split("=", 1)[1].strip()
+    advised = re.search(
+        r'^LEGACY_UPGRADE_SELECTION\s*=\s*"([^"]+)"',
+        (REPO / "scripts" / "resolve_selection.py").read_text(encoding="utf-8"),
+        re.MULTILINE,
+    )
+    expect(
+        "the resolver's upgrade advice is the Selection .env.example ships",
+        advised is not None and advised.group(1) == shipped_selection and bool(shipped_selection),
+        f"resolver advises {advised.group(1) if advised else None!r}, .env.example ships "
+        f"{shipped_selection!r} — a refusal that names a line the template does not carry is "
+        f"advice that stops being true the moment the default moves",
+    )
+    # …and so do the two documents a migrating developer actually reads. The refusal is
+    # only one of the four places this line is printed: README.md's upgrade callout and
+    # CHANGELOG.md's breaking-change section each restate it verbatim, and those are the
+    # copies someone pastes into a .env. The same argument that pins the refusal pins them.
+    upgrade_advice = f"COMPOSE_PROFILES={shipped_selection}"
+    for where, document in (("README.md", readme_text), ("CHANGELOG.md", changelog_text)):
+        expect(
+            f"{where} tells a legacy checkout to add the Selection .env.example ships",
+            bool(shipped_selection) and upgrade_advice in document,
+            f"{where} never says {upgrade_advice!r} — the migration advice a developer "
+            f"pastes has drifted from the default the template carries",
+        )
 
     # `include:` is the registry, and nothing else reconciles it against the module
     # directories. A module missing from the list is linted by every check, renders
@@ -1390,6 +1541,48 @@ def main() -> int:
         expect("the refusal names the variable to fix", "COMPOSE_PROFILES" in r.stderr, f"stderr: {r.stderr!r}")
         expect("a refused Selection never reaches the runtime", not recorded(record), f"recorded {recorded(record)}")
 
+        # …and the case that actually happens to people: a real `.env` that predates
+        # Selection. The case above has no .env at all, which is a fresh clone; this one
+        # is a file full of working values that simply never had the line, and a second
+        # with the line present but empty. Both are driven through the task surface —
+        # `pixi run start`, what a developer types — rather than through the script
+        # directly, because `start` depends on `init` and a refusal that happened after
+        # init had already run would be a refusal that still touched the checkout.
+        #
+        # The advice is asserted, not just the variable name. "COMPOSE_PROFILES is unset"
+        # tells a reader which line is missing and nothing about what to write in it, and
+        # the value that answers that question is a Bundle list that did not exist before
+        # this story — which is why the release note and the registry ship together.
+        upgrade_line = "COMPOSE_PROFILES=core,admin,observability"
+        legacy_env = (
+            "# A .env written before Selection existed.\n"
+            "POSTGRES_USER=zzuser\n"
+            "POSTGRES_DB=zzdb\n"
+            "REDIS_PASSWORD=zzpass\n"
+        )
+        for case, body in (
+            ("a legacy .env with no COMPOSE_PROFILES line", legacy_env),
+            ("a .env whose COMPOSE_PROFILES is empty", legacy_env + "COMPOSE_PROFILES=\n"),
+        ):
+            with planted(REPO / ".env", body):
+                r = pixi("start", env=fresh(request=None))
+                expect(f"the task surface refuses {case}", r.returncode != 0, "exited 0 with nothing selected")
+                expect(
+                    f"the refusal for {case} names the variable",
+                    "COMPOSE_PROFILES" in r.stderr,
+                    f"stderr: {r.stderr!r}",
+                )
+                expect(
+                    f"the refusal for {case} names the exact line to add",
+                    upgrade_line in r.stderr,
+                    f"never said {upgrade_line!r}; stderr: {r.stderr!r}",
+                )
+                expect(
+                    f"nothing is started for {case}",
+                    not recorded(record),
+                    f"the container runtime was invoked: {recorded(record)}",
+                )
+
         # --- The resolver's interpreter is a seam, and a missing PyYAML is a diagnostic. ---
         # Every lifecycle script runs Python now, where none did before, so the two ways
         # that can fail outside pixi are pinned: the DEVINFRA_PYTHON escape hatch the
@@ -1732,15 +1925,22 @@ def main() -> int:
             unreadable.chmod(0o644)
 
         # --- lint-compose: one `config -q` per Selection this repository can name. ---
-        # Every Module's own closure, every group profile's closure, and every Module at
-        # once (ADR 0013). The power set that used to stand here is gone: with a profile
-        # on every service it is 2^15 renders, which would never finish.
+        # Every Module's own closure, every Bundle's closure, and every Module at once
+        # (ADR 0013). The power set that used to stand here is gone: with a profile on
+        # every service it is 2^17 renders, which would never finish.
+        #
+        # The four Bundles are written out rather than read from the registry: an
+        # expectation taken from the file under test agrees with whatever that file
+        # happens to say, including a Bundle quietly dropped from lint-compose's
+        # enumeration. `lint-compose.sh` itself is unchanged by ADR 0014 — it enumerates
+        # from `select.sh --selections`, so it picked the two new Bundles up by
+        # construction, and this is what proves it did.
         #
         # The resolver needs no stub of its own — it parses the real
         # services/*/compose.yaml — so the Selections and the value each one exports are
         # deterministic and can be pinned exactly.
-        two = "admin\nobservability\n"
-        groups = ["admin", "observability"]
+        two = "admin\ncore\nminimal\nobservability\n"
+        groups = ["admin", "core", "minimal", "observability"]
         expected_requests = [*every_module, *groups, "--all"]
         # One `config --profiles` to read the declared groups, then one `config -q` per
         # Selection. No --profile flag anywhere: the Selection travels in the environment.
@@ -1752,7 +1952,7 @@ def main() -> int:
             f"exit {r.returncode}: {(r.stdout + r.stderr)!r}",
         )
         expect(
-            "lint-compose validates one Selection per Module, per group and one for every Module",
+            "lint-compose validates one Selection per Module, per Bundle and one for every Module",
             recorded(record) == every_selection,
             f"recorded {recorded(record)}; expected {len(expected_requests)} Selections",
         )
@@ -1765,7 +1965,7 @@ def main() -> int:
             if line.startswith("lint-compose: Selection ")
         }
         expect(
-            "lint-compose names every Module, every group and the all-Modules request",
+            "lint-compose names every Module, every Bundle and the all-Modules request",
             printed == set(expected_requests),
             f"missing {sorted(set(expected_requests) - printed)}, unexpected {sorted(printed - set(expected_requests))}",
         )
@@ -1780,8 +1980,22 @@ def main() -> int:
             f"observed {exported}",
         )
         expect(
-            "lint-compose expands the admin group to its closure, not to 'admin'",
+            "lint-compose expands the admin Bundle to its closure, not to 'admin'",
             "COMPOSE_PROFILES=flower,pgadmin,postgres,redis,redisinsight" in exported,
+            f"observed {exported}",
+        )
+        # …and the two Bundles ADR 0014 registers reach it the same way, through the
+        # resolver's own enumeration. lint-compose.sh names no Bundle of its own, so a
+        # registry entry no Module joins would surface here as a Selection that resolves
+        # to nothing rather than as a name this file forgot to list.
+        expect(
+            "lint-compose validates the core Bundle's closure",
+            "COMPOSE_PROFILES=keycloak,mailpit,minio,postgres,redis" in exported,
+            f"observed {exported}",
+        )
+        expect(
+            "lint-compose validates the minimal Bundle's closure",
+            "COMPOSE_PROFILES=postgres,redis" in exported,
             f"observed {exported}",
         )
         expect(
@@ -2238,6 +2452,34 @@ def main() -> int:
                 complete_siblings,
                 ["zz-selftest-contract", "postgres"],
             ),
+            # ADR 0014's leg, and the gap story 2-5 left open. A profile that is neither
+            # this Module's own name nor a name the root registry registers passed every
+            # check before the registry existed: `select.sh` accepts it, because its
+            # vocabulary *is* this profile index, so a typo silently became a request name
+            # resolving to whatever happened to carry it, with nothing describing it and no
+            # footprint anywhere. Note it is *not* another Module's name, so the AD-15 leg
+            # above cannot catch it — this needs the registry to be checkable at all.
+            (
+                "a profile no x-bundles entry registers",
+                complete_body.replace(own_profile, "    profiles: [zz-selftest-contract, zz-nosuch]\n"),
+                complete_siblings,
+                ["zz-selftest-contract", "zz-nosuch"],
+            ),
+            # …and the closure half of the same decision. A registered Bundle is
+            # dependency-closed *by declaration*: the Modules that join it are closed under
+            # depends_on, so handing the raw name to Compose already selects everything it
+            # needs. This fixture joins `minimal` and depends on a Module that has not, which
+            # is exactly the shape `admin` was in before this story — working only because
+            # `select.sh` expanded it at runtime, and broken the moment anything did not.
+            (
+                "a Module that breaks a Bundle open by depending outside it",
+                complete_body.replace(own_profile, "    profiles: [zz-selftest-contract, minimal]\n").replace(
+                    '      test: ["CMD", "true"]\n',
+                    '      test: ["CMD", "true"]\n    depends_on:\n      - mailpit\n',
+                ),
+                complete_siblings,
+                ["minimal", "zz-selftest-contract", "mailpit"],
+            ),
             # The helper half. `minio-init` takes `[minio]`, identical to its primary:
             # a helper selected by a different set either starts without the service it
             # exists to serve, or is left behind when that service is selected. The
@@ -2284,6 +2526,100 @@ def main() -> int:
                 r.returncode == 0,
                 f"output: {(r.stdout + r.stderr)!r}",
             )
+
+        # …and joining a Bundle the registry *does* register is accepted, which is the
+        # branch every negative above shares and none of them proves. A vocabulary check
+        # inverted to reject every non-Module profile would red every case above for the
+        # right-looking reason while making the four shipped Bundles undeclarable.
+        with contract_fixture(
+            complete_body.replace(own_profile, "    profiles: [zz-selftest-contract, observability]\n"),
+            complete_siblings,
+        ):
+            r = pixi("lint-config", env=fresh(document=clean_doc))
+            expect(
+                "lint-config accepts a Module joining a registered Bundle",
+                r.returncode == 0,
+                f"output: {(r.stdout + r.stderr)!r}",
+            )
+
+        # --- The Bundle registry itself, mutated in the root compose.yaml (ADR 0014). ---
+        # Staged with moved_aside + planted rather than by editing in place: the real file
+        # is renamed, the mutation is written at its path, and the original comes back
+        # however the case ends. planted() refuses a path that already exists, so the pair
+        # cannot silently overwrite tracked content if the rename ever failed.
+        #
+        # The mutations are built by round-tripping the real model through YAML rather than
+        # by string surgery, so a case cannot accidentally take `volumes:` or `include:`
+        # with it and red for a reason that has nothing to do with the registry.
+        root_source = REPO / "compose.yaml"
+        root_text = root_source.read_text(encoding="utf-8")
+        root_parsed = yaml.safe_load(root_text)
+
+        def root_with(registry: Any) -> str:
+            mutated = dict(root_parsed)
+            if registry is None:
+                mutated.pop("x-bundles", None)
+            else:
+                mutated["x-bundles"] = registry
+            return str(yaml.safe_dump(mutated, sort_keys=False, default_flow_style=False))
+
+        # `.get`, not indexing: an absent or malformed registry is already a named failure
+        # from the positive assertions near the top of this run, and a KeyError here would
+        # abort the whole self-test before it reported that failure — losing the diagnostic
+        # behind a traceback about the fixture that was trying to describe it.
+        shipped = dict(root_parsed.get("x-bundles") or {})
+        minimal_entry = shipped.get("minimal")
+        shipped_minimal: dict[str, Any] = minimal_entry if isinstance(minimal_entry, dict) else {}
+        unjoined = {**shipped, "zz-unjoined": {"description": "nothing joins this", "memory": "~1 MB"}}
+        no_memory = {**shipped, "minimal": {"description": shipped_minimal.get("description", "the data layer")}}
+        extra_key = {
+            **shipped,
+            "minimal": {**shipped_minimal, "modules": ["postgres", "redis"]},
+        }
+
+        registry_cases: list[tuple[str, Any, list[str]]] = [
+            # A name a developer can ask for that resolves to nothing. This is the
+            # enumeration proved load-bearing: a membership check that named no Bundle
+            # would pass over an empty set and say so in an OK line.
+            ("a registered Bundle no Module joins", unjoined, ["zz-unjoined"]),
+            # The footprint is NFR-7's requirement, and it lives here rather than only in
+            # the README precisely so CI can insist on it.
+            ("a registry entry with no memory footprint", no_memory, ["minimal", "memory"]),
+            # A members list is the drift AD-7 exists to prevent: a second, hand-maintained
+            # answer to what starts, free to disagree with the profiles: that decide it.
+            ("a registry entry carrying a members list", extra_key, ["minimal", "modules"]),
+            # …and the two malformed shapes. Both must be read as "this registry is
+            # unreadable", never as "there are no Bundles": root_declarations() coerces a
+            # non-mapping to {} and would do exactly that, which is why the registry has a
+            # reader of its own.
+            ("a registry that is a list", ["minimal", "core"], ["x-bundles"]),
+            # …and the third unreadable shape, which is the one that looks most like an
+            # answer: a well-formed mapping holding nothing. Read as "there are no
+            # Bundles" it would pass the membership check over an empty set and sign off.
+            ("an empty registry", {}, ["x-bundles"]),
+            ("no registry at all", None, ["x-bundles"]),
+        ]
+        for case, registry, needles in registry_cases:
+            with moved_aside([root_source]):
+                with planted(root_source, root_with(registry)):
+                    r = pixi("lint-config", env=fresh(document=clean_doc))
+                    expect(f"lint-config rejects {case}", r.returncode != 0, "exited 0")
+                    unsaid = [needle for needle in needles if needle not in r.stderr]
+                    expect(
+                        f"lint-config names the registry defect for {case}",
+                        not unsaid,
+                        f"never said {unsaid}; stderr: {r.stderr!r}",
+                    )
+                    expect(
+                        f"lint-config signs off on nothing for {case}",
+                        "OK" not in r.stdout,
+                        f"stdout: {r.stdout!r}",
+                    )
+        expect(
+            "the root compose.yaml is restored byte-for-byte after the registry cases",
+            root_source.read_text(encoding="utf-8") == root_text,
+            "the real root file did not come back unchanged",
+        )
 
         # …and the brace-less interpolation Compose accepts just as readily. A pattern that
         # only matched `${NAME}` would let `$NAME` publish a port that no endpoint had to
@@ -2341,6 +2677,18 @@ def main() -> int:
             "lint-config reports the Module contract over every tracked module file",
             f"OK {len(tracked_modules)} module file(s) carry the Module contract" in r.stdout,
             f"{len(tracked_modules)} module files; stdout: {r.stdout!r}",
+        )
+        # The registry line names its number for the same reason. "OK 0 registered
+        # Bundle(s)" is a sentence a check that iterated nothing writes just as happily,
+        # and it is the sentence a malformed registry read as `{}` would have produced.
+        expect(
+            "lint-config reports every registered Bundle by name and footprint",
+            f"OK {len(registry_entries)} registered Bundle(s)" in r.stdout
+            # Read from registry_footprints, which already skipped any entry carrying no
+            # string `memory:` — that entry is a named failure of its own further up, and
+            # indexing it here would abort the run rather than let that failure be reported.
+            and all(f"{name} ({footprint})" in r.stdout for name, footprint in registry_footprints.items()),
+            f"{len(registry_entries)} Bundles registered; stdout: {r.stdout!r}",
         )
 
         # The module scan's own guard. Without a case, the `if not modules` return could be
@@ -3571,6 +3919,11 @@ def main() -> int:
                 "grafana": {"grafana", "prometheus", "loki", "tempo"},
                 "admin": {"pgadmin", "redisinsight", "flower", "postgres", "redis"},
                 "observability": {"otel-collector", "prometheus", "loki", "tempo", "grafana"},
+                # The two Bundles ADR 0014 registers. `core` is the five services
+                # up-core.sh used to name one by one — plus minio-init, which takes its
+                # primary's profile set exactly — and `minimal` is the data layer alone.
+                "core": {"postgres", "redis", "keycloak", "minio", "minio-init", "mailpit"},
+                "minimal": {"postgres", "redis"},
             }
             expect(
                 "every Module has a membership expectation of its own",
@@ -3584,6 +3937,49 @@ def main() -> int:
                     selected == members,
                     f"unexpected {sorted(selected - members)}, missing {sorted(members - selected)}",
                 )
+
+            # …and Bundles compose. A multi-Bundle request is the shape a developer
+            # actually types once more than one Bundle exists, and it is its own case:
+            # every membership above is a single name, so a resolver that dropped all but
+            # the first request, or that failed to union two closures, would pass every
+            # one of them. `core,observability` is the two disjoint Bundles, so its answer
+            # is exactly the union of theirs and nothing has to be restated here.
+            composed = expected_members["core"] | expected_members["observability"]
+            expect(
+                "the core,observability Selection renders both Bundles and nothing else",
+                selects(resolve_names("core,observability")) == composed,
+                f"expected {sorted(composed)}, got {sorted(selects(resolve_names('core,observability')))}",
+            )
+
+            # Adding Bundle names to a service's `profiles:` must change what *no*
+            # existing Selection resolves to — profiles are added to, never replaced. The
+            # three that could have moved are pinned as literal strings rather than
+            # recomputed: `admin` gained Postgres and Redis as members, which is what makes
+            # it dependency-closed by declaration, and the whole argument that the change
+            # is inert is that its closure is the same five it always was. Postgres gained
+            # three Bundle names and still answers only to `postgres`; Keycloak gained
+            # `core` and still pulls in exactly Mailpit and Postgres.
+            for request, unchanged in (
+                ("admin", "flower,pgadmin,postgres,redis,redisinsight"),
+                ("observability", "grafana,loki,otel-collector,prometheus,tempo"),
+                ("keycloak", "keycloak,mailpit,postgres"),
+                ("postgres", "postgres"),
+                ("redis", "redis"),
+            ):
+                expect(
+                    f"the {request} Selection resolves exactly as it did before Bundles existed",
+                    resolve_names(request) == unchanged,
+                    f"{request} now resolves to {resolve_names(request)!r}, not {unchanged!r} — "
+                    f"a Bundle name added to a profiles: list changed what an existing "
+                    f"Selection starts, which ADR 0014 forbids",
+                )
+            # …and `core` resolves to exactly the five Modules up-core.sh used to name one
+            # by one, which is what lets that script name a Bundle instead of a list.
+            expect(
+                "the core Bundle resolves to the five Modules up-core started by name",
+                resolve_names("core") == core_modules,
+                f"core resolves to {resolve_names('core')!r}, not {core_modules!r}",
+            )
 
             # The headline case, end to end: two Modules, two containers, and none of the
             # eleven services a bare `up` used to start alongside them.
@@ -3900,7 +4296,7 @@ def main() -> int:
         expect(f"CI job {job_name} runs exactly ['{expected_command}']", work == [expected_command], f"runs {work}")
 
     # Both stack jobs must start every Module. Equality against `config --profiles` is
-    # what this used to say, and it cannot survive Selection: there are fifteen declared
+    # what this used to say, and it cannot survive Selection: there are seventeen declared
     # profiles now and a job must not name every Module by hand. What matters is not the
     # spelling but what it resolves to, so that is what is asserted — on the Podman job
     # too, so "no service is silently excluded under Podman" is a gate rather than a

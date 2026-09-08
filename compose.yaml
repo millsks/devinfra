@@ -4,18 +4,31 @@
 # followed by `docker compose up` preserves data. Only `down -v` destroys it.
 #
 # Selection:
-#   Every service carries its own Module name in `profiles:`, plus any group it
+#   Every service carries its own Module name in `profiles:`, plus any Bundle it
 #   joins. Nothing starts unless the Selection asks for it — there is no longer a
 #   set of core services that always start, and an empty COMPOSE_PROFILES starts
 #   nothing at all.
 #
-#   admin          pgadmin, redisinsight, flower
-#   observability  otel-collector, prometheus, loki, tempo, grafana
-#
-#   COMPOSE_PROFILES in .env names Modules and groups; scripts/select.sh expands
+#   COMPOSE_PROFILES in .env names Modules and Bundles; scripts/select.sh expands
 #   that request to its transitive depends_on closure before Compose sees it, and
 #   every lifecycle task goes through it (ADR 0013). A raw `--profile <module>`
 #   bypassing the resolver is expected to fail on the dependency it did not select.
+#
+# Bundles:
+#   The `x-bundles:` registry below is the *only* place a Bundle name becomes
+#   legal; read the block itself for the names it registers. It carries what no
+#   single service can know — that the name exists, what the Bundle is for, and
+#   roughly what it costs to run (NFR-7).
+#
+#   It deliberately does not list members. Membership is declared per service, in
+#   that service's own `profiles:` (AD-7), so it cannot drift from what actually
+#   starts; a `modules:` key here would be a second, hand-maintained answer to
+#   "what starts" and would go stale the first time a Module joined or left.
+#   `pixi run lint-config` closes the loop in both directions: a registered name
+#   no Module joins fails, a profile no entry here names fails, and a Bundle whose
+#   members reach outside themselves through depends_on fails — which is what
+#   makes every Bundle dependency-closed by declaration rather than by the
+#   resolver expanding it at runtime (ADR 0014).
 #
 # Extraction is complete: every service lives in services/<name>/ with its config
 # and seed data beside it, and this file assembles them through the `include:`
@@ -27,6 +40,46 @@
 # cross an `include` boundary and nothing is left in this file to read it.
 
 name: ${COMPOSE_PROJECT_NAME:-devinfra}
+
+# ---------------------------------------------------------------------------
+# Bundles — the closed vocabulary of Selection names that are not Modules
+#
+# Names only. Which Modules are in a Bundle is declared by those Modules, in
+# their own `profiles:` lists; see the header above for why that split is not
+# negotiable. Every entry carries exactly a description and an approximate
+# memory footprint, both required by lint-config. The footprint is repeated in
+# README.md, .env.example and CHANGELOG.md; the self-test parses each of those
+# tables into a name -> footprint mapping and requires all of them to agree with
+# this block, Bundle by Bundle.
+#
+# Figures are measured, resident-set at idle, and rounded — a stack under load
+# will want more. Most were read off this stack running; pgAdmin and the OTel
+# Collector were measured standalone in throwaway containers rather than under
+# this stack's configuration, so `admin` and `observability` are the two softer
+# figures.
+#
+# The Bundles are not disjoint and must not be summed: `minimal` is wholly
+# inside `core`, and `core` and `admin` both count Postgres and Redis, so a sum
+# double-counts the data layer twice over. The shipped default
+# `core,admin,observability` is the whole stack, ~1.9 GB.
+#
+# `x-` is Compose's own extension namespace, so this block adds no service, no
+# volume and no network: it renders straight through to `config` as data and
+# changes nothing about what starts.
+# ---------------------------------------------------------------------------
+x-bundles:
+  minimal:
+    description: Postgres and Redis only — the data layer, nothing else.
+    memory: "~60 MB"
+  core:
+    description: Postgres, Redis, Keycloak, object storage and Mailpit — what `up-core` starts.
+    memory: "~800 MB"
+  admin:
+    description: The three web consoles — pgAdmin, RedisInsight and Flower — with the data layer they read.
+    memory: "~450 MB"
+  observability:
+    description: The five-container signal stack — OTel Collector, Prometheus, Loki, Tempo and Grafana.
+    memory: "~725 MB"
 
 # ---------------------------------------------------------------------------
 # Modules — one file per extracted service, reassembled here

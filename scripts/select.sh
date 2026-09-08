@@ -3,16 +3,17 @@
 #
 #   ./scripts/select.sh keycloak            # keycloak,mailpit,postgres
 #   ./scripts/select.sh postgres redis      # postgres,redis
-#   ./scripts/select.sh admin               # the admin group's closure
+#   ./scripts/select.sh admin               # the admin Bundle's closure
 #   ./scripts/select.sh --all               # every Module
 #   ./scripts/select.sh                     # whatever COMPOSE_PROFILES asks for
 #   ./scripts/select.sh --selections        # the Selections this repository validates,
 #                                           # one request per line — every Module, every
-#                                           # group, then --all. scripts/lint-compose.sh
+#                                           # Bundle, then --all. scripts/lint-compose.sh
 #                                           # and scripts/assert_config.py enumerate from
 #                                           # this instead of the profile power set.
 #
-# A Selection names Modules or groups; what Compose has to be given is every Module in the
+# A Selection names Modules or Bundles — the Bundle names the root compose.yaml registers
+# under x-bundles: (ADR 0014); what Compose has to be given is every Module in the
 # transitive `depends_on` closure of that request. This is the supported way to reach
 # Compose inside this repository: a raw `docker compose --profile keycloak` bypassing it
 # exits 1 with `service "keycloak" depends on undefined service "postgres"`, and that is

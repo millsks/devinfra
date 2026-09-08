@@ -33,7 +33,7 @@ up: ## Start the stack (the Selection COMPOSE_PROFILES asks for)
 	@pixi run up
 
 .PHONY: up-core
-up-core: ## Start only postgres, redis, keycloak, minio, mailpit
+up-core: ## Start only the core Bundle: the data layer, Keycloak, object storage and Mailpit
 	@$(NOTICE)
 	@pixi run up-core
 

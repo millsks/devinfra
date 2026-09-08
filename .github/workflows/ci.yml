@@ -64,10 +64,11 @@ jobs:
     timeout-minutes: 15
     env:
       # Stated here rather than inherited from .env so the workflow says plainly
-      # which services this job brings up. The self-test asserts this Selection
-      # resolves to every Module, so a Module added later turns the gate red
-      # until CI starts it too.
-      COMPOSE_PROFILES: postgres,redis,keycloak,minio,mailpit,admin,observability
+      # which services this job brings up. Three Bundles that between them cover
+      # every Module — the same value .env.example ships. The self-test asserts
+      # this Selection resolves to every Module, so a Module added later turns
+      # the gate red until CI starts it too.
+      COMPOSE_PROFILES: core,admin,observability
     steps:
       - name: Check out the repository
         uses: actions/checkout@v4
@@ -102,11 +103,11 @@ jobs:
     runs-on: ubuntu-24.04
     timeout-minutes: 15
     env:
-      # The same Selection the Docker job starts. The self-test pins this to
+      # The same three Bundles the Docker job starts. The self-test pins this to
       # resolve to every Module, so no service is silently excluded from the
       # Podman run — an exclusion has to be written here, with its reason in
       # the README.
-      COMPOSE_PROFILES: postgres,redis,keycloak,minio,mailpit,admin,observability
+      COMPOSE_PROFILES: core,admin,observability
       # This is the whole runtime switch. The Compose client is the same stock
       # binary the `stack` job uses; only the API it talks to changes, so
       # depends_on ordering, health gating and `ps --format` stay identical

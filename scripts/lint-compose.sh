@@ -10,9 +10,9 @@
 #
 # One Selection proves one selection. The Selections are the ones the resolver can
 # name (ADR 0013): every Module's own closure — AD-6's closure-validity, which is
-# what makes a Module liftable — every group's closure, and every Module at once.
-# That replaced the power set over the declared profiles: fifteen declared profiles
-# is 32 768 renders, which would never finish, and a cap would be arbitrary.
+# what makes a Module liftable — every registered Bundle's closure, and every Module
+# at once. That replaced the power set over the declared profiles: seventeen declared
+# profiles is 131 072 renders, which would never finish, and a cap would be arbitrary.
 #
 # This is the one script that does not resolve through scripts/lib/common.sh's
 # select_profiles: it drives the Selection under test itself, one per iteration, so
@@ -36,8 +36,8 @@ source "$(dirname "$0")/lib/common.sh"
 # its Module name, and treating that as "no profiles" is how this used to validate one
 # combination and report success (DW-32).
 #
-# What it does NOT do is reconcile the model's profile list against the Selections. A group
-# profile that the resolver cannot name would be a Selection nothing validates, and that gap
+# What it does NOT do is reconcile the model's profile list against the Selections. A profile
+# that the resolver cannot name would be a Selection nothing validates, and that gap
 # is closed in scripts/assert_config.py's main(), which compares `declared_profiles()`
 # against `resolve_selection.Graph.names()` and fails on the difference. Do not delete that
 # reconciliation believing this read covers it; it does not.
@@ -73,8 +73,9 @@ if ((${#profiles[@]} == 0)); then
 fi
 
 # The Selections, from the resolver rather than from a list here: one request per
-# Module, one per group profile, and the all-Modules request. A list restated in this
-# file would be the hand-maintained closure ADR 0013 exists to remove.
+# Module, one per registered Bundle, and the all-Modules request. A list restated in
+# this file would be the hand-maintained closure ADR 0013 exists to remove — and it is
+# why the Bundles ADR 0014 added arrived here with no edit to this file.
 requests=()
 while IFS= read -r line; do
     if [[ -n "$line" ]]; then
