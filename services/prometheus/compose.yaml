@@ -20,7 +20,7 @@ services:
       service: defaults
     image: prom/prometheus:${PROMETHEUS_VERSION:-v3.14.0}
     container_name: devinfra-prometheus
-    profiles: [observability]
+    profiles: [prometheus, observability]
     ports:
       - "${BIND_ADDRESS:-127.0.0.1}:${PROMETHEUS_PORT:-9090}:9090"
     volumes:

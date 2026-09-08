@@ -11,6 +11,9 @@ set -euo pipefail
 # shellcheck source=scripts/lib/common.sh
 source "$(dirname "$0")/lib/common.sh"
 
+# The ambient Selection, resolved to its dependency closure before Compose sees it.
+select_ambient
+
 echo "Drops the 'keycloak' database and re-imports services/keycloak/seed/."
 echo "All realm changes made through the admin console will be lost."
 confirm_word reimport

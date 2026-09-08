@@ -28,12 +28,12 @@ init: ## Create .env from the template if it does not exist
 	@pixi run init
 
 .PHONY: up
-up: ## Start the stack (profiles from COMPOSE_PROFILES)
+up: ## Start the stack (the Selection COMPOSE_PROFILES asks for)
 	@$(NOTICE)
 	@pixi run up
 
 .PHONY: up-core
-up-core: ## Start only postgres, redis, keycloak, minio, mailpit
+up-core: ## Start only the core Bundle: the data layer, Keycloak, object storage and Mailpit
 	@$(NOTICE)
 	@pixi run up-core
 

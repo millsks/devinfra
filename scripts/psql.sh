@@ -8,6 +8,9 @@ set -euo pipefail
 # shellcheck source=scripts/lib/common.sh
 source "$(dirname "$0")/lib/common.sh"
 
+# The ambient Selection, resolved to its dependency closure before Compose sees it.
+select_ambient
+
 db="${1:-$POSTGRES_DB}"
 
 compose exec postgres psql -U "$POSTGRES_USER" -d "$db"

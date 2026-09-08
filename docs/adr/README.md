@@ -21,6 +21,8 @@ a superseding ADR, never by editing a decided one.
 | [0010](0010-image-updates-are-proposed-by-regex-over-the-dotenv-template.md) | Image updates are proposed by regex over the dotenv template | Accepted |
 | [0011](0011-commit-time-checks-are-git-hooks-invoking-pixi-tasks.md) | Commit-time checks are git hooks invoking pixi tasks | Accepted |
 | [0012](0012-every-module-carries-its-own-contract.md) | Every Module carries its own contract | Accepted |
+| [0013](0013-selection-is-resolved-to-its-dependency-closure.md) | Selection is resolved to its dependency closure | Accepted |
+| [0014](0014-bundles-are-a-core-owned-registry.md) | Bundles are a Core-owned registry of names, not of members | Accepted |
 
 ## Related
 

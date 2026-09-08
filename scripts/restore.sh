@@ -30,5 +30,9 @@ if [[ ! -f "$f" ]]; then
     exit 1
 fi
 
+# The ambient Selection, resolved to its dependency closure before Compose sees it.
+# After the path checks, so a missing or nonexistent archive is still named as itself.
+select_ambient
+
 gunzip -c "$f" | compose exec -T postgres psql -U "$POSTGRES_USER" -d postgres
 echo "Restored from $f"

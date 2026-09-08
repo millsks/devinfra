@@ -1,5 +1,5 @@
 #!/usr/bin/env bash
-# Block until every service the active profiles select is up and healthy.
+# Block until every service the resolved Selection selects is up and healthy.
 # Exits non-zero on timeout, listing what was not ready.
 #
 #   ./scripts/wait-healthy.sh
@@ -7,8 +7,10 @@
 # This never returns optimistically. `compose ps` lists only containers that
 # exist, so a service that crashed or was never created is simply absent from
 # it — which is why readiness is judged against `compose config --services`,
-# the set the active profiles actually select, rather than against whatever
-# happens to be running.
+# the set the resolved Selection actually selects, rather than against whatever
+# happens to be running. `config --services` honours active profiles, so the
+# Selection is resolved to its dependency closure first (AD-16); `compose ps`
+# below does not, and needs nothing.
 #
 # Overridable for testing, defaults preserving the Makefile's bound:
 #   WAIT_ATTEMPTS     polling attempts             (default 60)
@@ -18,6 +20,9 @@ set -euo pipefail
 
 # shellcheck source=scripts/lib/common.sh
 source "$(dirname "$0")/lib/common.sh"
+
+# The ambient Selection, resolved to its dependency closure before Compose sees it.
+select_ambient
 
 attempts="${WAIT_ATTEMPTS:-60}"
 interval="${WAIT_INTERVAL:-5}"

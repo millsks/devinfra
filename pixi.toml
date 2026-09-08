@@ -33,13 +33,19 @@ default = ["dev"]
 # pixi.toml has no shell expansion of its own, so a task naming `docker compose`
 # here would ignore that seam and run Docker whatever the environment selected.
 # That is what lets the Podman CI job run these same tasks unmodified.
+#
+# No task body names a profile either, for the same reason: a Selection is
+# resolved to its dependency closure before Compose sees it (AD-16), and a task
+# cannot expand one. The five lifecycle tasks that must act on the whole stack —
+# down, stop, pull, dump-logs, config — say so with DEVINFRA_SELECT_ALL=1 rather
+# than with a hard-coded --profile list that a thirteenth Module would escape.
 # ---------------------------------------------------------------------------
 [tasks.init]
 description = "Create .env from the template if it does not exist"
 cmd = "./scripts/init-env.sh"
 
 [tasks.start]
-description = "Start the stack without waiting (profiles from COMPOSE_PROFILES)"
+description = "Start the stack without waiting (the Selection COMPOSE_PROFILES asks for)"
 depends-on = ["init"]
 cmd = "./scripts/compose.sh up -d"
 
@@ -48,17 +54,19 @@ description = "Start the stack, wait for health, print endpoints"
 depends-on = ["start", "wait", "urls"]
 
 [tasks.up-core]
-description = "Start only postgres, redis, keycloak, minio, mailpit"
+description = "Start only the core Bundle: the data layer, Keycloak, object storage and Mailpit"
 depends-on = ["init"]
 cmd = "./scripts/up-core.sh"
 
 [tasks.down]
 description = "Stop and remove containers, PRESERVING all data volumes"
-cmd = "./scripts/compose.sh --profile admin --profile observability down"
+cmd = "./scripts/compose.sh down"
+env = { DEVINFRA_SELECT_ALL = "1" }
 
 [tasks.stop]
 description = "Stop containers without removing them"
-cmd = "./scripts/compose.sh --profile admin --profile observability stop"
+cmd = "./scripts/compose.sh stop"
+env = { DEVINFRA_SELECT_ALL = "1" }
 
 [tasks.restart]
 description = "Recreate the stack, preserving data"
@@ -70,7 +78,8 @@ cmd = "./scripts/destroy.sh"
 
 [tasks.pull]
 description = "Pull newer images for every pinned tag"
-cmd = "./scripts/compose.sh --profile admin --profile observability pull"
+cmd = "./scripts/compose.sh pull"
+env = { DEVINFRA_SELECT_ALL = "1" }
 
 [tasks.wait]
 description = "Block until every container is running and every healthcheck is healthy"
@@ -90,7 +99,8 @@ cmd = "./scripts/logs.sh '{{ service }}'"
 
 [tasks.dump-logs]
 description = "Print a bounded, uncoloured log dump for every service (CI diagnostics)"
-cmd = "./scripts/compose.sh --profile admin --profile observability logs --no-color --tail=200"
+cmd = "./scripts/compose.sh logs --no-color --tail=200"
+env = { DEVINFRA_SELECT_ALL = "1" }
 
 [tasks.smoke]
 description = "Run the end-to-end smoke test against the running stack"
@@ -151,19 +161,30 @@ description = "Mint an access token: pixi run token dev dev"
 args = [{ arg = "user", default = "dev" }, { arg = "password", default = "dev" }]
 cmd = "./scripts/token.sh '{{ user }}' '{{ password }}'"
 
+# One `names` argument, not one per Module: pixi task arguments are positional and fixed
+# in number, so several names travel as one comma-separated value — the same spelling
+# COMPOSE_PROFILES uses, which the resolver splits on commas and whitespace. With no
+# argument at all the value is empty and select.sh falls back to COMPOSE_PROFILES, which
+# is what makes a bare `pixi run select` print what the current .env asks for.
+[tasks.select]
+description = "Print the Modules a Selection resolves to: pixi run select postgres,redis"
+args = [{ arg = "names", default = "" }]
+cmd = "./scripts/select.sh '{{ names }}'"
+
 [tasks.config]
 description = "Render the fully resolved compose configuration"
-cmd = "./scripts/compose.sh --profile admin --profile observability config"
+cmd = "./scripts/compose.sh config"
+env = { DEVINFRA_SELECT_ALL = "1" }
 
 # ---------------------------------------------------------------------------
 # Validation
 # ---------------------------------------------------------------------------
 [tasks.lint-compose]
-description = "Validate the compose configuration for every combination of the declared profiles"
+description = "Validate the compose configuration for every Selection: each Module, each Bundle, and every Module at once"
 cmd = "./scripts/lint-compose.sh"
 
 [tasks.lint-config]
-description = "Assert the rendered config binds locally, collides on no host port, pins every image, shares one logging policy, and every module stanza names a root-declared identifier only, redeclaring no resource the root declares with keys"
+description = "Assert the rendered config binds locally, collides on no host port, pins every image, shares one logging policy, every service carries its own Module profile and no profile the x-bundles registry does not register, every registered Bundle is joined and dependency-closed, and every module stanza names a root-declared identifier only, redeclaring no resource the root declares with keys"
 cmd = "python scripts/assert_config.py"
 
 [tasks.lint-pins]
@@ -203,8 +224,9 @@ description = "The done-gate: every check this repository needs"
 depends-on = ["lint", "test"]
 
 # The stack half of CI, invoked as one named task so the workflow never becomes a
-# second definition of what CI runs. Profiles come from the environment, which the
-# workflow sets explicitly; .env selects all of them too.
+# second definition of what CI runs. The Selection comes from the environment, which
+# the workflow sets explicitly; .env ships a default that resolves to every Module
+# too, and the self-test pins both.
 [tasks.ci-stack]
 description = "Start the stack, wait for health and run the strict smoke suite"
 depends-on = ["init", "start", "wait", "smoke-strict"]

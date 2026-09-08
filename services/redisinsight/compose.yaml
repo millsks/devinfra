@@ -27,7 +27,7 @@ services:
       service: defaults
     image: redis/redisinsight:${REDISINSIGHT_VERSION:-3.8.0}
     container_name: devinfra-redisinsight
-    profiles: [admin]
+    profiles: [redisinsight, admin]
     depends_on:
       redis:
         condition: service_healthy

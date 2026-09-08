@@ -20,7 +20,7 @@ services:
       service: defaults
     image: grafana/loki:${LOKI_VERSION:-3.7.7}
     container_name: devinfra-loki
-    profiles: [observability]
+    profiles: [loki, observability]
     ports:
       - "${BIND_ADDRESS:-127.0.0.1}:${LOKI_PORT:-3100}:3100"
     volumes:

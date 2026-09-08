@@ -52,6 +52,7 @@ services:
       service: defaults
     image: quay.io/keycloak/keycloak:${KEYCLOAK_VERSION:-26.7.3}
     container_name: devinfra-keycloak
+    profiles: [keycloak, core]
     depends_on:
       postgres:
         condition: service_healthy
