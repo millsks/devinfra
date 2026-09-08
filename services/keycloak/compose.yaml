@@ -91,8 +91,10 @@ services:
       - keycloak-data:/opt/keycloak/data
       - ./seed:/opt/keycloak/data/import:ro
     # start-dev: no TLS, no hostname strictness, caching disabled. Never use in
-    # production. --import-realm only creates realms that do not already exist,
-    # so edits to the JSON need `make keycloak-reimport`.
+    # production. --import-realm only creates realms that do not already exist —
+    # the strategy is hard-coded and no flag changes it — so edits to the JSON
+    # need `pixi run keycloak-reimport`, which runs `kc.sh import --override`
+    # inside this container and then restarts it. It drops no database.
     command: ["start-dev", "--import-realm"]
     healthcheck:
       # The Keycloak image has bash but no curl/wget/nc, so this drives a raw

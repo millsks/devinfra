@@ -1188,6 +1188,196 @@ def main() -> int:
             r = pixi(task)
             expect(f"{task} fails on an empty file set", r.returncode != 0, "an empty file set passed")
 
+    # --- The gotcha register's shape, one case per row of the contract (ADR 0016). ---
+    #
+    # Staged with moved_aside + planted rather than by editing in place: the tracked
+    # register is renamed, the defect is written at its path, and the original comes back
+    # however the case ends. planted() refuses a path that already exists, so the pair
+    # cannot silently overwrite a Module's real gotchas. redisinsight/ is the subject for
+    # the same reason it carries the shell and YAML fixtures — it is the one Module with
+    # nothing bind-mounted into a container, so a fixture surviving a killed run reaches no
+    # container.
+    register = REPO / "services" / "redisinsight" / "gotchas.md"
+    clean_register = (
+        "# redisinsight — gotchas\n"
+        "\n"
+        "### A planted entry\n"
+        "\n"
+        "- **Symptom:** Nothing observable; this file is a self-test fixture.\n"
+        "- **Cause:** The self-test replaced the tracked register to prove the check bites.\n"
+        "- **Fix:** The `finally` in moved_aside puts the tracked file back.\n"
+        "- **Affected versions:** Not version-specific\n"
+    )
+    # The needles are what a reader has to be told to act: which file, which entry, and
+    # what is wrong with it. A check that exits 1 saying only "invalid" is a check nobody
+    # can use, so each row asserts the diagnostic and not just the status.
+    register_cases: list[tuple[str, str, list[str]]] = [
+        (
+            "an entry with no Fix field",
+            clean_register.replace("- **Fix:** The `finally` in moved_aside puts the tracked file back.\n", ""),
+            ["gotchas.md", "A planted entry", "Fix"],
+        ),
+        (
+            "a placeholder value",
+            clean_register.replace("Not version-specific", "TBD"),
+            ["gotchas.md", "A planted entry", "TBD"],
+        ),
+        (
+            "an empty value",
+            clean_register.replace("- **Fix:** The `finally` in moved_aside puts the tracked file back.", "- **Fix:**"),
+            ["gotchas.md", "A planted entry", "Fix", "empty"],
+        ),
+        (
+            "fields out of order",
+            clean_register.replace(
+                "- **Symptom:** Nothing observable; this file is a self-test fixture.\n"
+                "- **Cause:** The self-test replaced the tracked register to prove the check bites.\n",
+                "- **Cause:** The self-test replaced the tracked register to prove the check bites.\n"
+                "- **Symptom:** Nothing observable; this file is a self-test fixture.\n",
+            ),
+            ["gotchas.md", "A planted entry", "Symptom, Cause, Fix, Affected versions"],
+        ),
+        (
+            "a field bullet outside any entry",
+            clean_register.replace("### A planted entry\n", "- **Note:** a stray bullet.\n\n### A planted entry\n"),
+            ["gotchas.md", "line 3"],
+        ),
+        (
+            "an H1 that does not name the Module",
+            clean_register.replace("# redisinsight — gotchas", "# gotchas"),
+            ["gotchas.md", "# redisinsight — gotchas"],
+        ),
+        (
+            "a register with no entries",
+            "# redisinsight — gotchas\n",
+            ["gotchas.md"],
+        ),
+        # Not a placeholder — is_placeholder intercepts those one branch earlier — and not a
+        # version either. Without this row the "names no version" arm could be deleted and
+        # `Affected versions: all releases` would become acceptable with the suite green.
+        (
+            "an Affected versions: naming no version",
+            clean_register.replace("Not version-specific", "all releases"),
+            ["gotchas.md", "A planted entry", "names no version"],
+        ),
+        (
+            "a Verified by: naming a path that does not exist",
+            clean_register + "- **Verified by:** `services/gone/smoke.sh` — nothing lives there.\n",
+            ["gotchas.md", "A planted entry", "services/gone/smoke.sh"],
+        ),
+        # A directory exists, and is not a check. Resolving the path with `.exists()` would
+        # accept this and the dead-link detection the field exists for would be bypassed.
+        (
+            "a Verified by: naming a directory rather than a file",
+            clean_register + "- **Verified by:** `services` — a directory, not a check.\n",
+            ["gotchas.md", "A planted entry", "is not a file"],
+        ),
+        # The path has to be findable, which means backticked and first. A value that only
+        # describes a check in prose leaves nothing to resolve, so nothing rots loudly.
+        (
+            "a Verified by: with no backticked path",
+            clean_register + "- **Verified by:** the postgres smoke check asserts it.\n",
+            ["gotchas.md", "A planted entry", "backticks"],
+        ),
+    ]
+    for case, body_text, needles in register_cases:
+        with moved_aside([register]), planted(register, body_text):
+            r = pixi("lint-gotchas")
+            expect(f"lint-gotchas rejects {case}", r.returncode != 0, "exited 0")
+            unsaid = [needle for needle in needles if needle not in r.stderr]
+            expect(
+                f"lint-gotchas names the file and the defect for {case}",
+                not unsaid,
+                f"never said {unsaid}; stderr: {r.stderr!r}",
+            )
+            expect(
+                f"lint-gotchas signs off on nothing for {case}",
+                "redisinsight: OK" not in r.stdout,
+                f"stdout: {r.stdout!r}",
+            )
+
+    # ...and the shape the contract sanctions stays sanctioned, optional fifth field
+    # included. Without this the whole check could be inverted to reject everything and
+    # every negative above would still be green.
+    with moved_aside([register]), planted(register, clean_register):
+        r = pixi("lint-gotchas")
+        expect("lint-gotchas accepts an entry in the shape", r.returncode == 0, f"output: {(r.stdout + r.stderr)!r}")
+    with (
+        moved_aside([register]),
+        planted(
+            register,
+            clean_register + "- **Verified by:** `services/redisinsight/smoke.sh` — this Module's own checks.\n",
+        ),
+    ):
+        r = pixi("lint-gotchas")
+        expect(
+            "lint-gotchas accepts the optional Verified by: field",
+            r.returncode == 0,
+            f"output: {(r.stdout + r.stderr)!r}",
+        )
+
+    # The empty-walk guard, which no defect case above can reach: a checker whose glob
+    # stopped matching would report nothing, find nothing wrong and exit 0.
+    tracked_registers = sorted((REPO / "services").glob("*/gotchas.md"))
+    expect("there are gotcha registers to check", bool(tracked_registers), "found none")
+    with moved_aside(tracked_registers):
+        r = pixi("lint-gotchas")
+        expect("lint-gotchas fails when the walk is empty", r.returncode != 0, "an empty file set passed")
+        expect("lint-gotchas says the walk was empty", "walk was empty" in r.stderr, f"stderr: {r.stderr!r}")
+
+    # The clean direction over the real tree, and the number it walked. "OK" on its own is
+    # a sentence a check that walked one file writes just as happily as one that walked
+    # thirteen, so the line count is asserted against the glob.
+    r = pixi("lint-gotchas")
+    reported = [line for line in r.stdout.splitlines() if ": OK " in line]
+    expect("lint-gotchas passes over the tracked registers", r.returncode == 0, f"stderr: {r.stderr!r}")
+    expect(
+        "lint-gotchas reports every Module's register",
+        len(reported) == len(tracked_registers)
+        and all(f"{path.parent.name}: OK " in r.stdout for path in tracked_registers),
+        f"{len(tracked_registers)} registers; stdout: {r.stdout!r}",
+    )
+
+    # --- A configuration fact two gotchas' Fix names, asserted rather than only described. ---
+    #
+    # `services/prometheus/gotchas.md` and `services/tempo/gotchas.md` both stand on this
+    # flag and it is the `Verified by:` target of both: it is one feature split across two
+    # Modules, and deleting it leaves a stack that is green everywhere while Grafana's
+    # service map stays permanently empty. Mailpit's MP_DATABASE, the third entry naming
+    # this file, is already pinned above rather than a second time here.
+    prometheus_module = yaml.safe_load((REPO / "services" / "prometheus" / "compose.yaml").read_text(encoding="utf-8"))
+    prometheus_command = prometheus_module["services"]["prometheus"].get("command") or []
+    expect(
+        "prometheus accepts Tempo's span-metric remote writes",
+        "--web.enable-remote-write-receiver" in [str(item) for item in prometheus_command],
+        f"command: {prometheus_command} — without the receiver those writes are refused and "
+        f"Grafana's service map stays permanently empty",
+    )
+
+    # --- The README carries no copy of the register. ---
+    # Eight entries used to live in both places, free to drift, and the copy in the README
+    # is the one nobody editing services/<name>/ ever sees. The heading stays because it is a
+    # stable reference — readers know it, and links from outside this repository resolve to
+    # its anchor — so what is pinned is that the section holds no entries.
+    readme_text = (REPO / "README.md").read_text(encoding="utf-8")
+    heading = "## Gotchas worth knowing"
+    expect(
+        "README keeps the gotchas heading, a stable reference outside links resolve to",
+        heading in readme_text,
+        "heading is gone, so every link to its anchor now lands nowhere",
+    )
+    below_heading = readme_text.split(heading, 1)[1]
+    gotchas_section = below_heading.split("\n## ", 1)[0]
+    # Any bullet marker, at any indentation: a bolded entry that grew back nested under a
+    # paragraph, or written with `*`, is the same duplicated gotcha as one at column zero.
+    strays = [line for line in gotchas_section.splitlines() if re.match(r"^\s*[-*] \*\*", line)]
+    expect(
+        "the README gotchas section carries no entries of its own",
+        not strays,
+        f"{len(strays)} bolded bullet(s) back in the README: {strays[:3]} — they belong in the "
+        f"affected Module's gotchas.md, where a second copy cannot drift from the first",
+    )
+
     # --- The headline criterion: the tools need not be on the contributor's PATH. ---
     with tempfile.TemporaryDirectory() as stub_dir:
         stubs = Path(stub_dir)
@@ -1346,12 +1536,57 @@ def main() -> int:
         r = run_script("keycloak-reimport.sh", env=env, stdin="reimport\n")
         args = recorded(record)
         expect("keycloak-reimport.sh accepts its exact word", r.returncode == 0, f"exit {r.returncode}: {r.stderr!r}")
-        expect("keycloak-reimport.sh stops keycloak first", args[:2] == ["stop", "keycloak"], f"recorded {args}")
+        # The whole point of story 3-2's correction. `--import-realm` ignoring an existing
+        # realm is true; "so dropping the database is the only way" was not, and it is what
+        # justified a DROP DATABASE in a task a developer runs to edit a JSON file. Asserted
+        # over every recorded argument rather than over the psql call that used to be here,
+        # so no future spelling of the same idea can slip back in.
         expect(
-            "keycloak-reimport.sh drops and recreates the keycloak database",
-            any("DROP DATABASE IF EXISTS keycloak" in a for a in args)
-            and any("CREATE DATABASE keycloak" in a for a in args),
+            "keycloak-reimport.sh drops no database",
+            not any("DROP DATABASE" in argument.upper() for argument in args),
             f"recorded {args}",
+        )
+        expect(
+            "keycloak-reimport.sh never invokes psql",
+            "psql" not in args,
+            f"recorded {args}",
+        )
+        expect(
+            "keycloak-reimport.sh imports the seed realm through kc.sh",
+            "/opt/keycloak/bin/kc.sh" in args
+            and "import" in args
+            and any(argument.endswith("-realm.json") for argument in args),
+            f"recorded {args}",
+        )
+        # --override true is the difference between replacing the realm and doing nothing:
+        # the value is asserted alongside the flag, because `--override false` is the
+        # ignore-existing behaviour this script exists to escape.
+        expect(
+            "keycloak-reimport.sh imports with override on",
+            "--override" in args and args[args.index("--override") + 1 :][:1] == ["true"],
+            f"recorded {args}",
+        )
+        # Without a free management port the import commits the realm and *then* exits
+        # non-zero on the collision with the running server's 9000, which under `set -e`
+        # reports a failure for a write that landed.
+        expect(
+            "keycloak-reimport.sh gives the import its own management port",
+            "--http-management-port" in args,
+            f"recorded {args}",
+        )
+        # AD-12's mandatory half. The import is a separate JVM that never attaches to the
+        # running server's cache, so without a restart afterwards the database and the
+        # admin API disagree silently. Asserted as *after* the import, not merely present:
+        # a restart before the write would leave exactly the stale cache it exists to clear.
+        import_at = args.index("import") if "import" in args else -1
+        restart_at = next(
+            (i for i in range(len(args) - 1) if args[i] == "restart" and args[i + 1] == "keycloak"),
+            -1,
+        )
+        expect(
+            "keycloak-reimport.sh restarts keycloak after the import",
+            import_at >= 0 and restart_at > import_at,
+            f"import at {import_at}, restart at {restart_at}; recorded {args}",
         )
 
         # restore: refuses before psql is ever invoked.
