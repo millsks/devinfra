@@ -154,6 +154,12 @@ activemq-data/
 
 # Environments
 .env
+# Every .env variant, not just the bare name. A timestamped backup such as
+# .env.backup-20260907 is still the developer's real credentials, and `git add -A`
+# sweeps an untracked file into a commit — which is exactly how one reached a
+# public remote. .env.example is re-included: it is the tracked template.
+.env.*
+!.env.example
 .envrc
 .venv
 env/
