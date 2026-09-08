@@ -45,7 +45,7 @@ development_status:
   1-7-commit-time-checks-run-the-same-tasks-ci-does: done
   epic-1-retrospective: optional
 
-  epic-2: backlog
+  epic-2: done
   2-1-the-shared-fragment-and-the-first-module: done
   2-2-the-remaining-core-modules: done
   2-3-the-admin-and-observability-modules: done
