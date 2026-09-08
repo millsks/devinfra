@@ -55,7 +55,7 @@ development_status:
   epic-2-retrospective: optional
 
   epic-3: backlog
-  3-1-grafana-opens-on-working-dashboards: backlog
+  3-1-grafana-opens-on-working-dashboards: done
   3-2-gotchas-become-a-maintained-register: backlog
   3-3-connection-details-generated-not-hand-maintained: backlog
   3-4-backup-covers-everything-stateful: backlog

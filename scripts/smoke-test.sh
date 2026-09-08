@@ -36,14 +36,20 @@ set -uo pipefail
 # shellcheck source=scripts/lib/common.sh
 source "$(dirname "$0")/lib/common.sh"
 
+# The interpreter a check written in Python runs under, following the DEVINFRA_<TOOL>
+# convention scripts/select.sh documents. Word-split once, deliberately, so an override
+# may carry arguments. Module scripts read this; the driver itself only preflights it.
+read -r -a DEVINFRA_PYTHON_ARGV <<<"${DEVINFRA_PYTHON:-python3}"
+
 # Tools this suite cannot run without: curl for every HTTP check, openssl for the
 # trace and span IDs the OTLP round-trip is identified by, base64 for decoding the
-# OIDC access token whose claims the realm mappers are asserted on. A missing one
-# fails here, naming it, before a single check runs — the alternative is a run in
-# which a dozen checks fail for one reason nothing reports. This is a fail-loud
-# preflight, not a presence branch: there is no arm that passes having checked
-# nothing.
-REQUIRED_TOOLS=(curl openssl base64)
+# OIDC access token whose claims the realm mappers are asserted on, and the
+# interpreter above for the checks whose logic is too large to write twice in shell.
+# A missing one fails here, naming it, before a single check runs — the alternative
+# is a run in which a dozen checks fail for one reason nothing reports. This is a
+# fail-loud preflight, not a presence branch: there is no arm that passes having
+# checked nothing.
+REQUIRED_TOOLS=(curl openssl base64 "${DEVINFRA_PYTHON_ARGV[0]}")
 MISSING_TOOLS=""
 for tool in "${REQUIRED_TOOLS[@]}"; do
     type -P "$tool" >/dev/null 2>&1 || MISSING_TOOLS="${MISSING_TOOLS:+${MISSING_TOOLS}, }${tool}"
@@ -184,6 +190,26 @@ await_url() {
     return 1
 }
 
+# Register a check to run after every Module's script has been sourced, rather than
+# where it was written.
+#
+# The seam exists for one shape of check: one whose subject is a side effect *another*
+# Module's checks produce. The Modules are enumerated by a glob, so their order is
+# alphabetical and nothing may reorder or rename them to fix it; a Module whose
+# verification depends on what a later Module does would otherwise have to emit that
+# side effect a second time itself, which duplicates a payload, doubles a wait and
+# invents a coupling that no `depends_on` edge declares. Registering the function here
+# instead states the real constraint — this check runs last because it needs the whole
+# suite to have run — and costs the driver ten lines that name no Module.
+#
+# The function is called in registration order, in this same shared namespace, and its
+# `pass`/`fail`/`skip` calls count exactly as an inline one's do. See
+# docs/adr/0015-deferred-smoke-checks.md.
+#
+#   defer <function-name>
+DRIVER_DEFERRED=()
+defer() { DRIVER_DEFERRED+=("$1"); }
+
 # Liveness over HTTP, un-gated: the driver has already established the Module is
 # running before it sources the file that calls this.
 check_http() {
@@ -227,6 +253,33 @@ for driver_module_smoke in "${DRIVER_MODULE_SMOKES[@]}"; do
         skip "${driver_module} not running"
     fi
 done
+
+# ===========================================================================
+# The deferred checks, in registration order and before the summary, so their results
+# are counted like every other. A registered function that never ran would be a check
+# the suite reported nothing about while still exiting 0 — the silent skip this
+# repository keeps removing — so the self-test pins that these lines execute.
+#
+# A Module that was not in the Selection never had its script sourced, so it registered
+# nothing: an empty set here is the normal case and not an error, unlike the empty
+# Module set above. Guarded on the count because `"${array[@]}"` on an empty array is
+# an unbound-variable error under `set -u` in older bash.
+#
+# A name that is not a defined function is a failure naming it, never a bare
+# `command not found` on stderr: a typo, or a module script that stopped part-way
+# through and never got as far as the definition, would otherwise leave the registered
+# check reporting nothing while the suite exited 0.
+if ((${#DRIVER_DEFERRED[@]} > 0)); then
+    section "deferred"
+    for driver_deferred in "${DRIVER_DEFERRED[@]}"; do
+        if declare -F "${driver_deferred}" >/dev/null 2>&1; then
+            "${driver_deferred}"
+        else
+            fail "deferred check '${driver_deferred}'" \
+                "no function by that name is defined — the check was registered and never ran"
+        fi
+    done
+fi
 
 # ===========================================================================
 printf '\n\033[1m%s\033[0m\n' "Summary"

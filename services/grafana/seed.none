@@ -5,6 +5,11 @@
 Grafana has conf/provisioning/ and dashboards/, and neither is seed data.
 conf/provisioning/ is configuration read at startup — datasources and the
 dashboard provider — and is bind-mounted read-only, so Grafana never writes to
-it and re-reads it on every restart. dashboards/ is a live drop-zone Grafana
-re-scans every 30 seconds; it is tracked only by its .gitkeep. Seed data is
-written once into a volume and then owned by the service; neither of these is.
+it and re-reads it on every restart. dashboards/ ships the provisioned dashboard
+JSON this stack opens on, and it is the same kind of thing: bind-mounted
+read-only, re-read on every start and re-scanned every 30 seconds while Grafana
+runs, so the file on disk is always what Grafana shows. Seed data is copied once
+into a volume and then owned by the service, which is exactly what must not
+happen here — a dashboard living in grafana-data would survive `pixi run down`
+only because the volume did, and would drift from the tracked file with nothing
+to say so.

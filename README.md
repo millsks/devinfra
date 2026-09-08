@@ -41,7 +41,7 @@ preserves your data — only an explicit `pixi run destroy` throws it away.
 | **Prometheus** | 3.14 | Metrics | http://localhost:9090 |
 | **Loki** | 3.7 | Logs | http://localhost:3100 |
 | **Tempo** | 3.0 | Traces | http://localhost:3200 |
-| **Grafana** | 13.2 | Dashboards over all three signals | http://localhost:3000 |
+| **Grafana** | 13.2 | Dashboards over all three signals; the `devinfra overview` dashboard is provisioned from the tracked JSON on every start | http://localhost:3000 |
 
 All ports bind to `127.0.0.1` by default, so the stack is not exposed to your
 network. Change `BIND_ADDRESS` in `.env` if you need otherwise.
@@ -338,7 +338,18 @@ services/                       one directory per Module, listed in the order
   flower/compose.yaml           the Flower service; volume only, no config files
   grafana/compose.yaml          the Grafana service; depends_on prometheus, loki, tempo
   grafana/conf/provisioning/    datasources + dashboard provider
-  grafana/dashboards/           drop dashboard JSON here; picked up within 30s
+  grafana/dashboards/           devinfra-overview.json, provisioned from this
+                                read-only bind mount on every start; drop more
+                                dashboard JSON here, picked up within 30s. The
+                                smoke check runs every panel targeting the
+                                tempo, loki or prometheus datasource, in every
+                                file here, and every one of them has to return
+                                data for the marker the suite injected. It
+                                substitutes only $service — a panel using any
+                                other dashboard variable ($__rate_interval,
+                                $__range, a variable of your own) sends the raw
+                                $name to the backend, gets a 400 and turns
+                                `pixi run smoke` red on a healthy stack
   keycloak/compose.yaml         the Keycloak service; depends_on postgres and mailpit
   keycloak/seed/                realm imported on first boot
   loki/compose.yaml             the Loki service

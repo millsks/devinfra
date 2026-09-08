@@ -43,3 +43,52 @@ for uid in prometheus loki postgres; do
         skip "datasource '${uid}' connects — ${uid} not running"
     fi
 done
+
+# The dashboard, read back through Grafana rather than off the filesystem. `provisioned`
+# is the observable difference between the two ways a dashboard can be present: true means
+# the file provider loaded it from the read-only bind mount and re-reads it on every start,
+# where a dashboard someone saved into grafana-data reports false and would survive a
+# `pixi run down && pixi run up` only because the volume did.
+assert_contains "dashboard 'devinfra-overview' provisioned from the bind mount" '"provisioned":true' \
+    "$(curl -sf "${GF}/api/dashboards/uid/devinfra-overview" 2>/dev/null)"
+
+# ...and that its panels actually return something. A provisioned dashboard that loads is
+# not a dashboard that works: every panel can resolve to empty and Grafana still renders
+# three tidy "No data" boxes, which is the state this Module shipped in before.
+#
+# Deferred, because its subject is telemetry another Module's checks inject and the Modules
+# run in glob order, so that injection has not happened yet at this point in the file. The
+# alternatives — emitting a second copy of the telemetry from here, or filing Grafana's
+# verification under the Module that emits it — are argued out in
+# docs/adr/0015-deferred-smoke-checks.md.
+#
+# MARKER and the deliberate coupling: the driver sources every Module's script into one
+# shared global namespace, and MARKER is the `service.name` the observability injector
+# tagged the trace, log and metric it posted with. Reading it here is on purpose, not an
+# accident of scope — the requirement is that these panels are proved against the telemetry
+# the smoke suite itself injected, so the value has to come from whoever injected it. It is
+# unset whenever that Module was not in the Selection, which is a skip below.
+grafana_dashboard_panels() {
+    local absent="" name output signal
+    for name in otel-collector prometheus loki tempo; do
+        running "${name}" || absent="${absent:+${absent}, }${name}"
+    done
+    if [[ -n "${absent}" ]]; then
+        skip "dashboard panels return data — ${absent} absent from this Selection"
+        return
+    fi
+    if [[ -z "${MARKER:-}" ]]; then
+        skip "dashboard panels return data — no telemetry marker was injected to query for"
+        return
+    fi
+    # Queries are read out of the shipped dashboard JSON and run through Grafana's
+    # datasource proxy, so a panel edited into a broken query fails here.
+    output="$("${DEVINFRA_PYTHON_ARGV[@]}" scripts/check_dashboards.py \
+        --dashboards-dir services/grafana/dashboards \
+        --grafana-url "${GF}" \
+        --service "${MARKER}" 2>&1)"
+    for signal in traces logs metrics; do
+        assert_contains "dashboard panel for ${signal} returns data" "${signal}: OK" "${output}"
+    done
+}
+defer grafana_dashboard_panels
