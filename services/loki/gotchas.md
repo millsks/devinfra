@@ -30,17 +30,6 @@
   round-trip, and `SMOKE_STRICT=1` fails on it rather than skipping.
 - **Affected versions:** Not version-specific
 
-### `LOKI_PORT` is missing from `scripts/urls.sh`
-
-- **Symptom:** A developer reading that script does not find this Module at all, even
-  though its own header says "a service missing from this list is a service a developer
-  cannot find".
-- **Cause:** `urls.sh` is hand-maintained and has drifted from what the Module declares.
-- **Fix:** Read `x-endpoints:` in `services/loki/compose.yaml`, which is the complete list.
-  Generating `urls.sh` from it is story 3-3, so the drift is recorded here rather than
-  half-fixed.
-- **Affected versions:** Not version-specific
-
 ### Retention is until compaction, not a wall clock
 
 - **Symptom:** Log volume does not fall on any schedule you can name, unlike Prometheus's

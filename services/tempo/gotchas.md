@@ -39,15 +39,6 @@
   immediately, for this reason.
 - **Affected versions:** Not version-specific
 
-### `TEMPO_PORT` is missing from `scripts/urls.sh`
-
-- **Symptom:** A developer reading that script does not find this Module at all.
-- **Cause:** `urls.sh` is hand-maintained and has drifted from what the Module declares.
-- **Fix:** Read `x-endpoints:` in `services/tempo/compose.yaml`, which is the complete
-  list. Generating `urls.sh` from it is story 3-3, so the drift is recorded here rather
-  than half-fixed.
-- **Affected versions:** Not version-specific
-
 ### Retention is 7 days
 
 - **Symptom:** Traces older than a week are simply gone.

@@ -82,6 +82,120 @@ x-bundles:
     memory: "~725 MB"
 
 # ---------------------------------------------------------------------------
+# Application variables — the application tier of the two-tier namespace
+#
+# ADR 0003 splits every name in .env into two tiers: Module variables, spelled
+# `<MODULE>_<CONCERN>` and owned by the Module they are named for, and contract
+# variables — the names an external contract dictates, which no Module may
+# rename, "listed in a Core-owned registry naming exactly one owning module".
+# This block is that registry, and it is the only place such a name becomes
+# legal.
+#
+# Each entry is one variable an application's own SDK reads, owned by exactly
+# one Module and pinned to one of that Module's `x-endpoints:` keys — so the
+# name is unambiguous about which service it reaches and where, even where the
+# names look alike (`REDIS_URL`, `CELERY_BROKER_URL` and `CELERY_RESULT_BACKEND`
+# are three logical databases on one endpoint). `value:` is interpolated exactly
+# as Compose interpolates it, so the fallbacks here and the declarations in
+# .env.example are one statement and `pixi run lint-endpoints` fails when they
+# disagree.
+#
+# Three unprefixed names are deliberately NOT here: BIND_ADDRESS,
+# COMPOSE_PROJECT_NAME and COMPOSE_PROFILES are Core's own, dictated by Compose
+# rather than by an application SDK, and none of them names an endpoint. A
+# registry entry for one of them would have no Module to own it and no endpoint
+# key to point at.
+#
+# Nothing reads this block at runtime. `x-` is Compose's own extension
+# namespace, so it adds no service, no volume and no network and renders
+# straight through to `config` as inert data; the generator parses this file
+# directly, because Compose discards a top-level `x-` key from an *included*
+# file (ADR 0012) and the endpoint half of the catalog lives in those.
+# ---------------------------------------------------------------------------
+x-app-variables:
+  DATABASE_URL:
+    module: postgres
+    endpoint: POSTGRES_PORT
+    # A double-quoted scalar folds a trailing `\` with no inserted space, which
+    # is the only way to keep this DSN inside yamllint's 120 columns.
+    value: "postgresql://${POSTGRES_USER:-devinfra}:${POSTGRES_PASSWORD:-devinfra}\
+      @localhost:${POSTGRES_PORT:-5432}/${POSTGRES_DB:-devinfra}"
+    description: SQLAlchemy and psycopg connection DSN.
+  REDIS_URL:
+    module: redis
+    endpoint: REDIS_PORT
+    value: "redis://:${REDIS_PASSWORD:-devinfra}@localhost:${REDIS_PORT:-6379}/${REDIS_CACHE_DB:-0}"
+    description: Application cache — logical database 0.
+  CELERY_BROKER_URL:
+    module: redis
+    endpoint: REDIS_PORT
+    value: "redis://:${REDIS_PASSWORD:-devinfra}@localhost:${REDIS_PORT:-6379}/${REDIS_BROKER_DB:-1}"
+    description: Celery broker — logical database 1.
+  CELERY_RESULT_BACKEND:
+    module: redis
+    endpoint: REDIS_PORT
+    value: "redis://:${REDIS_PASSWORD:-devinfra}@localhost:${REDIS_PORT:-6379}/${REDIS_BACKEND_DB:-2}"
+    description: Celery result backend — logical database 2.
+  OIDC_ISSUER:
+    module: keycloak
+    endpoint: KEYCLOAK_PORT
+    value: "http://localhost:${KEYCLOAK_PORT:-8080}/realms/${KEYCLOAK_REALM:-devinfra}"
+    description: OIDC issuer; append /.well-known/openid-configuration for discovery.
+  OIDC_DISCOVERY_URL:
+    module: keycloak
+    endpoint: KEYCLOAK_PORT
+    value: "http://localhost:${KEYCLOAK_PORT:-8080}/realms/${KEYCLOAK_REALM:-devinfra}\
+      /.well-known/openid-configuration"
+    description: Discovery document an OIDC client fetches to configure itself.
+  OIDC_CLIENT_ID:
+    module: keycloak
+    endpoint: KEYCLOAK_PORT
+    # A literal, not an interpolation: the client id is fixed by the realm seed in
+    # services/keycloak/seed/, so there is no tunable for it to read.
+    value: "devinfra-api"
+    description: The confidential client the realm import creates.
+  OIDC_CLIENT_SECRET:
+    module: keycloak
+    endpoint: KEYCLOAK_PORT
+    value: "${KEYCLOAK_CLIENT_SECRET:-devinfra-local-secret}"
+    description: Secret the realm import wires into the devinfra-api client.
+  AWS_ENDPOINT_URL:
+    module: minio
+    endpoint: MINIO_API_PORT
+    value: "http://localhost:${MINIO_API_PORT:-9100}"
+    description: S3 API endpoint every AWS SDK reads.
+  AWS_ACCESS_KEY_ID:
+    module: minio
+    endpoint: MINIO_API_PORT
+    value: "${MINIO_ROOT_USER:-devinfra}"
+    description: S3 access key.
+  AWS_SECRET_ACCESS_KEY:
+    module: minio
+    endpoint: MINIO_API_PORT
+    value: "${MINIO_ROOT_PASSWORD:-devinfra123}"
+    description: S3 secret key.
+  SMTP_HOST:
+    module: mailpit
+    endpoint: MAILPIT_SMTP_PORT
+    value: "localhost"
+    description: SMTP host; Mailpit accepts any credentials and delivers nothing onward.
+  SMTP_PORT:
+    module: mailpit
+    endpoint: MAILPIT_SMTP_PORT
+    value: "${MAILPIT_SMTP_PORT:-1025}"
+    description: SMTP port.
+  OTEL_EXPORTER_OTLP_ENDPOINT:
+    module: otel-collector
+    endpoint: OTEL_HTTP_PORT
+    value: "http://localhost:${OTEL_HTTP_PORT:-4318}"
+    description: OTLP/HTTP ingest for traces, logs and metrics.
+  OTEL_EXPORTER_OTLP_PROTOCOL:
+    module: otel-collector
+    endpoint: OTEL_HTTP_PORT
+    value: "http/protobuf"
+    description: Wire protocol that endpoint expects; grpc needs OTEL_GRPC_PORT instead.
+
+# ---------------------------------------------------------------------------
 # Modules — one file per extracted service, reassembled here
 # ---------------------------------------------------------------------------
 include:

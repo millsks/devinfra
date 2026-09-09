@@ -35,7 +35,7 @@ x-endpoints:
     description: OIDC issuer, admin console at /admin, discovery at /realms/<realm>/.well-known/openid-configuration.
   KEYCLOAK_MGMT_PORT:
     url: http://localhost:${KEYCLOAK_MGMT_PORT:-9000}
-    description: Management port — /health/ready and /metrics. Not in scripts/urls.sh; see gotchas.md.
+    description: Management port — /health/ready and /metrics.
 
 # What this Module consumes from another, named by the provider's own endpoint
 # keys. Every entry must have a matching `depends_on` edge (ADR 0002).

@@ -339,3 +339,27 @@ source_spec: `spec-3-2-gotchas-become-a-maintained-register.md`
 severity: low
 reason: Confirmed by measuring the file: lines 22-28 and 30-32 are 97-105 characters, line 29 is 118. Cosmetic, and the fix edits an agent-context file, which this workflow routes to deferral rather than patching inside a story.
 status: open
+
+### DW-44: Nothing checks the reverse direction of ADR 0003's registry: an unprefixed name in .env.example that no `x-app-variables:` entry registers and no exemption names is accepted silently.
+origin: spec-deferred 9e5db4974fda
+location: scripts/endpoints.py (read_registry), compose.yaml x-app-variables comment
+source_spec: `spec-3-3-connection-details-generated-not-hand-maintained.md`
+severity: low
+reason: Verified by reading `read_registry()` in scripts/endpoints.py: every check runs registry -> catalog (the named Module must exist, the named endpoint key must be one that Module publishes, the name must not carry another Module's prefix). Nothing runs dotenv -> registry. ADR 0003 says the registry is "the only place such a name becomes legal", and the root compose.yaml comment names three deliberate exemptions (BIND_ADDRESS, COMPOSE_PROJECT_NAME, COMPOSE_PROFILES) — both statements are prose only. Closing it needs the exemption list to become data, which is ADR 0003 enforcement rather than this story's endpoint documentation.
+status: open
+
+### DW-45: `make urls` cannot take a Selection, though the listing it forwards to is now Selection-scoped and every other narrowable Makefile target forwards a variable.
+origin: spec-deferred b8b639ca9565
+location: Makefile:88
+source_spec: `spec-3-3-connection-details-generated-not-hand-maintained.md`
+severity: low
+reason: Confirmed at Makefile:88-91: the recipe is `@$(NOTICE)` plus `@pixi run urls`, with no `$(S)`-style forwarding, while logs/psql/redis-cli all carry one. The help text was corrected in this pass; the forwarding was not. scripts/lint_selftest.py asserts set equality between the Makefile's recipes and MAKE_FORWARDS, and its own comment states that list is every target the Makefile exposed before pixi — a frozen deprecated surface. Adding forwarding is a decision about that surface, not about this story.
+status: open
+
+### DW-46: A *mutual* swap of two Contents rows' ports still passes the README pin, because every Module remains claimed exactly once.
+origin: spec-deferred 5639993a8c14
+location: scripts/endpoints.py (check_readme)
+source_spec: `spec-3-3-connection-details-generated-not-hand-maintained.md`
+severity: low
+reason: Verified against the patched `check_readme`: it resolves each row's port literals to one owning Module and refuses two rows claiming the same Module, which catches the one-sided swap the reviewer demonstrated (Prometheus's 9090 in the Grafana row). A two-sided swap leaves the multiset of owners unchanged and is undetectable without mapping each row's display name to its Module directory (`Silo` -> `minio`, `PostgreSQL` -> `postgres`, `OTel Collector` -> `otel-collector`) — a hand-maintained second list, which ADR 0017 rejects by name. Recorded in the function's docstring and left to review.
+status: open

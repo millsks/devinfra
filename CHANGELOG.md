@@ -130,6 +130,27 @@ can act on.
   given a free port, and the running server keeps serving cached realm data until it is
   restarted, so the restart afterwards is mandatory rather than a courtesy (AD-12).
 
+- **`pixi run urls` is generated and Selection-scoped.** `scripts/urls.sh` is now a
+  thirteen-line wrapper over the new `scripts/endpoints.py`; the fourteen hard-coded port
+  defaults and twelve `printf` lines are gone. It prints every key of every Module's
+  `x-endpoints:` block — `LOKI_PORT`, `TEMPO_PORT` and `KEYCLOAK_MGMT_PORT` included, which
+  the hand-maintained list had silently lost — plus the application variables the
+  `x-app-variables:` registry declares, at your own `.env` values.
+
+  **What changes.** The listing now covers only the Modules your Selection resolves to,
+  rather than every service whether or not it is running. `pixi run urls postgres` and
+  `./scripts/urls.sh --all` take a Selection like every other lifecycle entry point.
+  `make urls` and `./scripts/urls.sh` run standalone are invoked exactly as before; what
+  they print is the new listing, scoped the same way.
+
+- **The README states a connection detail in one place only.** The `## Connecting your
+  application` dotenv block is gone and the section points at
+  [`docs/ENDPOINTS.md`](docs/ENDPOINTS.md), in the shape `## Gotchas worth knowing` already
+  uses. The `## Contents` table keeps its Endpoint column and its thirteen host addresses —
+  deliberately, as the at-a-glance index of what the stack runs — but every port literal in
+  it is now pinned by `pixi run lint-endpoints` against what the Modules actually publish,
+  and a connection string anywhere else in the file is a build failure. See [ADR 0017](docs/adr/0017-endpoint-documentation-is-generated.md).
+
 - **README's `## Gotchas worth knowing` no longer carries entries of its own.** The eight
   bullets it duplicated from Module files, and the Prometheus `query_range` lookback
   paragraph under `### Notes on retention`, are gone from the README and live in the
@@ -206,6 +227,29 @@ can act on.
   content is any good — that is still a review's job, and the reason ADR 0012's rejection of
   a minimum length stands. See
   [ADR 0016](docs/adr/0016-gotcha-entries-carry-a-checked-shape.md).
+- **`docs/ENDPOINTS.md`** — every connection detail this stack publishes, in one generated
+  file: an `## Application variables` table naming, for each variable an
+  SDK reads, the Module that owns it and the endpoint key it reaches, then one section per
+  Module listing that Module's own endpoints. It opens with a do-not-edit banner and is
+  rendered against the tracked `.env.example`, so it is a function of tracked inputs alone
+  rather than of whoever ran the generator.
+- **An `x-app-variables:` registry in the root `compose.yaml`** — the Core-owned registry
+  [ADR 0003](docs/adr/0003-two-tier-configuration-namespace.md) specified and nothing ever
+  built. One entry per externally-dictated variable name, each naming exactly one owning
+  Module and one of that Module's `x-endpoints:` keys, so `REDIS_URL`,
+  `CELERY_BROKER_URL` and `CELERY_RESULT_BACKEND` are unambiguous about which service they
+  reach and where. `BIND_ADDRESS`, `COMPOSE_PROJECT_NAME` and `COMPOSE_PROFILES` are
+  deliberately outside it: they are Compose's names, not an application SDK's, and none
+  names an endpoint.
+- **`pixi run endpoints` and `pixi run lint-endpoints`** — `scripts/endpoints.py`, the only
+  thing in the repository that knows a connection string. The first rewrites
+  `docs/ENDPOINTS.md`; the second re-renders it from the tracked inputs and refuses on any
+  divergence, then pins three more things: `.env.example` must declare exactly the fallback
+  each compose `${VAR:-default}` names, every port literal in the README's `## Contents`
+  table must be a resolved endpoint, and no connection string may live anywhere else in the
+  README. It needs no container runtime, so it joins the pre-commit hook as well as
+  `pixi run lint`. See
+  [ADR 0017](docs/adr/0017-endpoint-documentation-is-generated.md).
 - **Two entries in the Keycloak register recording what was actually measured** against
   26.4.0: `kc.sh import` run against a live container exits non-zero on the management-port
   collision unless given a free `--http-management-port`, and an out-of-band import leaves
@@ -222,6 +266,11 @@ can act on.
   green everywhere else.
 
 ### Removed
+
+- **The three "missing from `scripts/urls.sh`" gotcha entries.** The Loki, Tempo and
+  Keycloak registers each recorded that their endpoint never reached that script, and the
+  same note sat in the affected `x-endpoints:` descriptions. The listing is generated from
+  those blocks now, so the drift is gone and a register entry describing it would mislead.
 
 - **The claim that `--import-realm` is the only way to overwrite a realm.** It was in
   `services/keycloak/gotchas.md`, in `README.md`'s `### Editing the realm`, in

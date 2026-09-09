@@ -82,16 +82,6 @@
 - **Verified by:** `services/keycloak/smoke.sh` — asserts the discovery document's `issuer`
   against `http://localhost:${KEYCLOAK_PORT}`.
 
-### `KEYCLOAK_MGMT_PORT` is missing from `scripts/urls.sh`
-
-- **Symptom:** A developer reading that script finds no `/health/ready` and no `/metrics`
-  for this Module, even though both are published.
-- **Cause:** `urls.sh` is hand-maintained and has drifted from what the Module declares.
-- **Fix:** Read `x-endpoints:` in `services/keycloak/compose.yaml`, which is the complete
-  list. Generating `urls.sh` from it is story 3-3, so the drift is recorded here rather
-  than half-fixed.
-- **Affected versions:** Not version-specific
-
 ### `start-dev` is a development mode and nothing else
 
 - **Symptom:** No TLS, no hostname strictness, and caching disabled.
