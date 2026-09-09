@@ -112,12 +112,12 @@ mc: ## Open a shell with the MinIO client configured
 # Data operations
 # ---------------------------------------------------------------------------
 .PHONY: backup
-backup: ## Dump all Postgres databases to backups/
+backup: ## Capture every stateful Module in the Selection into backups/<timestamp>/
 	@$(NOTICE)
 	@pixi run backup
 
 .PHONY: restore
-restore: ## Restore a dump: make restore F=backups/postgres-....sql.gz
+restore: ## Restore a backup directory: make restore F=backups/20260909-153000
 	@$(NOTICE)
 	@pixi run restore $(F)
 

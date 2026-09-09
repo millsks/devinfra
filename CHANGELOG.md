@@ -10,7 +10,7 @@ what will stop working.
 
 ### Changed
 
-Three breaking changes, first — read these before upgrading.
+Four breaking changes, first — read these before upgrading.
 
 #### ⚠ BREAKING — a `.env` without `COMPOSE_PROFILES` now starts nothing
 
@@ -84,8 +84,35 @@ with dependencies — `--profile keycloak`, say — still fails exactly as befor
 `pixi run select` remains the supported way to turn a request into a value Compose
 can act on.
 
+#### ⚠ BREAKING — a backup is a directory now, and `backups/postgres-*.sql.gz` is refused
+
+`pixi run backup` writes `backups/<timestamp>/` — a manifest, one `pg_dump` per
+database, the object-storage bucket contents and the Keycloak realm — instead of a
+single `pg_dumpall` stream. `pixi run restore` takes that directory.
+
+**What breaks.** Every archive taken before this change. `backups/` is untracked, so
+real `postgres-*.sql.gz` files sit in working clones; `pixi run restore` on one now
+exits 1 naming the file and the reason, before the runtime is touched.
+
+**Why it cannot be accepted.** A `pg_dumpall` stream opens with `CREATE ROLE devinfra;`,
+which aborts under `ON_ERROR_STOP=1` against *any* initialized cluster — including an
+empty one, whose bootstrap role initdb creates from `POSTGRES_USER`. Verified against
+`pgvector/pgvector:0.8.6-pg17`; `psql` exits 3. Accepting a legacy archive would mean
+dropping `ON_ERROR_STOP=1` for that path, which is exactly the half-applied restore
+reported as a success that this change exists to remove (NFR-5).
+
+**The fix.** Take a fresh backup: `pixi run backup`. To read an old archive by hand,
+`gunzip` it and apply it yourself, knowing it may only partly land.
+
 #### Everything else
 
+- **`pixi run keycloak-export` no longer exits non-zero on an export that landed.**
+  `kc.sh export` against a live container is a second JVM and tried to bind the management
+  interface the running server holds on 9000, failing with `Unable to start the management
+  interface on 0.0.0.0:9000` *after* writing the realm file — the same collision
+  `scripts/keycloak-reimport.sh` already documented for `import`. It now passes
+  `--http-management-port 9999`. The export-side entry is in `services/keycloak/gotchas.md`
+  with a `Verified by:` line, and the self-test asserts the flag.
 - **No Selection resolved through `scripts/select.sh` changes what it resolves to.**
   `pixi run select keycloak`, `admin`, `postgres` and every other request are
   byte-identical to before — profiles were added to, never replaced. The change
@@ -162,6 +189,37 @@ can act on.
 
 ### Added
 
+- **Backup covers everything stateful in the Selection** — `pixi run backup` now captures
+  the Postgres databases, the object-storage bucket contents and the Keycloak realm into one
+  timestamped directory with a `manifest.txt`, and records each of those three that the
+  Selection does not include as skipped, with its reason. One the Selection *does* include
+  that cannot be captured is a non-zero exit and no archive at all — never a smaller backup. Redis is
+  deliberately excluded: cache and in-flight task state. Database names come from
+  `pg_database` and bucket names from `mc ls --json`, never from `POSTGRES_EXTRA_DATABASES`
+  or `MINIO_BUCKETS`, so state an application created is captured too. Object *versions* are
+  not: `mc mirror` moves current versions only, and the manifest says so (ADR 0018).
+- **Restore is ordered, scoped and fail-loud** — `pixi run restore backups/<ts>` reads the
+  manifest, refuses any component the current Selection excludes and any component whose
+  files are missing, stops every service that transitively depends on Postgres, rewrites the
+  databases with `psql -v ON_ERROR_STOP=1`, mirrors the objects back, starts what it stopped
+  and waits for health. A statement that errors ends the restore rather than being counted
+  as applied, and the dependents are started again on that path too. Nothing in the script
+  names a dependent: `./scripts/select.sh --dependents postgres` answers that, in services.
+- **`pixi run ci-stack-restore`, and CI runs it** — `scripts/verify-restore.sh` plants
+  marker rows in two Postgres databases and marker objects in two buckets, backs up,
+  destroys every volume, brings the stack back, restores, asserts all four markers returned
+  and then runs the strict smoke suite. Two of each, because the destroyed volumes re-seed
+  the rest and one marker cannot tell a full capture from a narrowed one. It attaches to the existing `stack` job as a third step rather than a
+  fourth job, because it is only meaningful against a stack that is already up.
+- **`./scripts/select.sh --dependents <module>`** — the resolver's third request form, beside
+  `--all` and `--selections`. It prints the *services* in the current Selection whose
+  transitive `depends_on` closure reaches that Module, comma-joined, and an empty line when
+  there are none; an unknown Module name is exit 1 with nothing on stdout. Services rather
+  than Modules because `compose stop` speaks services and a Module with a helper must not be
+  half-stopped.
+- **`selected <module>` in `scripts/lib/common.sh`** — the membership test for an
+  already-resolved Selection, documented as valid only after `select_ambient` /
+  `select_profiles`.
 - **A provisioned Grafana dashboard, `devinfra overview`** — one panel per signal
   (Tempo traces, Loki logs, Prometheus metrics) over a `service` dropdown, pinned to
   the provisioned datasource UIDs. It is loaded by the existing file provider from

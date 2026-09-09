@@ -11,6 +11,13 @@
 #                                           # Bundle, then --all. scripts/lint-compose.sh
 #                                           # and scripts/assert_config.py enumerate from
 #                                           # this instead of the profile power set.
+#   ./scripts/select.sh --dependents postgres
+#                                           # the *services* in the current Selection that
+#                                           # would break if postgres were rewritten
+#                                           # underneath them, comma-joined — an empty line
+#                                           # when there are none. scripts/restore.sh asks
+#                                           # this so AD-12's stop → write → restart
+#                                           # ordering names no Module in shell.
 #
 # A Selection names Modules or Bundles — the Bundle names the root compose.yaml registers
 # under x-bundles: (ADR 0014); what Compose has to be given is every Module in the
@@ -51,8 +58,19 @@ for name in "$@"; do
         argv+=("$name")
     fi
 done
-if ((${#argv[@]} == 0)); then
-    argv=("${COMPOSE_PROFILES:-}")
+# `--dependents <module>` names no Selection of its own: it asks a question *about* one, so
+# the pair alone is still "no request given" and the ambient COMPOSE_PROFILES supplies it,
+# exactly as no arguments at all do. This is the only place that knows which variable
+# carries the request, which is why the fallback lives here rather than in the resolver.
+#
+# The pair is counted after flattening on commas and whitespace, the way the resolver reads
+# its own arguments: a pixi task argument is one string, so `pixi run select "--dependents
+# postgres"` arrives as a single word-joined value and would otherwise miss this. The
+# flattening is guarded by the short-circuit above, because `${argv[*]}` on an empty array
+# is an unbound-variable error under `set -u` in older bash.
+if ((${#argv[@]} == 0)) || { read -r -a words <<<"${argv[*]//,/ }" && ((${#words[@]} == 2)) &&
+    [[ "${words[0]}" == "--dependents" ]]; }; then
+    argv+=("${COMPOSE_PROFILES:-}")
 fi
 
 exec "${DEVINFRA_PYTHON_ARGV[@]}" scripts/resolve_selection.py "${argv[@]}"

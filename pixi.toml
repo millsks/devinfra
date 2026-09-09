@@ -140,11 +140,11 @@ cmd = "./scripts/mc.sh"
 # Data operations
 # ---------------------------------------------------------------------------
 [tasks.backup]
-description = "Dump all Postgres databases to backups/"
+description = "Capture every stateful Module in the Selection into backups/<timestamp>/"
 cmd = "./scripts/backup.sh"
 
 [tasks.restore]
-description = "Restore a dump: pixi run restore backups/postgres-....sql.gz"
+description = "Restore a backup directory: pixi run restore backups/20260909-153000"
 args = [{ arg = "file", default = "" }]
 cmd = "./scripts/restore.sh '{{ file }}'"
 
@@ -258,6 +258,17 @@ depends-on = ["init", "start", "wait", "smoke-strict"]
 [tasks.ci-stack-cycle]
 description = "Cycle the stack and re-run the strict smoke suite: proves nothing checked depends on first-init volume state"
 depends-on = ["down", "start", "wait", "smoke-strict"]
+
+# The third proof, and the only one that says anything about the backup: the cycle above
+# keeps the volumes, so nothing there distinguishes restored state from state that was never
+# lost. This plants markers, destroys every volume, restores and reads the markers back
+# before running the same strict suite. A named task rather than a workflow step for the
+# same reason as the two above — the workflow may never become a second definition of what
+# CI runs. Run after ci-stack-cycle, never instead of it: it needs a started stack, and it
+# is what leaves one behind for the diagnostics.
+[tasks.ci-stack-restore]
+description = "Round-trip the backup: plant markers, destroy every volume, restore and re-run the strict smoke suite"
+cmd = "./scripts/verify-restore.sh"
 
 # ---------------------------------------------------------------------------
 # Commit-time checks. The hooks in .githooks/ carry no logic and name no tool:

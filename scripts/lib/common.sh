@@ -98,6 +98,23 @@ select_ambient() {
     select_profiles "${COMPOSE_PROFILES:-}"
 }
 
+# Is one Module in the Selection that has already been resolved?
+#
+# Valid only *after* select_ambient or select_profiles: COMPOSE_PROFILES before a resolve is
+# the raw request, which may name a Bundle or omit a dependency, so asking this of it would
+# answer about something other than what Compose was given. Callers that back up or restore
+# one Module at a time need exactly this question — a Module outside the Selection is
+# skipped and recorded, never captured and never written (NFR-5).
+#
+# The comma fences make it an exact membership test: without them a Selection containing
+# `redisinsight` would answer yes for `redis`.
+selected() {
+    case ",${COMPOSE_PROFILES:-}," in
+    *",$1,"*) return 0 ;;
+    *) return 1 ;;
+    esac
+}
+
 # Refuse to proceed unless stdin carries exactly the confirmation word. Reading
 # from stdin (not /dev/tty) keeps it scriptable, but an empty or absent stdin
 # reads as the empty string, which is not the word — so a non-interactive run

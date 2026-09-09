@@ -26,6 +26,7 @@ a superseding ADR, never by editing a decided one.
 | [0015](0015-deferred-smoke-checks.md) | A smoke check whose subject is another Module's side effect is deferred by the driver | Accepted |
 | [0016](0016-gotcha-entries-carry-a-checked-shape.md) | Gotcha entries carry a checked shape | Accepted |
 | [0017](0017-endpoint-documentation-is-generated.md) | Endpoint documentation is generated, not hand-maintained | Accepted |
+| [0018](0018-backup-follows-the-selection.md) | Backup follows the Selection, and restore is ordered and fail-loud | Accepted |
 
 ## Supersessions
 

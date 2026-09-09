@@ -363,3 +363,26 @@ source_spec: `spec-3-3-connection-details-generated-not-hand-maintained.md`
 severity: low
 reason: Verified against the patched `check_readme`: it resolves each row's port literals to one owning Module and refuses two rows claiming the same Module, which catches the one-sided swap the reviewer demonstrated (Prometheus's 9090 in the Grafana row). A two-sided swap leaves the multiset of owners unchanged and is undetectable without mapping each row's display name to its Module directory (`Silo` -> `minio`, `PostgreSQL` -> `postgres`, `OTel Collector` -> `otel-collector`) — a hand-maintained second list, which ADR 0017 rejects by name. Recorded in the function's docstring and left to review.
 status: open
+
+### DW-47: The `stack` CI job now performs three full stack bring-ups inside an unchanged 15-minute budget, and nothing has measured whether it still fits.
+origin: spec-deferred 99a8e3a9e0cd
+location: .github/workflows/ci.yml (the stack job), pixi.toml [tasks.ci-stack-restore]
+source_spec: `spec-3-4-backup-covers-everything-stateful.md`
+reason: `.github/workflows/ci.yml` gives the `stack` job `timeout-minutes: 15` and now runs `ci-stack` (init, start, wait, smoke-strict), `ci-stack-cycle` (down, start, wait, smoke-strict) and `ci-stack-restore` (backup, destroy, start, wait, restore, wait, smoke-strict) in sequence. The budget cannot simply be raised: the workflow header states the 15-minute rule and `scripts/lint_selftest.py` asserts every job carries a `timeout-minutes` at or below 15, so a breach means tiering the work across jobs rather than extending the clock. Settled by one hosted run of the `stack` job: read its wall-clock time, and if it is near the cap, split the round trip into its own job that brings up its own stack.
+status: open
+
+### DW-48: Nothing has run the backup round trip against a real runtime; the only end-to-end proof is a CI job that has not executed yet.
+origin: spec-deferred d7674288c89e
+location: scripts/verify-restore.sh, scripts/restore.sh
+source_spec: `spec-3-4-backup-covers-everything-stateful.md`
+severity: medium
+reason: The capture half was exercised for real in this session against the running stack — five database dumps with `DROP DATABASE IF EXISTS` / `CREATE DATABASE`, three buckets with the empty ones preserved, the realm JSON, a correct manifest — and the Postgres and object-storage restore mechanics were each verified against throwaway containers. `scripts/verify-restore.sh` itself, and the orchestration in `scripts/restore.sh` (stop, apply, mirror, start, wait), have run only against the recording stub, because the round trip destroys every volume and the container stack on this machine holds the operator's own data. Settled by one green `stack` job in CI, or by `pixi run ci-stack` followed by `pixi run ci-stack-restore` on a machine whose volumes are expendable.
+status: open
+
+### DW-49: Which Modules are stateful is three literal branches in `backup.sh`, so a fourteenth stateful Module would be captured by nothing and named by no manifest line.
+origin: spec-deferred 4f7cbfd3b440
+location: scripts/backup.sh, scripts/restore.sh, docs/adr/0012 (the Module contract)
+source_spec: `spec-3-4-backup-covers-everything-stateful.md`
+severity: low
+reason: `scripts/backup.sh` asks `selected postgres`, `selected minio` and `selected keycloak` in three hand-written branches, and `scripts/restore.sh` iterates the same three names. This is defensible today because each component has a bespoke capture mechanism — `pg_dump`, `mc mirror`, `kc.sh export` — and no generic one exists. It is still a hand-maintained statement of the catalog of the kind ADR 0018 rejects for bucket and database lists: a new stateful Module is silently uncaptured, and the manifest does not even record it as skipped. Closing it needs a per-Module backup contract (an `x-backup:` block, or a `services/<module>/backup.sh` the way `smoke.sh` works), which is a Module-contract change beyond this story.
+status: open
