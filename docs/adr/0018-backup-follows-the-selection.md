@@ -121,8 +121,17 @@ twice.
 
 ## Consequences
 
-A backup now covers everything stateful in the Selection, and says in its manifest what it
-covered and what it did not. A restore either completes or exits non-zero having named the
+A backup covers the authored state in the Selection — Postgres databases, object storage
+buckets and the Keycloak realm — and says in its manifest what it covered and what it did
+not. It is not a volume-level image of the stack: eight Modules own a named volume whose
+contents are derived rather than authored (grafana, loki, tempo, prometheus, flower,
+pgadmin, redisinsight, mailpit) and are deliberately not captured, each named in the
+manifest with that reason. Restoring derived data over freshly generated data would be a
+regression, not a recovery.
+
+This also means a backup is not a migration path for a runtime change: moving the stack to
+a different container runtime starts every volume empty, and only the three captured
+components come across. A restore either completes or exits non-zero having named the
 step that failed, and never leaves dependents stopped.
 
 Archives written before this change are refused, with a diagnostic naming the file and why.
