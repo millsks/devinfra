@@ -149,7 +149,7 @@ args = [{ arg = "file", default = "" }]
 cmd = "./scripts/restore.sh '{{ file }}'"
 
 [tasks.keycloak-reimport]
-description = "Re-import the realm after editing the JSON (DESTROYS realm state)"
+description = "Re-import the realm from the seed JSON with override, then restart Keycloak (replaces that realm; keeps the database)"
 cmd = "./scripts/keycloak-reimport.sh"
 
 [tasks.keycloak-export]
@@ -195,6 +195,10 @@ cmd = "python scripts/assert_pins.py"
 description = "Assert the Renovate configuration's own regexes still detect every image pin"
 cmd = "python scripts/assert_renovate.py"
 
+[tasks.lint-gotchas]
+description = "Assert every Module's gotchas.md carries entries in the checked four-field shape: symptom, cause, fix, affected versions"
+cmd = "python scripts/check_gotchas.py"
+
 [tasks.lint-shell]
 description = "shellcheck every shell script in the repository, the git hooks included"
 cmd = "shellcheck scripts/**/*.sh services/**/*.sh .githooks/*"
@@ -217,7 +221,7 @@ cmd = "python scripts/lint_selftest.py"
 
 [tasks.lint]
 description = "Run every validation check"
-depends-on = ["lint-compose", "lint-config", "lint-pins", "lint-renovate", "lint-shell", "lint-yaml", "lint-json", "lint-python"]
+depends-on = ["lint-compose", "lint-config", "lint-pins", "lint-renovate", "lint-gotchas", "lint-shell", "lint-yaml", "lint-json", "lint-python"]
 
 [tasks.ci]
 description = "The done-gate: every check this repository needs"
@@ -257,7 +261,7 @@ cmd = "./scripts/bootstrap.sh"
 
 [tasks.precommit]
 description = "The offline half of lint: what the pre-commit hook runs"
-depends-on = ["lint-shell", "lint-yaml", "lint-json", "lint-pins", "lint-renovate", "lint-python"]
+depends-on = ["lint-shell", "lint-yaml", "lint-json", "lint-pins", "lint-renovate", "lint-gotchas", "lint-python"]
 
 [tasks.commit-msg]
 description = "Check a commit message file against Conventional Commits"

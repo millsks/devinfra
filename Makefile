@@ -122,7 +122,7 @@ restore: ## Restore a dump: make restore F=backups/postgres-....sql.gz
 	@pixi run restore $(F)
 
 .PHONY: keycloak-reimport
-keycloak-reimport: ## Re-import the realm after editing the JSON (DESTROYS realm state)
+keycloak-reimport: ## Re-import the realm from the seed JSON with override, then restart Keycloak (replaces that realm; keeps the database)
 	@$(NOTICE)
 	@pixi run keycloak-reimport
 

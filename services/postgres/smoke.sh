@@ -34,3 +34,29 @@ done
 assert_contains "write/read round-trip" "smoke-ok" \
     "$(dc postgres psql -U "${POSTGRES_USER}" -d "${POSTGRES_DB}" -tAc \
         "create table if not exists smoke_probe(v text); truncate smoke_probe; insert into smoke_probe values ('smoke-ok'); select v from smoke_probe;" 2>&1)"
+
+# The highest-severity gotcha in this Module's register, asserted rather than only
+# described: the PGDATA path is version-specific — 17 keeps it at
+# /var/lib/postgresql/data, 18 moved it to /var/lib/postgresql/18/docker — and a
+# mount that does not cover it leaves the database on the container layer, where
+# `down` throws it away with no error anywhere.
+#
+# The comparison runs inside the container, in awk, so no shell quoting crosses
+# the boundary: the data directory is handed over with -v and /proc/mounts is read
+# where it means something. "/" is excluded deliberately — it is the container
+# layer, and it is a prefix of every path, so accepting it would make this assert
+# nothing at all.
+PGDATA_PATH="$(dc postgres psql -U "${POSTGRES_USER}" -d "${POSTGRES_DB}" -tAc 'show data_directory;' 2>&1)"
+# $1 and $2 are awk's fields, not the shell's. Single quotes are what keeps them
+# that way, which is the whole point of handing the path over with -v.
+# shellcheck disable=SC2016
+assert_contains "data directory sits inside a mounted volume" "mounted:" \
+    "$(dc postgres awk -v d="${PGDATA_PATH}" '
+        $2 != "/" && substr(d, 1, length($2)) == $2 &&
+            (length(d) == length($2) || substr(d, length($2) + 1, 1) == "/") {
+            print "mounted:" $2 " holds " d
+            found = 1
+            exit
+        }
+        END { if (!found) print "no mount covers " d }
+    ' /proc/mounts 2>&1)"

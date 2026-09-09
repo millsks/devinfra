@@ -324,3 +324,18 @@ location: services/grafana/smoke.sh:52
 source_spec: `spec-3-1-grafana-opens-on-working-dashboards.md`
 reason: Two layers filed it; neither could be verified without a live stack, which this environment cannot start (another session owns the `devinfra` project's container names and host ports). Against it: the four datasource-provisioning assertions immediately above it are built the same way, have never been retried, and are green in CI — datasources and dashboards are loaded by the same provisioning service at Grafana startup. For it: `updateIntervalSeconds: 30` means a dashboard the first scan missed is 30s away, and `ci-stack-cycle` now runs this assertion a second time right after a restart, doubling any exposure. What would settle it: one `ci-stack` / `ci-stack-cycle` run against a cold Grafana volume, or a deliberate delay injected into the provisioning scan. If it does prove flaky, the fix is the same `await_url` the datasource health calls already use.
 status: open
+
+### DW-42: The new Postgres data-directory assertion accepts any non-`/` mount, so an anonymous volume created by the image's own VOLUME declaration would satisfy it while `down` still discards the data.
+origin: spec-deferred 24f2efefe4c5
+location: services/postgres/smoke.sh:49
+source_spec: `spec-3-2-gotchas-become-a-maintained-register.md`
+reason: Two layers filed it. What is verified: the assertion is accurate as described — it proves the server's `data_directory` sits inside some mount rather than on the container's writable layer, and it does catch the plain form of the gotcha (a wrong PGDATA path for the major version leaves the directory under `/`, which the check excludes deliberately). What is not verified: whether a PostgreSQL 18 image, whose VOLUME is declared at `/var/lib/postgresql`, would have Docker create an anonymous volume covering `/var/lib/postgresql/18/docker` — which would appear in /proc/mounts and satisfy the check while a container recreate still loses the data. Settling it needs one run against a pg18 image with the current `postgres-data:/var/lib/postgresql/data` mount left in place, which this environment could not do (the shared `devinfra` stack is pinned to pgvector/pgvector:0.8.6-pg17 and is owned by another session). If it proves real, the fix is to tie the covering mount to the named volume rather
+status: open
+
+### DW-43: AGENTS.md:29 wraps at 118 characters where every neighbouring line in that bullet wraps at 97-105; the Module-contract edit kept the old line's tail.
+origin: spec-deferred 0503a9c5b9d2
+location: AGENTS.md:29
+source_spec: `spec-3-2-gotchas-become-a-maintained-register.md`
+severity: low
+reason: Confirmed by measuring the file: lines 22-28 and 30-32 are 97-105 characters, line 29 is 118. Cosmetic, and the fix edits an agent-context file, which this workflow routes to deferral rather than patching inside a story.
+status: open

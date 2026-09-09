@@ -255,14 +255,25 @@ land in http://localhost:8025 instead of going nowhere.
 
 ### Editing the realm
 
-`--import-realm` only creates realms that do not already exist, so editing
+`start-dev --import-realm` only *creates* realms that do not already exist — the
+strategy is hard-coded and no flag or environment variable changes it — so editing
 `services/keycloak/seed/devinfra-realm.json` has no effect on a realm that is
 already there. Two ways to work:
 
 ```sh
-pixi run keycloak-reimport   # drop the realm and re-import the JSON (destroys realm state)
+pixi run keycloak-reimport   # replace that realm from the JSON, then restart Keycloak
 pixi run keycloak-export     # write the live realm back over the JSON
 ```
+
+`keycloak-reimport` runs `kc.sh import --override true` inside the running
+container and then restarts it. `--override` is remove-and-recreate rather than a
+merge: the named realm becomes exactly what the JSON says, and realm state the JSON
+does not carry — users, sessions and clients added through the admin console — is
+lost. Nothing else is: the `keycloak` database and every other realm survive, and no
+database is dropped. The restart afterwards is mandatory, not a courtesy — the import
+runs as a separate JVM that never attaches to the running server's cache, so without
+it the database and the admin API disagree silently. See
+`services/keycloak/gotchas.md`.
 
 ## Repository layout
 
@@ -306,7 +317,8 @@ scripts/mc.sh                   shell with the S3 client configured
 scripts/backup.sh               pg_dumpall to backups/
 scripts/restore.sh              restore a dump; refuses a bad path first
 scripts/destroy.sh              deletes every volume; requires typing `destroy`
-scripts/keycloak-reimport.sh    drops the realm db; requires typing `reimport`
+scripts/keycloak-reimport.sh    replaces the realm from the JSON and restarts
+                                Keycloak; requires typing `reimport`
 scripts/keycloak-export.sh      live realm back over the JSON
 scripts/token.sh                mint an access token via the CLI client
 scripts/smoke-test.sh           the smoke driver: preflights, counters, helpers, then a
@@ -326,15 +338,18 @@ scripts/lint_json.py            the JSON check, one file per diagnostic
 scripts/assert_pins.py          .env.example and every compose fallback must agree
 scripts/assert_renovate.py      the bot's own regexes must still detect every pin
 scripts/check_commit_msg.py     the commit-message contract, where it can be tested
+scripts/check_gotchas.py        every Module's gotchas.md, entry by entry: the four
+                                fields, in order, populated, and a live Verified by:
 scripts/podman-socket.sh        stops Docker and enables Podman's API socket (CI)
 scripts/assert-podman.sh        proves Podman itself reports the running containers
 scripts/lint_selftest.py        proves the lint surface and the scripts hold
 services/                       one directory per Module, listed in the order
                                 compose.yaml's `include:` reads them; every service
                                 is extracted, so this is the whole stack. Every Module
-                                also carries smoke.sh, gotchas.md, and seed/ or
-                                seed.none — plus healthcheck.none where its image can
-                                run no probe. `lint-config` refuses one that does not
+                                also carries smoke.sh, a four-field gotchas.md, and
+                                seed/ or seed.none — plus healthcheck.none where its
+                                image can run no probe. `lint-config` refuses one that
+                                does not
   flower/compose.yaml           the Flower service; volume only, no config files
   grafana/compose.yaml          the Grafana service; depends_on prometheus, loki, tempo
   grafana/conf/provisioning/    datasources + dashboard provider
@@ -402,16 +417,17 @@ services/                       one directory per Module, listed in the order
 | `pixi run mc` | Shell with the S3 client (`mc`) configured | `make mc` |
 | `pixi run backup` | `pg_dumpall` to `backups/` | `make backup` |
 | `pixi run restore backups/x.gz` | Restore a dump | `make restore F=backups/x.gz` |
-| `pixi run keycloak-reimport` | Drop the realm db and re-import | `make keycloak-reimport` |
+| `pixi run keycloak-reimport` | Replace the realm from the JSON, then restart Keycloak | `make keycloak-reimport` |
 | `pixi run keycloak-export` | Write the live realm back over the JSON | `make keycloak-export` |
 | `pixi run token dev dev` | Mint an access token | `make token U=dev P=dev` |
 | `pixi run config` | Render the resolved compose configuration | `make config` |
-| `pixi run lint` | Validate compose, rendered config, pins, the update bot, shell, YAML, JSON, Python | `make lint` |
+| `pixi run lint` | Validate compose, rendered config, pins, the update bot, the gotcha registers, shell, YAML, JSON, Python | `make lint` |
 | `pixi run select keycloak` | Print the Modules a Selection resolves to | — |
 | `pixi run lint-compose` | `config -q` for every Selection: each Module, each Bundle, and every Module at once | — |
 | `pixi run lint-config` | Assert the *rendered* config's ports and image tags, each module's identifier-only volume and network stanzas, and the `x-bundles` registry against what the module files declare | — |
 | `pixi run lint-pins` | Assert every pin agrees between `.env.example` and the compose files | — |
 | `pixi run lint-renovate` | Assert the update bot's regexes still detect every image pin | — |
+| `pixi run lint-gotchas` | Assert every Module's `gotchas.md` carries entries in the four-field shape | — |
 | `pixi run test` | Prove the checks and scripts hold their contracts | — |
 | `pixi run ci` | The done-gate: lint + test | — |
 | `pixi run bootstrap` | Install this clone's git hooks (`core.hooksPath`) | — |
@@ -756,52 +772,37 @@ Telemetry backends keep data far longer than you usually need locally: Prometheu
 `pixi run destroy` is the blunt fix; per-service retention lives in each backend's
 config file under `services/<name>/conf/`.
 
-When querying Prometheus for a short-lived series, use `/api/v1/series` or a small
-`step`. A `query_range` with a large step can land every evaluation point outside
-the 5-minute lookback window and report nothing for data that is present.
-
 ## Gotchas worth knowing
 
-These are the things that cost time when building this stack. Every Module also
-carries its own `services/<name>/gotchas.md`, which goes further than this section
-does — including where a Module's smoke check is liveness rather than real function,
-and where `scripts/urls.sh` omits its endpoint. Read the Module's file before
+The things that cost time when building this stack live with the code they bite:
+each Module's own `services/<name>/gotchas.md`. Read the Module's file before
 changing anything under `services/<name>/`.
 
-- **The Postgres volume mount path is version-specific.** 17 keeps `PGDATA` at
-  `/var/lib/postgresql/data`; 18 moved it to `/var/lib/postgresql/18/docker` and
-  declares the volume one level up. Using the wrong path for your major version
-  gives you a database that silently loses everything on `down`, with no error
-  anywhere. Change the mount in `services/postgres/compose.yaml` if you ever
-  move to 18.
-- **pgAdmin validates `PGADMIN_DEFAULT_EMAIL`** and refuses to start otherwise.
-  It rejects both bare `dev@localhost` and special-use TLDs (`.local`, `.test`),
-  hence `dev@example.com`.
-- **A `clientScopes` array in a realm import replaces Keycloak's built-ins**,
-  which strips `profile`, `email`, `roles` and friends from every client. The
-  audience and role mappers here are attached per-client instead.
-- **A realm-level `passwordPolicy` is enforced against imported users.** A
-  `length(4)` policy makes the import of a user with password `dev` fail the
-  whole boot.
-- **The Keycloak image has `bash` but no `curl`, `wget`, or `nc`**, so its
-  healthcheck drives an HTTP request over bash's `/dev/tcp`.
-- **Loki 3.x needs `allow_structured_metadata: true`** to accept OTLP at all,
-  and ingests via its native `/otlp` endpoint — the dedicated `loki` exporter in
-  the OTel Collector is deprecated.
-- **Tempo's span metrics need `--web.enable-remote-write-receiver`** on
-  Prometheus, or Grafana's service map stays permanently empty.
-- **MinIO is archived; object storage runs Silo, a maintained fork.** Both
-  `minio/minio` and `minio/mc` were archived upstream in 2026, and the final
-  MinIO release — which fixed a privilege-escalation CVE — was never published
-  to any registry, so the newest pullable MinIO image is permanently unpatched.
-  Silo preserves the `MINIO_*` environment variables and the on-disk format, so
-  this was an image swap with no data migration, and it is reversible: MinIO
-  reads Silo-written data and vice versa (both directions verified). The volume
-  is still named `minio-data` — renaming a volume orphans its data with no error
-  anywhere, so that name stays frozen. The module directory is
-  `services/minio/`; the object-storage service has never had a config
-  directory, and ADR 0004 freezes volume identifiers, not paths. The same image
-  also supplies `mc`, which is why there is no separate client image.
+They are a checked register, not free prose. Every entry is a `###` heading — the
+claim, so the file still skims — followed by four fields, in this order and all
+populated:
+
+| Field | What it carries |
+|---|---|
+| `Symptom:` | What you actually observe when it bites |
+| `Cause:` | Why it happens |
+| `Fix:` | What to do about it |
+| `Affected versions:` | A version expression, or the exact phrase `Not version-specific` |
+
+An entry may add a fifth, `Verified by:`, naming the check that catches a
+regression — a backticked repo-relative path, and then prose for a reader.
+
+`pixi run lint-gotchas` enforces the shape: a missing or placeholder field, fields
+out of order, a bullet outside an entry, a file with no entries, an H1 that does not
+match the directory, or a `Verified by:` naming a path that no longer exists is an
+exit 1 naming the file and the defect. It reads Markdown and needs nothing running,
+so it is in the pre-commit hook as well as in `pixi run lint`. What it does *not*
+judge is whether the content is any good; that is still a review's job. See
+[ADR 0016](docs/adr/0016-gotcha-entries-carry-a-checked-shape.md).
+
+This section carries no copies of those entries, deliberately. Two copies of a
+gotcha drift, and the one in the README is the copy nobody editing
+`services/<name>/` will see.
 
 ## Security
 

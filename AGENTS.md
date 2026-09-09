@@ -22,8 +22,11 @@ Docker Compose stack of local development infrastructure — Postgres, Redis, Ke
 - Every Module carries its own contract, and `pixi run lint-config` refuses one that does not (ADR 0012):
   a `healthcheck:` on the service named for the directory or a justified `healthcheck.none`; a `smoke.sh`
   the smoke driver sources; a top-level `x-endpoints:` naming every `*_PORT` it publishes; a `seed/` or a
-  justified `seed.none`; and a `gotchas.md`. A module file may declare only `<dir>` and `<dir>-<role>`
-  services. `x-requires:` names the provider Module and the provider's own endpoint keys, and needs the
+  justified `seed.none`; and a `gotchas.md` whose entries carry the checked four-field shape — a `###`
+  heading, then `Symptom:`, `Cause:`, `Fix:` and `Affected versions:` in that order, plus an optional
+  `Verified by:` naming the check that catches a regression. `lint-config` checks the file is there;
+  `pixi run lint-gotchas` checks the shape (ADR 0016). A module file may declare only `<dir>` and
+  `<dir>-<role>` services. `x-requires:` names the provider Module and the provider's own endpoint keys, and needs the
   matching `depends_on`. Every service a Module owns declares that Module's name in `profiles:`, and
   a helper's profile set equals its primary's.
 - `COMPOSE_PROFILES` is a **Selection** — Module and Bundle names — expanded to its transitive
@@ -42,8 +45,9 @@ Docker Compose stack of local development infrastructure — Postgres, Redis, Ke
   `pixi run lint-config` fails a Bundle nothing joins, a profile nothing registers, and a Bundle
   whose members depend outside it. `scripts/resolve_selection.py` never reads the root file — the
   registry is a validation input, read by `scripts/assert_config.py`.
-- Changing anything under `services/<name>/` — read that Module's own `gotchas.md` first, then README
-  "Gotchas worth knowing"; between them they document the traps that cost real time.
+- Changing anything under `services/<name>/` — read that Module's own `gotchas.md` first; it is the
+  register of the traps that cost real time, and the README carries no copies of it. Add a gotcha you
+  hit to that file in the four-field shape, never to the README.
 - Architecture rules binding future changes: `_bmad-output/planning-artifacts/architecture/architecture-devinfra-2026-09-06/ARCHITECTURE-SPINE.md` (21 decisions). Rationale in `docs/adr/`.
 - Planned work: `_bmad-output/planning-artifacts/epics.md`.
 

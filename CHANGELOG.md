@@ -112,6 +112,33 @@ can act on.
   for a file-provisioned dashboard, which is the observable the new smoke assertion stands
   on. Verified against `grafana/grafana:13.2.1`.
 
+- **`pixi run keycloak-reimport` no longer drops the `keycloak` database.** It now runs
+  `kc.sh import --file … --override true --http-management-port 9999` inside the running
+  container and then restarts it.
+
+  **What changes.** The named realm is still replaced wholesale — `--override` is
+  remove-and-recreate, not a merge, so realm state the seed JSON does not carry is still
+  lost. Everything else now survives: the `keycloak` database, every other realm, and every
+  row Keycloak had written that is not realm configuration. The task no longer stops the
+  container first, because the import runs *inside* it.
+
+  **Why.** The claim that justified the drop was false. `start-dev --import-realm` ignoring
+  an existing realm is true; "so dropping the database is the only way an edited realm file
+  takes effect" was not — `kc.sh import` has taken `--override` since Keycloak 21.1.0.
+  Verified against 26.4.0, including the two failure modes the register now records: the
+  import exits non-zero on the management-port collision with the running server unless
+  given a free port, and the running server keeps serving cached realm data until it is
+  restarted, so the restart afterwards is mandatory rather than a courtesy (AD-12).
+
+- **README's `## Gotchas worth knowing` no longer carries entries of its own.** The eight
+  bullets it duplicated from Module files, and the Prometheus `query_range` lookback
+  paragraph under `### Notes on retention`, are gone from the README and live in the
+  affected Module's `gotchas.md`. The heading stays, because it is a stable reference
+  readers and links from outside this repository may already point at, and the section now
+  describes the register and points at it. A self-test case fails the build
+  if a bolded bullet grows back there, because two copies of a gotcha drift and the copy in
+  the README is the one nobody editing `services/<name>/` ever sees.
+
 ### Added
 
 - **A provisioned Grafana dashboard, `devinfra overview`** — one panel per signal
@@ -164,3 +191,42 @@ can act on.
   Bundle no Module joins fails, a `profiles:` entry no registry entry names fails,
   and a Bundle whose members depend outside themselves fails.
 - `CHANGELOG.md`, this file.
+- **Every `gotchas.md` is now a checked register.** All 77 entries across the thirteen
+  Modules were rewritten into a fixed shape: a `###` heading — the claim, so the file still
+  skims — followed by `Symptom:`, `Cause:`, `Fix:` and `Affected versions:`, in that order
+  and all populated. `Affected versions:` is a version expression or the exact phrase
+  `Not version-specific`; `TBD` and friends are refused. An entry may add a fifth field,
+  `Verified by:`, naming the check that catches a regression.
+- **`pixi run lint-gotchas`** — `scripts/check_gotchas.py`, stdlib only, globbing
+  `services/*/gotchas.md` and refusing an empty set. A missing or placeholder field, fields
+  out of order, a bullet outside an entry, a register with no entries, an H1 that does not
+  name its directory, or a `Verified by:` naming a path that no longer exists is an exit 1
+  naming the file and the defect. It reads Markdown and needs no container runtime, so it
+  joins the pre-commit hook as well as `pixi run lint`. It does not judge whether the
+  content is any good — that is still a review's job, and the reason ADR 0012's rejection of
+  a minimum length stands. See
+  [ADR 0016](docs/adr/0016-gotcha-entries-carry-a-checked-shape.md).
+- **Two entries in the Keycloak register recording what was actually measured** against
+  26.4.0: `kc.sh import` run against a live container exits non-zero on the management-port
+  collision unless given a free `--http-management-port`, and an out-of-band import leaves
+  the running server serving stale cached realm data — the database and the admin API
+  disagree, silently, until a restart.
+- **The Postgres data directory is now asserted, not just described.**
+  `services/postgres/smoke.sh` reads `show data_directory;` and proves some mount in the
+  container's `/proc/mounts` covers it, so the version-specific `PGDATA` path — 17 keeps it
+  at `/var/lib/postgresql/data`, 18 moved it — fails the suite instead of silently losing
+  the database on the next `down`.
+- **Prometheus's `--web.enable-remote-write-receiver` is pinned by the self-test.** The
+  Prometheus and Tempo registers both stand on that flag; without it Tempo's span-metric
+  writes are refused and Grafana's service map stays permanently empty, on a stack that is
+  green everywhere else.
+
+### Removed
+
+- **The claim that `--import-realm` is the only way to overwrite a realm.** It was in
+  `services/keycloak/gotchas.md`, in `README.md`'s `### Editing the realm`, in
+  `services/keycloak/compose.yaml`'s `command:` comment and in the header of
+  `scripts/keycloak-reimport.sh`, and it was wrong in every one of them. What replaces it,
+  in the Keycloak register: the startup import hard-codes ignore-existing and no flag
+  changes that, while `kc.sh import --override` replaces one realm, remove-and-recreate,
+  leaving the database and every other realm intact.
