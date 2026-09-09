@@ -81,6 +81,14 @@ ALL_MODULES_REQUEST = "--all"
 #: the two enumerations that used to walk the profile power set.
 SELECTIONS_REQUEST = "--selections"
 
+#: The flag that asks the opposite question to `closure()`: not "what does this request
+#: need?" but "who in this Selection would break if I rewrote that Module underneath them?".
+#: `scripts/restore.sh` asks it about `postgres` so that AD-12's stop → write → restart
+#: ordering names no Module in shell — a `DROP DATABASE keycloak` fails while Keycloak holds
+#: a connection to it, and a thirteenth Module that grows a Postgres edge must be stopped
+#: too without anyone remembering to edit a script.
+DEPENDENTS_REQUEST = "--dependents"
+
 #: The line a checkout whose `.env` predates Selection is told to add. Three Bundle names
 #: that between them cover every Module, so pasting it starts exactly what a bare
 #: `docker compose up` started before Selection existed (AD-18).
@@ -346,6 +354,38 @@ def closure(graph: Graph, request: list[str]) -> tuple[str, ...]:
     return tuple(sorted(resolved))
 
 
+def dependents(graph: Graph, module: str, modules: tuple[str, ...]) -> tuple[str, ...]:
+    """List the services that would break if one Module's state were rewritten underneath them.
+
+    The answer is *services*, not Modules, because `compose stop` speaks services and a
+    Module may own more than one: `minio-init` belongs to `minio` today, and a future Module
+    with a helper must not be half-stopped. It is scoped to the Modules actually in the
+    Selection, because stopping a service the caller never selected is a change to a stack
+    they did not ask about.
+
+    Args:
+        graph: The Module dependency graph.
+        module: The Module whose dependents are wanted.
+        modules: The resolved Selection to look inside.
+
+    Returns:
+        Every service name owned by a Module in `modules` whose transitive `depends_on`
+        closure reaches `module`, sorted. `module`'s own services are never included: it is
+        the thing being rewritten, not a dependent of itself.
+
+    Raises:
+        RuntimeError: If `module` is not a Module. A typo must refuse rather than resolve to
+            the empty set, which reads as "nothing to stop" and would let a restore rewrite
+            a database underneath every connection still holding it.
+    """
+    if module not in graph.modules:
+        raise RuntimeError(
+            f"'{module}' is not a Module, so nothing can depend on it.\n  Valid names: {', '.join(graph.modules)}"
+        )
+    reaching = {candidate for candidate in modules if candidate != module and module in closure(graph, [candidate])}
+    return tuple(sorted(service for service, owner in graph.owners.items() if owner in reaching))
+
+
 def selections(graph: Graph) -> list[Selection]:
     """List the Selections this repository actually validates.
 
@@ -381,23 +421,41 @@ def main(argv: list[str]) -> int:
     """Print the Modules a requested Selection resolves to.
 
     Args:
-        argv: Arguments after the program name: `--all`, `--selections`, or the requested
-            Module and Bundle names, which may arrive comma-joined in one argument.
+        argv: Arguments after the program name: `--all`, `--selections`,
+            `--dependents <module>` followed by the Selection to look inside, or the
+            requested Module and Bundle names, which may arrive comma-joined in one
+            argument.
 
     Returns:
         Process exit status: 0 with the Selection on stdout, 1 with a diagnostic on stderr
         and nothing on stdout.
     """
+    # Flattened once, before the flags are looked for, because a pixi task argument is a
+    # single string: `pixi run select "--dependents postgres"` arrives as one value, and a
+    # flag recognised only as its own argv entry would be read as a Module name.
+    words = parse_request(argv)
     try:
         graph = build_graph(module_composes())
-        if SELECTIONS_REQUEST in argv:
+        if SELECTIONS_REQUEST in words:
             for selection in selections(graph):
                 sys.stdout.write(f"{selection.request}\n")
             return 0
-        if ALL_MODULES_REQUEST in argv:
+        if DEPENDENTS_REQUEST in words:
+            # The flag, then the Module asked about, then the Selection — which
+            # `scripts/select.sh` supplies from the environment when the caller gave only
+            # the pair, exactly as it does for a bare request.
+            rest = [value for value in words if value != DEPENDENTS_REQUEST]
+            if not rest:
+                raise RuntimeError(
+                    f"{DEPENDENTS_REQUEST} needs the Module to ask about: "
+                    f"`{DEPENDENTS_REQUEST} postgres`.\n"
+                    f"  Valid names: {', '.join(graph.modules)}"
+                )
+            resolved = dependents(graph, rest[0], closure(graph, rest[1:]))
+        elif ALL_MODULES_REQUEST in words:
             resolved = graph.modules
         else:
-            resolved = closure(graph, parse_request(argv))
+            resolved = closure(graph, words)
     except RuntimeError as exc:
         # Nothing is written to stdout before this point, which is the contract: a caller
         # substituting this command must get an empty value, never a partial Selection.

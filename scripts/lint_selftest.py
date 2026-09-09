@@ -195,6 +195,26 @@ def run_script(
 RECORDER = r"""#!/bin/sh
 for a in "$@"; do printf '%s\n' "$a"; done >> "$STUB_RECORD"
 printf 'COMPOSE_PROFILES=%s\n' "${COMPOSE_PROFILES-<unset>}" >> "$STUB_ENV_RECORD"
+# One named argument fails, everything else succeeds. STUB_EXIT is all-or-nothing, and a
+# script whose contract is "this step failed, and the recovery still ran" cannot be driven
+# by it: a stub that fails the whole run fails the recovery too, so the recording proves
+# nothing about ordering.
+if [ -n "${STUB_FAIL_ON:-}" ]; then
+  for a in "$@"; do
+    if [ "$a" = "$STUB_FAIL_ON" ]; then exit 1; fi
+  done
+fi
+# A second answer, for the one Module whose capture reads a listing that the shared
+# STUB_STDOUT cannot also be: a database list and an `mc ls --json` listing are parsed
+# differently and cannot be the same text.
+if [ -n "${STUB_MINIO:-}" ]; then
+  for a in "$@"; do
+    if [ "$a" = "minio" ]; then
+      printf '%s' "$STUB_MINIO"
+      exit "${STUB_EXIT:-0}"
+    fi
+  done
+fi
 sub=""
 skip=0
 for a in "$@"; do
@@ -335,6 +355,8 @@ def stub_env(
     exit_code: str = "0",
     profiles: str = "",
     document: str = "",
+    minio: str = "",
+    fail_on: str = "",
 ) -> dict[str, str]:
     """Build an environment whose container runtime and HTTP client are stubs.
 
@@ -346,6 +368,10 @@ def stub_env(
         exit_code: Status the stub exits with, for driving a failure path.
         profiles: Text the stub prints for `config --profiles`.
         document: Text the stub prints for `config --format json`.
+        minio: Text the stub prints for any call naming the `minio` service, whose
+            listing cannot be the same text as a database list.
+        fail_on: One argument that makes the stub exit 1, leaving every other call
+            succeeding, so a recovery path can be recorded alongside the failure.
 
     Returns:
         A copy of this process's environment with the stub wiring added.
@@ -370,6 +396,10 @@ def stub_env(
     # `ps` follows STUB_EXIT unless a case says otherwise. Defined-but-empty rather
     # than absent, so a value in this process's own environment cannot leak in.
     env["STUB_PS_EXIT"] = ""
+    # Both defined-but-empty for the same reason: an inherited value would silently
+    # change what every other case's stub answers and what it exits with.
+    env["STUB_MINIO"] = minio
+    env["STUB_FAIL_ON"] = fail_on
     return env
 
 
@@ -1881,10 +1911,12 @@ def main() -> int:
             profiles: str = "",
             document: str = "",
             request: str | None = "postgres,redis",
+            minio: str = "",
+            fail_on: str = "",
         ) -> dict[str, str]:
             record.unlink(missing_ok=True)
             record.with_name(record.name + ".env").unlink(missing_ok=True)
-            env = stub_env(compose_stub, record, stdout, services, exit_code, profiles, document)
+            env = stub_env(compose_stub, record, stdout, services, exit_code, profiles, document, minio, fail_on)
             # Every script now resolves a Selection before it reaches the runtime, and an
             # empty one is refused rather than proceeded with (AD-18). So the ambient
             # request is stated here rather than inherited from whatever the developer
@@ -2058,6 +2090,40 @@ def main() -> int:
             f"import at {import_at}, restart at {restart_at}; recorded {args}",
         )
 
+        # --- Backup and restore: an archive is a directory, and every failure is loud. ---
+        # Story 3.4 replaced a single `pg_dumpall` stream with a per-Module capture, so the
+        # argv these cases assert on is new; what they hold to account is unchanged in kind.
+
+        def plant_backup(
+            directory: Path,
+            manifest_lines: list[str],
+            databases: tuple[str, ...] = ("devinfra",),
+            buckets: tuple[str, ...] = (),
+            realm: str | None = None,
+        ) -> Path:
+            """Write a backup directory of the shape scripts/backup.sh produces."""
+            directory.mkdir(parents=True)
+            (directory / "manifest.txt").write_text(
+                "\n".join(["# devinfra backup", *manifest_lines]) + "\n", encoding="utf-8"
+            )
+            if databases:
+                (directory / "postgres").mkdir()
+                for name in databases:
+                    with gzip.open(directory / "postgres" / f"{name}.sql.gz", "wb") as dump:
+                        dump.write(b"-- empty\n")
+            for name in buckets:
+                (directory / "minio" / name).mkdir(parents=True)
+            if realm is not None:
+                (directory / "keycloak").mkdir()
+                (directory / "keycloak" / f"{realm}-realm.json").write_text("{}", encoding="utf-8")
+            return directory
+
+        def restore_env(request: str = "postgres,redis") -> dict[str, str]:
+            """A stub environment whose trailing health wait terminates immediately."""
+            environment = fresh(healthy, core, request=request)
+            environment["WAIT_ATTEMPTS"], environment["WAIT_INTERVAL"] = "1", "0"
+            return environment
+
         # restore: refuses before psql is ever invoked.
         r = run_script("restore.sh", env=fresh())
         expect("restore.sh refuses a missing argument", r.returncode != 0, "exited 0 with no file given")
@@ -2070,41 +2136,552 @@ def main() -> int:
         expect("restore.sh names the missing path", absent in r.stderr, f"stderr: {r.stderr!r}")
         expect("restore.sh never invoked psql", not recorded(record), f"recorded {recorded(record)}")
 
+        # A pre-3.4 cluster archive. `backups/` is untracked, so real ones sit in working
+        # clones; a pg_dumpall stream opens with CREATE ROLE and cannot apply under
+        # ON_ERROR_STOP=1, so the honest outcome is a refusal that says why — never a
+        # silently weaker restore for that one path.
+        legacy = stubs / "postgres-20260101-000000.sql.gz"
+        with gzip.open(legacy, "wb") as archive:
+            archive.write(b"-- empty\n")
+        r = run_script("restore.sh", str(legacy), env=fresh())
+        expect("restore.sh refuses a legacy pg_dumpall archive", r.returncode != 0, "exited 0")
+        expect("restore.sh names the legacy archive", str(legacy) in r.stderr, f"stderr: {r.stderr!r}")
+        expect(
+            "restore.sh says why a legacy archive cannot be applied",
+            "pg_dumpall" in r.stderr and "ON_ERROR_STOP" in r.stderr,
+            f"stderr: {r.stderr!r}",
+        )
+        expect("restore.sh touched no runtime for a legacy archive", not recorded(record), f"{recorded(record)}")
+
+        # A directory that is not a backup: no manifest, so there is no record of what it
+        # holds and nothing may be inferred from a glob.
+        not_a_backup = stubs / "not-a-backup"
+        not_a_backup.mkdir()
+        r = run_script("restore.sh", str(not_a_backup), env=fresh())
+        expect("restore.sh refuses a directory with no manifest", r.returncode != 0, "exited 0")
+        expect("restore.sh names the non-backup path", str(not_a_backup) in r.stderr, f"stderr: {r.stderr!r}")
+        expect("restore.sh touched no runtime for a non-backup path", not recorded(record), f"{recorded(record)}")
+
+        # A component the Selection excludes is refused, not skipped: writing it would act
+        # on a Module nobody asked for, and skipping it would report a restore that did not
+        # happen. Refused before anything is written.
+        excluded = plant_backup(
+            stubs / "excluded",
+            ["selection: keycloak,mailpit,minio,postgres,redis", "postgres: devinfra", "minio: uploads"],
+            buckets=("uploads",),
+        )
+        r = run_script("restore.sh", str(excluded), env=restore_env("postgres,redis"))
+        expect("restore.sh refuses a component outside the Selection", r.returncode != 0, "exited 0")
+        expect(
+            "restore.sh names the excluded Module and the Selection",
+            "minio" in r.stderr and "postgres,redis" in r.stderr,
+            f"stderr: {r.stderr!r}",
+        )
+        expect("restore.sh writes nothing when it refuses a component", not recorded(record), f"{recorded(record)}")
+
+        # A manifest that names more than the archive holds. Without a name-by-name check
+        # this restores one database of three, prints "Restored from" and exits 0 — the
+        # partial success the whole story exists to remove.
+        truncated = stubs / "truncated"
+        plant_backup(
+            truncated,
+            ["selection: postgres,redis", "postgres: devinfra keycloak app_test"],
+            databases=("devinfra",),
+        )
+        r = run_script("restore.sh", str(truncated), env=restore_env())
+        expect("restore.sh refuses a manifest naming a dump that is not there", r.returncode != 0, "exited 0")
+        expect(
+            "restore.sh names the missing dump",
+            "keycloak.sql.gz" in r.stderr or "app_test.sql.gz" in r.stderr,
+            f"stderr: {r.stderr!r}",
+        )
+        expect("restore.sh writes nothing for a truncated archive", not recorded(record), f"{recorded(record)}")
+
+        # …and the other direction. A component directory the manifest does not name never
+        # reaches the Selection check, so its dumps would be applied to a stack that never
+        # agreed to hold them.
+        unnamed = stubs / "unnamed"
+        plant_backup(unnamed, ["selection: postgres,redis", "postgres: devinfra"], realm="devinfra")
+        r = run_script("restore.sh", str(unnamed), env=restore_env())
+        expect("restore.sh refuses a component the manifest does not name", r.returncode != 0, "exited 0")
+        expect("restore.sh names the unrecorded component", "keycloak" in r.stderr, f"stderr: {r.stderr!r}")
+        expect("restore.sh writes nothing for an unrecorded component", not recorded(record), f"{recorded(record)}")
+
         # restore: a relative path is read against the caller's directory, not the
         # repository root that common.sh cds to.
         elsewhere = stubs / "elsewhere"
         elsewhere.mkdir()
-        with gzip.open(elsewhere / "dump.sql.gz", "wb") as archive:
-            archive.write(b"-- empty\n")
-        r = run_script("restore.sh", "./dump.sql.gz", env=fresh(), cwd=elsewhere)
+        plant_backup(elsewhere / "dump", ["selection: postgres,redis", "postgres: devinfra"])
+        r = run_script("restore.sh", "./dump", env=restore_env(), cwd=elsewhere)
         expect(
             "restore.sh resolves a relative path against the caller's directory",
             "psql" in recorded(record),
             f"exit {r.returncode}, recorded {recorded(record)}, stderr {r.stderr!r}",
         )
-
-        # backup: the archive is named on success and never left truncated on failure.
-        backups = REPO / "backups"
-        before = set(backups.glob("postgres-*.sql.gz")) if backups.exists() else set()
-        r = run_script("backup.sh", env=fresh())
-        after = set(backups.glob("postgres-*.sql.gz"))
-        created = sorted(after - before)
-        expect("backup.sh exits 0", r.returncode == 0, f"exit {r.returncode}: {r.stderr!r}")
+        # ON_ERROR_STOP=1 on *every* psql invocation, asserted over the argv rather than
+        # over the script text: without it psql exits 0 for a stream whose statements
+        # errored, and a half-applied restore is counted as applied (NFR-5).
+        args = recorded(record)
+        psql_calls = [index for index, argument in enumerate(args) if argument == "psql"]
+        expect("restore.sh invoked psql at all", bool(psql_calls), f"recorded {args}")
         expect(
-            "backup.sh dumps every database as POSTGRES_USER",
-            recorded(record) == ["exec", "-T", "postgres", "pg_dumpall", "-U", "devinfra"],
-            f"recorded {recorded(record)}",
+            "every psql restore.sh runs carries -v ON_ERROR_STOP=1",
+            all(args[index + 1 : index + 3] == ["-v", "ON_ERROR_STOP=1"] for index in psql_calls),
+            f"recorded {args}",
         )
-        expect("backup.sh writes exactly one archive", len(created) == 1, f"created {created}")
-        for path in created:
-            path.unlink()
 
+        # AD-12's ordering, asserted by argv index rather than by reading the script: the
+        # dependents the resolver names are stopped before the first write and started after
+        # the last, because `DROP DATABASE keycloak` fails while Keycloak holds a connection
+        # to it. The Selection is `core`, whose only Postgres dependent is Keycloak.
+        #
+        # Two databases, not one: with a single dump the first and the last write are the
+        # same index, and "started after the last write" could not tell a start that follows
+        # the loop from one inside it.
+        ordered = plant_backup(
+            stubs / "ordered",
+            ["selection: core", "postgres: app_test devinfra"],
+            databases=("app_test", "devinfra"),
+        )
+        r = run_script("restore.sh", str(ordered), env=restore_env("core"))
+        args = recorded(record)
+        stop_at = next((i for i in range(len(args) - 1) if args[i] == "stop" and args[i + 1] == "keycloak"), -1)
+        start_at = next((i for i in range(len(args) - 1) if args[i] == "start" and args[i + 1] == "keycloak"), -1)
+        writes = [index for index, argument in enumerate(args) if argument == "psql"]
+        first_write = writes[0] if writes else -1
+        last_write = writes[-1] if writes else -1
+        expect("restore.sh exits 0 over a stubbed runtime", r.returncode == 0, f"exit {r.returncode}: {r.stderr!r}")
+        expect("restore.sh applies one dump per database the manifest names", len(writes) == 2, f"recorded {args}")
+        expect(
+            "restore.sh stops the Postgres dependents before the first write",
+            stop_at >= 0 and first_write > stop_at,
+            f"stop at {stop_at}, first psql at {first_write}; recorded {args}",
+        )
+        expect(
+            "restore.sh starts the Postgres dependents after the last write",
+            start_at > last_write >= 0,
+            f"start at {start_at}, last psql at {last_write}; recorded {args}",
+        )
+        # AC4's second half: health is awaited *after* the dependents are started, so the
+        # command does not return while Keycloak is up but not yet answering. `ps` is what
+        # scripts/wait-healthy.sh asks the runtime, so its index is where the wait began.
+        wait_at = next((index for index in range(len(args)) if args[index] == "ps" and index > start_at), -1)
+        expect(
+            "restore.sh waits for health after starting what it stopped",
+            start_at >= 0 and wait_at > start_at,
+            f"start at {start_at}, ps at {wait_at}; recorded {args}",
+        )
+        # …and it hard-codes neither the Module nor the service: the list comes from
+        # `select.sh --dependents postgres`, so a Selection with no dependent stops nothing.
+        none_stopped = plant_backup(stubs / "nodeps", ["selection: postgres,redis", "postgres: devinfra"])
+        r = run_script("restore.sh", str(none_stopped), env=restore_env("postgres,redis"))
+        args = recorded(record)
+        expect(
+            "restore.sh stops nothing when the Selection holds no Postgres dependent",
+            "stop" not in args,
+            f"recorded {args}",
+        )
+
+        # A write that fails ends the restore *and* still starts the dependents again. Only
+        # `psql` is made to fail, because a stub that failed everything would fail the
+        # recovery too and the recording would prove nothing: the point is that a restore
+        # which died mid-stream does not also leave Keycloak stopped.
+        failing = plant_backup(stubs / "failing", ["selection: core", "postgres: devinfra"])
+        r = run_script("restore.sh", str(failing), env=restore_env("core") | {"STUB_FAIL_ON": "psql"})
+        args = recorded(record)
+        stop_at = next((i for i in range(len(args) - 1) if args[i] == "stop" and args[i + 1] == "keycloak"), -1)
+        start_at = next((i for i in range(len(args) - 1) if args[i] == "start" and args[i + 1] == "keycloak"), -1)
+        expect("restore.sh exits non-zero when a write fails", r.returncode != 0, "exited 0 on a failed write")
+        expect(
+            "restore.sh starts the dependents again after a failed write",
+            stop_at >= 0 and start_at > stop_at,
+            f"stop at {stop_at}, start at {start_at}; recorded {args}",
+        )
+
+        # The object-storage half of a restore, which nothing above reaches: every archive
+        # that restores to completion elsewhere in this suite holds `postgres/` alone, and
+        # the two that carry a `minio/` are refusal cases that exit before the first write.
+        # Without this, inverting the mirror — writing the live bucket *into* the archive
+        # stage instead of the objects back — leaves the whole suite green.
+        objects = plant_backup(
+            stubs / "objects",
+            [
+                "selection: minio,postgres,redis",
+                "postgres: devinfra",
+                "minio: uploads artifacts",
+                "skipped: keycloak (not in the Selection)",
+            ],
+            buckets=("uploads", "artifacts"),
+        )
+        r = run_script("restore.sh", str(objects), env=restore_env("core"))
+        args = recorded(record)
+        lines = [argument.strip() for argument in args]
+        cp_at = next(
+            (
+                index
+                for index in range(len(args) - 2)
+                if args[index] == "cp"
+                and args[index + 1].endswith("/minio")
+                and args[index + 2].startswith("minio:/tmp/devinfra-restore-")
+            ),
+            -1,
+        )
+        expect(
+            "restore.sh exits 0 over an archive holding objects",
+            r.returncode == 0,
+            f"exit {r.returncode}: {r.stderr!r}",
+        )
+        expect(
+            "restore.sh copies the staged objects into the container",
+            cp_at >= 0,
+            f"recorded {args}",
+        )
+        # Cleared before the copy, because `cp` into a path that already exists nests one
+        # level and a leftover from a recycled PID would make every mirror path below miss.
+        stage = args[cp_at + 2].split(":", 1)[1] if cp_at >= 0 else ""
+        clear_at = next(
+            (
+                index
+                for index in range(len(args) - 2)
+                if args[index] == "rm" and args[index + 1] == "-rf" and args[index + 2] == stage
+            ),
+            -1,
+        )
+        expect(
+            "restore.sh clears the container-side stage before copying into it",
+            0 <= clear_at < cp_at,
+            f"clear at {clear_at}, cp at {cp_at}; recorded {args}",
+        )
+        # One mirror per bucket the manifest names, in its order: the trailing
+        # `sh "$stage" "$bucket"` triple is what the container-side program is handed. Read
+        # as that triple rather than as "whatever follows the stage path", because the stage
+        # is also an argument of the two `rm -rf` calls that bracket the copy.
+        mirrored = [
+            args[index + 2]
+            for index in range(len(args) - 2)
+            if stage and args[index] == "sh" and args[index + 1] == stage
+        ]
+        expect(
+            "restore.sh mirrors each bucket the manifest names",
+            mirrored == ["uploads", "artifacts"],
+            f"mirrored {mirrored}; recorded {args}",
+        )
+        # The direction and the flags, pinned as the recorded program text rather than
+        # inferred: `--remove` is what makes the bucket end as captured rather than as a
+        # union with whatever the re-provisioned stack seeded, and `$1/$2` -> `local/$2` is
+        # the archive going back into the server, not the server into the archive.
+        expect(
+            "restore.sh mirrors the archive into the bucket, replacing what is there",
+            'exec mc mirror --overwrite --remove "$1/$2" "local/$2"' in lines,
+            f"recorded {args}",
+        )
+        expect(
+            "restore.sh recreates a bucket that was deleted since the capture",
+            'mc mb --ignore-existing "local/$2"' in lines,
+            f"recorded {args}",
+        )
+        start_at = next((i for i in range(len(args) - 1) if args[i] == "start" and args[i + 1] == "keycloak"), -1)
+        last_write = max((index for index, argument in enumerate(args) if argument == "psql"), default=-1)
+        expect(
+            "restore.sh mirrors the objects between the last write and the restart",
+            last_write >= 0 and last_write < cp_at < start_at,
+            f"last psql at {last_write}, cp at {cp_at}, start at {start_at}; recorded {args}",
+        )
+        # What the archive never held, said out loud: backup records the Modules the
+        # Selection excluded, and a restore that reads them and says nothing leaves the
+        # operator to assume a narrower archive covered what it did not.
+        expect(
+            "restore.sh reports what the archive never held",
+            "Not in this archive: keycloak (not in the Selection)" in r.stdout,
+            f"stdout: {r.stdout!r}",
+        )
+
+        # A server that really lists no bucket is recorded with an explicit marker, and
+        # restore reads it as "nothing to mirror" rather than as a bucket named `(no`.
+        # Neither end of that contract is observed by any other case.
+        no_buckets = plant_backup(
+            stubs / "no-buckets",
+            ["selection: core", "postgres: devinfra", "minio: (no buckets)"],
+        )
+        (no_buckets / "minio").mkdir()
+        r = run_script("restore.sh", str(no_buckets), env=restore_env("core"))
+        args = recorded(record)
+        expect("restore.sh exits 0 over a bucketless archive", r.returncode == 0, f"exit {r.returncode}: {r.stderr!r}")
+        expect(
+            "restore.sh mirrors nothing for a bucketless archive",
+            not any(argument.strip().startswith("exec mc mirror") for argument in args),
+            f"recorded {args}",
+        )
+
+        # The by-name truncation refusals, for the two components that had none. A manifest
+        # naming a bucket or a realm whose files are absent must refuse before the first
+        # write, not fail mid-mirror with Postgres already rewritten.
+        short_buckets = plant_backup(
+            stubs / "short-buckets",
+            ["selection: core", "postgres: devinfra", "minio: uploads artifacts"],
+            buckets=("uploads",),
+        )
+        r = run_script("restore.sh", str(short_buckets), env=restore_env("core"))
+        expect("restore.sh refuses a manifest naming a bucket that is not there", r.returncode != 0, "exited 0")
+        expect("restore.sh names the missing bucket", "artifacts" in r.stderr, f"stderr: {r.stderr!r}")
+        expect("restore.sh writes nothing for a missing bucket", not recorded(record), f"{recorded(record)}")
+
+        short_realm = plant_backup(
+            stubs / "short-realm",
+            ["selection: core", "postgres: devinfra", "keycloak: devinfra"],
+        )
+        (short_realm / "keycloak").mkdir()
+        r = run_script("restore.sh", str(short_realm), env=restore_env("core"))
+        expect("restore.sh refuses a manifest naming a realm that is not there", r.returncode != 0, "exited 0")
+        expect(
+            "restore.sh names the missing realm export",
+            "devinfra-realm.json" in r.stderr,
+            f"stderr: {r.stderr!r}",
+        )
+        expect("restore.sh writes nothing for a missing realm export", not recorded(record), f"{recorded(record)}")
+
+        # backup: the directory is named on success and never left behind on failure.
+        backups = REPO / "backups"
+        before = set(backups.glob("*")) if backups.exists() else set()
+
+        def new_backups() -> list[Path]:
+            return sorted(path for path in backups.glob("*") if path not in before)
+
+        r = run_script("backup.sh", env=fresh(stdout="app_test\ndevinfra\n"))
+        created = new_backups()
+        args = recorded(record)
+        try:
+            expect("backup.sh exits 0", r.returncode == 0, f"exit {r.returncode}: {r.stderr!r}")
+            expect("backup.sh writes exactly one directory", len(created) == 1, f"created {created}")
+            expect(
+                "backup.sh dumps one database at a time, never the whole cluster",
+                "pg_dump" in args and "pg_dumpall" not in args,
+                f"recorded {args}",
+            )
+            # --create --clean --if-exists is what makes a dump self-contained: it emits
+            # DROP DATABASE IF EXISTS and CREATE DATABASE, which is the only shape that
+            # applies under ON_ERROR_STOP=1 into a cluster that already exists. Asserted as
+            # a slice around the `pg_dump` token rather than as set membership over the flat
+            # recording: the first `-U` in that recording belongs to the psql call that
+            # listed the databases, so a `pg_dump` invoked as some other user, without -T,
+            # or missing a flag would satisfy a membership check while this fails.
+            dump_at = args.index("pg_dump") if "pg_dump" in args else -1
+            expect(
+                "backup.sh dumps each database self-contained, as POSTGRES_USER",
+                dump_at >= 3
+                and args[dump_at - 3 : dump_at + 8]
+                == [
+                    "exec",
+                    "-T",
+                    "postgres",
+                    "pg_dump",
+                    "-U",
+                    "devinfra",
+                    "--create",
+                    "--clean",
+                    "--if-exists",
+                    "-d",
+                    "app_test",
+                ],
+                f"pg_dump at {dump_at}; recorded {args}",
+            )
+            if created:
+                archive_dir = created[0]
+                dumps = sorted(path.name for path in (archive_dir / "postgres").glob("*.sql.gz"))
+                expect(
+                    "backup.sh writes one dump per database the server named",
+                    dumps == ["app_test.sql.gz", "devinfra.sql.gz"],
+                    f"wrote {dumps}",
+                )
+                manifest_text = (archive_dir / "manifest.txt").read_text(encoding="utf-8")
+                expect(
+                    "backup.sh records the captured databases in the manifest",
+                    "postgres: app_test devinfra" in manifest_text,
+                    f"manifest: {manifest_text!r}",
+                )
+                # A Module outside the Selection is recorded as skipped, not failed: that is
+                # the difference between "this backup does not cover object storage" and
+                # "this backup is incomplete and nobody said so".
+                expect(
+                    "backup.sh records a Module outside the Selection as skipped",
+                    "skipped: minio (not in the Selection)" in manifest_text
+                    and "skipped: keycloak (not in the Selection)" in manifest_text,
+                    f"manifest: {manifest_text!r}",
+                )
+                expect(
+                    "backup.sh writes nothing for a Module outside the Selection",
+                    not (archive_dir / "minio").exists() and not (archive_dir / "keycloak").exists(),
+                    f"directory holds {sorted(path.name for path in archive_dir.iterdir())}",
+                )
+                expect(
+                    "backup.sh names the archive it wrote",
+                    archive_dir.name in r.stdout,
+                    f"stdout: {r.stdout!r}",
+                )
+        finally:
+            for path in new_backups():
+                shutil.rmtree(path, ignore_errors=True)
+
+        # The whole capture, over a Selection that holds all three stateful Modules. The
+        # bucket listing comes from its own stub answer because a database list and an
+        # `mc ls --json` listing are parsed differently and cannot be the same text —
+        # which is also the shape of the real thing, two different servers answering two
+        # different questions.
+        listing = '{"status":"success","type":"folder","key":"uploads/"}\n{"key":"artifacts/"}'
+        r = run_script("backup.sh", env=fresh(stdout="devinfra\n", request="core", minio=listing))
+        created = new_backups()
+        args = recorded(record)
+        try:
+            expect("backup.sh exits 0 over a full Selection", r.returncode == 0, f"exit {r.returncode}: {r.stderr!r}")
+            expect("backup.sh writes one directory for a full Selection", len(created) == 1, f"created {created}")
+            if created:
+                manifest_text = (created[0] / "manifest.txt").read_text(encoding="utf-8")
+                expect(
+                    "backup.sh captures all three stateful Modules when the Selection holds them",
+                    "postgres: devinfra" in manifest_text
+                    and "minio: uploads artifacts" in manifest_text
+                    and "keycloak: devinfra" in manifest_text,
+                    f"manifest: {manifest_text!r}",
+                )
+                expect(
+                    "backup.sh records nothing as skipped when the Selection holds every stateful Module",
+                    "skipped:" not in manifest_text,
+                    f"manifest: {manifest_text!r}",
+                )
+            # The bucket names come from the server's listing, never from MINIO_BUCKETS: one
+            # mirror per bucket the listing named, and the archive would otherwise stop at
+            # whatever that variable was last edited to say.
+            mirrored = [argument for argument in args if argument in ("uploads", "artifacts")]
+            expect(
+                "backup.sh mirrors each bucket the server listed",
+                mirrored == ["uploads", "artifacts"],
+                f"mirrored {mirrored}; recorded {args}",
+            )
+            # The realm export carries the free management port. Without it the export
+            # writes the file and then exits 1 on the port the running server holds.
+            expect(
+                "backup.sh gives the realm export its own management port",
+                "--http-management-port" in args and args[args.index("--http-management-port") + 1 :][:1] == ["9999"],
+                f"recorded {args}",
+            )
+        finally:
+            for path in new_backups():
+                shutil.rmtree(path, ignore_errors=True)
+
+        # A server that lists no bucket at all. The manifest says so with an explicit
+        # marker rather than an empty list, because `minio: ` and "the bucket names went
+        # missing" read the same on disk — and restore, which reads this line back, refuses
+        # the empty form. The two ends of that contract are asserted here and above.
+        r = run_script("backup.sh", env=fresh(stdout="devinfra\n", request="core", minio="\n"))
+        created = new_backups()
+        args = recorded(record)
+        try:
+            expect(
+                "backup.sh exits 0 over a bucketless server",
+                r.returncode == 0,
+                f"exit {r.returncode}: {r.stderr!r}",
+            )
+            if created:
+                manifest_text = (created[0] / "manifest.txt").read_text(encoding="utf-8")
+                expect(
+                    "backup.sh records a bucketless server with an explicit marker",
+                    "minio: (no buckets)" in manifest_text,
+                    f"manifest: {manifest_text!r}",
+                )
+            expect(
+                "backup.sh mirrors nothing when the server lists no bucket",
+                not any(argument.strip().startswith("exec mc mirror") for argument in args),
+                f"recorded {args}",
+            )
+        finally:
+            for path in new_backups():
+                shutil.rmtree(path, ignore_errors=True)
+
+        # A capture step that fails takes the whole backup with it, partial directory and
+        # all: an archive missing a Module in the Selection is not a smaller backup.
         r = run_script("backup.sh", env=fresh(exit_code="1"))
-        leftovers = sorted(set(backups.glob("postgres-*")) - before)
-        expect("backup.sh fails when pg_dumpall fails", r.returncode != 0, "exited 0 on a failed dump")
-        expect("backup.sh leaves no truncated archive behind", not leftovers, f"left {leftovers}")
+        leftovers = new_backups()
+        expect("backup.sh fails when a capture step fails", r.returncode != 0, "exited 0 on a failed capture")
+        expect("backup.sh names the Module and the step that failed", "postgres" in r.stderr, f"{r.stderr!r}")
+        expect("backup.sh leaves no partial directory behind", not leftovers, f"left {leftovers}")
         for path in leftovers:
-            path.unlink()
+            shutil.rmtree(path, ignore_errors=True)
+
+        # A Selection holding nothing stateful is a refusal, not an empty archive: an empty
+        # directory carrying a manifest would be a valid-looking backup of nothing.
+        r = run_script("backup.sh", env=fresh(request="mailpit"))
+        leftovers = new_backups()
+        expect("backup.sh refuses a Selection with nothing stateful", r.returncode != 0, "exited 0")
+        expect(
+            "backup.sh says the Selection holds no stateful Module",
+            "no stateful Module" in r.stderr,
+            f"stderr: {r.stderr!r}",
+        )
+        expect("backup.sh writes nothing when it refuses", not leftovers, f"left {leftovers}")
+        for path in leftovers:
+            shutil.rmtree(path, ignore_errors=True)
+
+        # --- The resolver's third request form, and the predicate two scripts share. ---
+        # restore.sh must not hard-code "keycloak and pgadmin", and `compose stop` speaks
+        # services rather than Modules, so the answer is service names scoped to the
+        # Selection.
+        r = run_script("select.sh", "--dependents", "postgres", env=fresh(request="core"))
+        expect(
+            "select.sh --dependents names the Postgres dependents in a core Selection",
+            r.returncode == 0 and r.stdout.strip() == "keycloak",
+            f"exit {r.returncode}, stdout {r.stdout!r}, stderr {r.stderr!r}",
+        )
+        r = run_script("select.sh", "--dependents", "postgres", env=fresh(request="core,admin"))
+        expect(
+            "select.sh --dependents widens with the Selection",
+            r.returncode == 0 and r.stdout.strip() == "keycloak,pgadmin",
+            f"exit {r.returncode}, stdout {r.stdout!r}, stderr {r.stderr!r}",
+        )
+        r = run_script("select.sh", "--dependents", "postgres", env=fresh(request="postgres"))
+        expect(
+            "select.sh --dependents prints an empty line for an empty set",
+            r.returncode == 0 and r.stdout == "\n",
+            f"exit {r.returncode}, stdout {r.stdout!r}",
+        )
+        # The pixi task takes one `names` argument, so this spelling arrives as a single
+        # word-joined string. It is the form the flattening in select.sh exists for, and
+        # nothing else here exercises it: a plain two-element check on argv would break
+        # `pixi run select "--dependents postgres"` with the suite still green.
+        r = pixi("select", "--dependents postgres", env=fresh(request="core"))
+        expect(
+            "the select task answers --dependents given as one argument",
+            r.returncode == 0 and r.stdout.strip() == "keycloak",
+            f"exit {r.returncode}, stdout {r.stdout!r}, stderr {r.stderr!r}",
+        )
+        r = run_script("select.sh", "--dependents", "zz-nope", env=fresh(request="core"))
+        expect("select.sh --dependents refuses an unknown Module", r.returncode != 0, "exited 0")
+        expect("select.sh --dependents prints nothing when it refuses", r.stdout == "", f"stdout: {r.stdout!r}")
+        expect("select.sh --dependents names the unknown Module", "zz-nope" in r.stderr, f"stderr: {r.stderr!r}")
+
+        # `selected` is the membership test backup.sh and restore.sh both ask. The comma
+        # fences are the whole point: without them a Selection holding `redisinsight` would
+        # answer yes for `redis`, and a backup would try to dump a Module that is not there.
+        probe = subprocess.run(
+            [
+                "bash",
+                "-c",
+                "source scripts/lib/common.sh\n"
+                'COMPOSE_PROFILES="postgres,redisinsight"\n'
+                "selected postgres && echo yes-postgres\n"
+                "selected redisinsight && echo yes-redisinsight\n"
+                "selected redis || echo no-redis\n"
+                "selected minio || echo no-minio\n",
+            ],
+            capture_output=True,
+            text=True,
+            check=False,
+            cwd=REPO,
+        )
+        expect(
+            "selected answers yes for a Module in the resolved Selection",
+            probe.stdout.split() == ["yes-postgres", "yes-redisinsight", "no-redis", "no-minio"],
+            f"stdout: {probe.stdout!r}, stderr: {probe.stderr!r}",
+        )
 
         # keycloak-export: the copy runs container-side source first, repo path second.
         r = run_script("keycloak-export.sh", env=fresh())
@@ -2124,6 +2701,15 @@ def main() -> int:
                 "devinfra",
                 "--users",
             ],
+            f"recorded {args}",
+        )
+        # The register's export-side entry, asserted rather than only described. Without a
+        # free management port the export writes the realm file and *then* exits 1 on the
+        # collision with the running server's 9000 — verified against the pinned 26.7.3 —
+        # so `set -e` reported a failure for an export that had already landed.
+        expect(
+            "keycloak-export.sh gives the export its own management port",
+            "--http-management-port" in args and args[args.index("--http-management-port") + 1 :][:1] == ["9999"],
             f"recorded {args}",
         )
         expect(
@@ -2277,11 +2863,8 @@ def main() -> int:
 
         # An argument containing a space must arrive as one argument, not two.
         spaced_dir = stubs / "old dumps"
-        spaced_dir.mkdir()
-        spaced = spaced_dir / "x.sql.gz"
-        with gzip.open(spaced, "wb") as archive:
-            archive.write(b"-- empty\n")
-        r = pixi("restore", str(spaced), env=fresh())
+        spaced = plant_backup(spaced_dir / "20260101-000000", ["selection: postgres,redis", "postgres: devinfra"])
+        r = pixi("restore", str(spaced), env=restore_env())
         expect(
             "restore keeps an argument containing a space intact",
             "psql" in recorded(record),
@@ -5744,7 +6327,7 @@ def main() -> int:
     # that started it came first.
     expected_work = {
         "validate": ["pixi run ci"],
-        "stack": ["pixi run ci-stack", "pixi run ci-stack-cycle"],
+        "stack": ["pixi run ci-stack", "pixi run ci-stack-cycle", "pixi run ci-stack-restore"],
         "stack-podman": ["pixi run ci-stack-podman"],
     }
     expect("ci.yml declares exactly the three CI jobs", set(ci_jobs) == set(expected_work), f"{set(ci_jobs)}")
@@ -5844,6 +6427,16 @@ def main() -> int:
         "`pixi run ci-stack-cycle` takes the stack down, brings it back and re-runs the strict suite",
         chain("ci-stack-cycle") == ["down", "start", "wait", "smoke-strict"],
         f"ci-stack-cycle depends on {chain('ci-stack-cycle')}",
+    )
+    # The third stack task, and the only one that says anything about the backup. It is a
+    # command rather than a chain — the round trip has to interleave planting, destroying
+    # and restoring — so what is pinned is that CI's step reaches the script that does it.
+    restore_task = tasks.get("ci-stack-restore")
+    restore_cmd = str(restore_task.get("cmd", "")) if isinstance(restore_task, dict) else str(restore_task)
+    expect(
+        "`pixi run ci-stack-restore` runs the backup round trip",
+        restore_cmd.strip() == "./scripts/verify-restore.sh",
+        f"ci-stack-restore runs {restore_cmd!r}",
     )
     # The same tasks, in the same order, plus the socket setup that puts the Docker
     # API at Podman and the gate that proves the containers ended up there. Order is

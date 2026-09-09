@@ -91,6 +91,14 @@ jobs:
       - name: Cycle the stack and run the strict smoke suite again
         run: pixi run ci-stack-cycle
 
+      # The backup round trip, over the stack the two steps above left running. A step
+      # rather than a fourth job for the same reason the cycle is one: it is only
+      # meaningful against a stack that is already up and populated, and it shares this
+      # job's 15-minute budget. It plants markers, destroys every volume, restores and
+      # reads the markers back before running the strict suite again.
+      - name: Round-trip the backup and run the strict smoke suite again
+        run: pixi run ci-stack-restore
+
       # Diagnostics, not work: they run only after the step above has already
       # failed the job, and cannot turn a red run green.
       - name: Container status

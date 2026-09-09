@@ -58,6 +58,22 @@
 - **Affected versions:** Verified against Keycloak 26.4.0; the pinned 26.7.3 publishes the
   same management port 9000.
 
+### `kc.sh export` against a live container exits non-zero on the same management port
+
+- **Symptom:** The export writes `<realm>-realm.json` and *still* exits 1 with `Unable to
+  start the management interface on 0.0.0.0:9000 / Address already in use`. Under `set -e`
+  that reads as a failed export when the file is sitting in the container.
+- **Cause:** The same second-JVM collision the import entry above describes: `export` is a
+  separate JVM inside the container and tries to bind port 9000, which the running server
+  already holds. The two commands share the failure mode and neither documents the other's.
+- **Fix:** Pass `--http-management-port 9999` — any free in-container port — as
+  `scripts/keycloak-export.sh` and the Keycloak capture in `scripts/backup.sh` both now do.
+  The identical command then exits 0.
+- **Affected versions:** Verified against the pinned Keycloak 26.7.3, which publishes
+  management port 9000; 26.4.0 behaves the same for `import`.
+- **Verified by:** `scripts/lint_selftest.py` — the case asserting
+  `keycloak-export.sh gives the export its own management port`.
+
 ### An out-of-band import leaves the running server serving stale realm data
 
 - **Symptom:** The database and the admin API disagree silently: a probe realm read back

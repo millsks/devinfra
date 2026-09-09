@@ -316,8 +316,9 @@ scripts/logs.sh                 tail all services or one
 scripts/psql.sh                 psql shell in the postgres container
 scripts/redis-cli.sh            redis-cli shell in the redis container
 scripts/mc.sh                   shell with the S3 client configured
-scripts/backup.sh               pg_dumpall to backups/
-scripts/restore.sh              restore a dump; refuses a bad path first
+scripts/backup.sh               every stateful Module in the Selection to backups/<ts>/
+scripts/restore.sh              restore a backup directory; refuses a bad path first
+scripts/verify-restore.sh       the round trip: markers, backup, destroy, restore, smoke
 scripts/destroy.sh              deletes every volume; requires typing `destroy`
 scripts/keycloak-reimport.sh    replaces the realm from the JSON and restarts
                                 Keycloak; requires typing `reimport`
@@ -418,8 +419,8 @@ services/                       one directory per Module, listed in the order
 | `pixi run psql keycloak` | psql shell against any database | `make psql DB=keycloak` |
 | `pixi run redis-cli 1` | redis-cli against the broker db | `make redis-cli N=1` |
 | `pixi run mc` | Shell with the S3 client (`mc`) configured | `make mc` |
-| `pixi run backup` | `pg_dumpall` to `backups/` | `make backup` |
-| `pixi run restore backups/x.gz` | Restore a dump | `make restore F=backups/x.gz` |
+| `pixi run backup` | Capture every stateful Module in the Selection into `backups/<ts>/` | `make backup` |
+| `pixi run restore backups/<ts>` | Restore a backup directory | `make restore F=backups/<ts>` |
 | `pixi run keycloak-reimport` | Replace the realm from the JSON, then restart Keycloak | `make keycloak-reimport` |
 | `pixi run keycloak-export` | Write the live realm back over the JSON | `make keycloak-export` |
 | `pixi run token dev dev` | Mint an access token | `make token U=dev P=dev` |
@@ -457,11 +458,13 @@ Three jobs, in parallel:
 | Job | Runs | Bound |
 |---|---|---|
 | `validate` | `pixi run ci` — compose config for every Selection, the rendered-config assertions, shell, YAML, JSON and Python lint, and the self-test | 10 minutes |
-| `stack` | `pixi run ci-stack` — starts a Selection resolving to every Module, blocks until every healthcheck passes, then runs the smoke suite in strict mode | 15 minutes |
+| `stack` | `pixi run ci-stack` — starts a Selection resolving to every Module, blocks until every healthcheck passes, then runs the smoke suite in strict mode; then `ci-stack-cycle` and `ci-stack-restore` over the same stack | 15 minutes |
 | `stack-podman` | `pixi run ci-stack-podman` — the same tasks over the same Selection against Podman, then asserts Podman itself is running the containers | 15 minutes |
 
-The two stack jobs share their task list exactly; only the API the Compose client
-talks to differs. `stack-podman` pins `ubuntu-24.04` rather than `ubuntu-latest`,
+`stack-podman` runs `ci-stack` alone, where `stack` follows it with `ci-stack-cycle` and
+`ci-stack-restore`: the Podman job's question is which runtime the stack came up under, and
+it is answered by the first task list the two share. Only the API the Compose client talks
+to differs between them. `stack-podman` pins `ubuntu-24.04` rather than `ubuntu-latest`,
 because the label moves to a release with a different Podman and a different
 Compose major, which would silently change what the job proves.
 
@@ -768,6 +771,53 @@ prometheus-data               loki-data      tempo-data     grafana-data
 
 Verified: with markers written into Postgres, Redis, Keycloak, Silo, Mailpit and
 Grafana, a full `down` followed by `up` returns every one of them intact.
+
+### Backup and restore
+
+`pixi run backup` writes one timestamped **directory** under `backups/`, covering every
+stateful Module in the current Selection (ADR 0018):
+
+```
+backups/<ts>/manifest.txt              what was captured, what was skipped and why
+backups/<ts>/postgres/<db>.sql.gz      one pg_dump --create --clean --if-exists per database
+backups/<ts>/minio/<bucket>/...        the current version of every object in every bucket
+backups/<ts>/keycloak/<realm>-realm.json
+```
+
+- A stateful Module the Selection does not include is **recorded as skipped**, not silently
+  omitted; one it does include that cannot be captured is a non-zero exit and no archive.
+  The skipped lines cover the three this captures — a Module that holds no state, Redis
+  included, is named by neither.
+- Redis is deliberately excluded — cache and in-flight task state.
+- Object *versions* are not captured: `mc mirror` moves current versions only.
+- The realm JSON is a portable artefact, not the restore path. Keycloak's state lives in the
+  `keycloak` database; copy the JSON into `services/keycloak/seed/` and run
+  `pixi run keycloak-reimport` to seed another stack from it.
+
+`pixi run restore backups/<ts>` reads the manifest, refuses any component the current
+Selection excludes, stops every service that depends on Postgres, rewrites the databases
+with `psql -v ON_ERROR_STOP=1`, mirrors the objects back, starts what it stopped and waits
+for health. Any failing step exits non-zero.
+
+It restores what the archive names, which is not the same as resetting the stack to it: a
+database or a bucket created since the capture is left alone rather than dropped. Within a
+bucket the archive *does* name, the mirror runs with `--remove`, so that bucket ends as
+captured rather than as a union of the two.
+
+Archives written before this shape — `backups/postgres-*.sql.gz` — are **refused**, naming
+the file and the reason: a `pg_dumpall` stream opens with `CREATE ROLE` and cannot apply
+under `ON_ERROR_STOP=1`. Take a fresh backup.
+
+Cluster globals — roles, their passwords and grants, and tablespaces — are not captured
+either: `pg_dump` is per database and carries none, and the manifest says so.
+
+`pixi run ci-stack-restore` is the round trip: it plants marker rows in two Postgres
+databases and marker objects in two buckets, backs up, destroys every volume, brings the
+stack back, restores, and requires all four markers before the strict smoke suite runs. Two
+of each, never one, because the destroyed volumes re-seed everything else — a single marker
+cannot tell a full capture from one narrowed to the first database or bucket. CI runs it on
+every push to `main` and on every pull request. Run from a terminal it asks for the same
+`destroy` confirmation `pixi run destroy` asks for.
 
 ### Notes on retention
 
