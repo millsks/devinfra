@@ -25,6 +25,16 @@ a superseding ADR, never by editing a decided one.
 | [0014](0014-bundles-are-a-core-owned-registry.md) | Bundles are a Core-owned registry of names, not of members | Accepted |
 | [0015](0015-deferred-smoke-checks.md) | A smoke check whose subject is another Module's side effect is deferred by the driver | Accepted |
 | [0016](0016-gotcha-entries-carry-a-checked-shape.md) | Gotcha entries carry a checked shape | Accepted |
+| [0017](0017-endpoint-documentation-is-generated.md) | Endpoint documentation is generated, not hand-maintained | Accepted |
+
+## Supersessions
+
+A decided ADR is never edited, so where a later one replaces part of an earlier one the
+pointer lives here.
+
+| Superseded | By | What changed |
+|---|---|---|
+| [0012](0012-every-module-carries-its-own-contract.md) — its `scripts/urls.sh` consequence only | [0017](0017-endpoint-documentation-is-generated.md) | 0012 left `urls.sh` hand-maintained and said generating it from `x-endpoints:` "is a separate change". 0017 is that change: the listing and `docs/ENDPOINTS.md` are both generated. Everything else in 0012 — the host-versus-network semantics, the raw-parse requirement, the Module contract — stands unchanged. |
 
 ## Related
 

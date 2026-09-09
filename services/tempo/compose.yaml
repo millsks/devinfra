@@ -12,7 +12,7 @@
 x-endpoints:
   TEMPO_PORT:
     url: http://localhost:${TEMPO_PORT:-3200}
-    description: Tempo HTTP API — /ready, /api/traces/<id>, and OTLP ingest. Not in scripts/urls.sh.
+    description: Tempo HTTP API — /ready, /api/traces/<id>, and OTLP ingest.
 
 services:
   tempo:

@@ -171,30 +171,23 @@ instead (ADR 0013).
 
 ## Connecting your application
 
+Every value your application needs is in [`docs/ENDPOINTS.md`](docs/ENDPOINTS.md) —
+every variable name an SDK actually reads, each with the Module and the
+endpoint key it reaches, then every Module's own endpoints. This README carries no
+copy of them, because a second copy is a copy free to drift.
+
+That file is **generated and must never be hand-edited**. It is rendered from each
+Module's `x-endpoints:` block and the root `compose.yaml`'s `x-app-variables:`
+registry, resolved against the tracked `.env.example`; `pixi run endpoints`
+regenerates it and `pixi run lint-endpoints` fails the build — in `pixi run lint`,
+in `pixi run ci` and in the pre-commit hook — while the document, the template and
+this README disagree with those two registries.
+
+`pixi run urls` prints the same listing at *your* values, scoped to the Selection
+you are actually running, so a narrowed `COMPOSE_PROFILES` prints only what is up.
+
 Default credentials are in `.env.example`. They are deliberately trivial; this
 stack is for local development and binds to loopback only.
-
-```sh
-DATABASE_URL=postgresql://devinfra:devinfra@localhost:5432/devinfra
-
-REDIS_URL=redis://:devinfra@localhost:6379/0          # cache
-CELERY_BROKER_URL=redis://:devinfra@localhost:6379/1  # broker
-CELERY_RESULT_BACKEND=redis://:devinfra@localhost:6379/2
-
-OIDC_ISSUER=http://localhost:8080/realms/devinfra
-OIDC_CLIENT_ID=devinfra-api
-OIDC_CLIENT_SECRET=devinfra-local-secret
-
-AWS_ENDPOINT_URL=http://localhost:9100
-AWS_ACCESS_KEY_ID=devinfra
-AWS_SECRET_ACCESS_KEY=devinfra123
-
-SMTP_HOST=localhost
-SMTP_PORT=1025
-
-OTEL_EXPORTER_OTLP_ENDPOINT=http://localhost:4318
-OTEL_EXPORTER_OTLP_PROTOCOL=http/protobuf
-```
 
 ### Redis database allocation
 
@@ -222,9 +215,9 @@ celery -A myapp worker --loglevel=info
 celery -A myapp beat --loglevel=info
 ```
 
-Flower is already pointed at the same broker, so workers appear at
-http://localhost:5555 as soon as they connect. It shows an empty cluster until
-then, which is expected rather than an error.
+Flower is already pointed at the same broker, so workers appear in the Flower UI
+as soon as they connect — `pixi run urls` prints its address. It shows an empty
+cluster until then, which is expected rather than an error.
 
 ## Keycloak
 
@@ -241,7 +234,8 @@ The `devinfra` realm is imported on first boot with three clients and two users.
 | `dev` | `dev` | `app_user`, `app_admin` |
 | `user` | `user` | `app_user` |
 
-Admin console: http://localhost:8080/admin (`admin` / `admin`).
+Admin console: `/admin` on the Keycloak endpoint (`admin` / `admin`);
+`pixi run urls` prints the address.
 
 Access tokens carry a `roles` claim and an `aud` of `devinfra-api`, so audience
 validation works out of the box. Mint one to inspect:
@@ -251,7 +245,7 @@ pixi run token | jq -r .access_token | cut -d. -f2 | base64 -d | jq
 ```
 
 Keycloak's SMTP is wired to Mailpit, so password-reset and verification emails
-land in http://localhost:8025 instead of going nowhere.
+land in Mailpit's inbox instead of going nowhere.
 
 ### Editing the realm
 
@@ -285,6 +279,10 @@ common/base.yaml                restart, logging and networks; every module's
                                 `extends` target, never itself included
 .env.example                    every tunable, with defaults
 CHANGELOG.md                    release notes; the breaking change leads it
+docs/ENDPOINTS.md               every connection detail, generated from the Modules'
+                                x-endpoints: and the root x-app-variables: registry;
+                                never hand-edited (`pixi run endpoints`)
+docs/adr/                       the decision records behind the rules above
 pixi.toml / pixi.lock           validation tasks and their pinned tools
 pyproject.toml                  ruff and mypy settings (no package here)
 .yamllint.yaml                  YAML lint rules
@@ -305,7 +303,11 @@ scripts/select.sh               a Selection expanded to its depends_on closure; 
 scripts/resolve_selection.py    the closure itself: the Module graph, the profile index
                                 and the Selections lint-compose and lint-config validate
 scripts/wait-healthy.sh         blocks until healthy; non-zero on timeout
-scripts/urls.sh                 every service endpoint
+scripts/urls.sh                 the endpoint listing for the ambient Selection; a
+                                wrapper over scripts/endpoints.py, holding no list
+scripts/endpoints.py            the generator: x-endpoints: plus x-app-variables:,
+                                rendered as that listing and as docs/ENDPOINTS.md, and
+                                --check'd against both (ADR 0017)
 scripts/init-env.sh             .env from the template, never overwriting
 scripts/bootstrap.sh            points core.hooksPath at .githooks/, then reads it back
 scripts/up-core.sh              the core Bundle, requested by name
@@ -411,7 +413,8 @@ services/                       one directory per Module, listed in the order
 | `pixi run logs keycloak` | Tail one service (omit the name for all) | `make logs S=keycloak` |
 | `pixi run smoke` | End-to-end verification | `make smoke` |
 | `pixi run smoke-strict` | The same suite with a skip scored as a failure | — |
-| `pixi run urls` | Print every endpoint | `make urls` |
+| `pixi run urls` | Print the endpoints the ambient Selection publishes | `make urls` |
+| `pixi run endpoints` | Regenerate `docs/ENDPOINTS.md` from module metadata | — |
 | `pixi run psql keycloak` | psql shell against any database | `make psql DB=keycloak` |
 | `pixi run redis-cli 1` | redis-cli against the broker db | `make redis-cli N=1` |
 | `pixi run mc` | Shell with the S3 client (`mc`) configured | `make mc` |
@@ -421,13 +424,14 @@ services/                       one directory per Module, listed in the order
 | `pixi run keycloak-export` | Write the live realm back over the JSON | `make keycloak-export` |
 | `pixi run token dev dev` | Mint an access token | `make token U=dev P=dev` |
 | `pixi run config` | Render the resolved compose configuration | `make config` |
-| `pixi run lint` | Validate compose, rendered config, pins, the update bot, the gotcha registers, shell, YAML, JSON, Python | `make lint` |
+| `pixi run lint` | Validate compose, rendered config, pins, the update bot, the gotcha registers, the endpoint document, shell, YAML, JSON, Python | `make lint` |
 | `pixi run select keycloak` | Print the Modules a Selection resolves to | — |
 | `pixi run lint-compose` | `config -q` for every Selection: each Module, each Bundle, and every Module at once | — |
 | `pixi run lint-config` | Assert the *rendered* config's ports and image tags, each module's identifier-only volume and network stanzas, and the `x-bundles` registry against what the module files declare | — |
 | `pixi run lint-pins` | Assert every pin agrees between `.env.example` and the compose files | — |
 | `pixi run lint-renovate` | Assert the update bot's regexes still detect every image pin | — |
 | `pixi run lint-gotchas` | Assert every Module's `gotchas.md` carries entries in the four-field shape | — |
+| `pixi run lint-endpoints` | Assert `docs/ENDPOINTS.md`, `.env.example` and this README still agree with `x-endpoints:` and `x-app-variables:` | — |
 | `pixi run test` | Prove the checks and scripts hold their contracts | — |
 | `pixi run ci` | The done-gate: lint + test | — |
 | `pixi run bootstrap` | Install this clone's git hooks (`core.hooksPath`) | — |

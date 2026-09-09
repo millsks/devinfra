@@ -48,6 +48,14 @@ Docker Compose stack of local development infrastructure — Postgres, Redis, Ke
 - Changing anything under `services/<name>/` — read that Module's own `gotchas.md` first; it is the
   register of the traps that cost real time, and the README carries no copies of it. Add a gotcha you
   hit to that file in the four-field shape, never to the README.
+- Connection details live in the Module's `x-endpoints:` and in the root `compose.yaml`'s
+  `x-app-variables:` registry — the application tier of ADR 0003, one entry per SDK-dictated name,
+  each naming one owning Module and one of that Module's endpoint keys. `docs/ENDPOINTS.md` is
+  generated from the two and must never be hand-edited; regenerate with `pixi run endpoints`, and
+  `pixi run lint-endpoints` fails the build when the document, `.env.example` or the README drifts
+  from them (ADR 0017). The README states a connection detail only in its `## Contents`
+  table, whose ports are pinned to what the Modules publish; anywhere else in it is a build
+  failure.
 - Architecture rules binding future changes: `_bmad-output/planning-artifacts/architecture/architecture-devinfra-2026-09-06/ARCHITECTURE-SPINE.md` (21 decisions). Rationale in `docs/adr/`.
 - Planned work: `_bmad-output/planning-artifacts/epics.md`.
 

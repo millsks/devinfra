@@ -86,7 +86,7 @@ smoke: ## Run the end-to-end smoke test against the running stack
 	@pixi run smoke
 
 .PHONY: urls
-urls: ## Print every service endpoint
+urls: ## Print the endpoints the ambient Selection publishes
 	@$(NOTICE)
 	@pixi run urls
 

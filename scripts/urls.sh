@@ -1,44 +1,48 @@
 #!/usr/bin/env bash
-# Print every service endpoint the stack publishes.
+# Print the endpoints the ambient Selection publishes (ADR 0017).
 #
-#   ./scripts/urls.sh
+#   ./scripts/urls.sh                       # whatever COMPOSE_PROFILES asks for
+#   ./scripts/urls.sh postgres redis        # an explicit Selection
+#   ./scripts/urls.sh --all                 # every Module
 #
-# Falls back to the same defaults compose.yaml interpolates, so the list is
-# complete whether or not .env exists.
+# The list is generated, never hand-maintained. scripts/endpoints.py reads each Module's
+# own top-level `x-endpoints:` block and the root compose.yaml's `x-app-variables:`
+# registry, and interpolates them against the environment scripts/lib/common.sh has
+# already loaded .env into — so what prints here is your values, at your ports.
+#
+# A Module missing from this list is a Module missing an `x-endpoints:` block, which
+# `pixi run lint-config` already refuses. The three copies this script used to keep — the
+# fourteen port defaults, the twelve printf lines, and the header claiming completeness
+# while omitting LOKI_PORT, TEMPO_PORT and KEYCLOAK_MGMT_PORT — are gone; the same
+# generator writes docs/ENDPOINTS.md, and `pixi run lint-endpoints` fails the build when
+# the two disagree.
+#
+# A wrapper rather than a deletion: `pixi run urls`, `make urls` and this path run
+# standalone are three documented entry points, and the Makefile forwarding is pinned by
+# set equality in scripts/lint_selftest.py.
+#
+# Overridable seam, following the DEVINFRA_<TOOL> convention scripts/token.sh set:
+#   DEVINFRA_PYTHON  the interpreter that runs the generator  (default "python3")
 set -euo pipefail
 
 # shellcheck source=scripts/lib/common.sh
 source "$(dirname "$0")/lib/common.sh"
 
-# Port defaults mirror compose.yaml's ${VAR:-N} forms one for one. A service
-# missing from this list is a service a developer cannot find.
-: "${POSTGRES_PORT:=5432}"
-: "${REDIS_PORT:=6379}"
-: "${KEYCLOAK_PORT:=8080}"
-: "${MINIO_API_PORT:=9100}"
-: "${MINIO_CONSOLE_PORT:=9101}"
-: "${MAILPIT_SMTP_PORT:=1025}"
-: "${MAILPIT_UI_PORT:=8025}"
-: "${PGADMIN_PORT:=5050}"
-: "${REDISINSIGHT_PORT:=5540}"
-: "${FLOWER_PORT:=5555}"
-: "${GRAFANA_PORT:=3000}"
-: "${PROMETHEUS_PORT:=9090}"
-: "${OTEL_GRPC_PORT:=4317}"
-: "${OTEL_HTTP_PORT:=4318}"
+read -r -a DEVINFRA_PYTHON_ARGV <<<"${DEVINFRA_PYTHON:-python3}"
 
-printf '\n\033[1mEndpoints\033[0m\n'
-printf '  %-16s postgresql://%s@localhost:%s/%s\n' "PostgreSQL" "$POSTGRES_USER" "$POSTGRES_PORT" "$POSTGRES_DB"
-printf '  %-16s redis://:%s@localhost:%s\n' "Redis" "$REDIS_PASSWORD" "$REDIS_PORT"
-printf '  %-16s http://localhost:%s  (admin console: /admin)\n' "Keycloak" "$KEYCLOAK_PORT"
-printf '  %-16s http://localhost:%s/realms/%s/.well-known/openid-configuration\n' \
-    "  OIDC discovery" "$KEYCLOAK_PORT" "$KEYCLOAK_REALM"
-printf '  %-16s http://localhost:%s  (API: localhost:%s)\n' "MinIO console" "$MINIO_CONSOLE_PORT" "$MINIO_API_PORT"
-printf '  %-16s http://localhost:%s  (SMTP: localhost:%s)\n' "Mailpit" "$MAILPIT_UI_PORT" "$MAILPIT_SMTP_PORT"
-printf '  %-16s http://localhost:%s\n' "pgAdmin" "$PGADMIN_PORT"
-printf '  %-16s http://localhost:%s\n' "RedisInsight" "$REDISINSIGHT_PORT"
-printf '  %-16s http://localhost:%s\n' "Flower" "$FLOWER_PORT"
-printf '  %-16s http://localhost:%s\n' "Grafana" "$GRAFANA_PORT"
-printf '  %-16s http://localhost:%s\n' "Prometheus" "$PROMETHEUS_PORT"
-printf '  %-16s grpc://localhost:%s  http://localhost:%s\n' "OTLP ingest" "$OTEL_GRPC_PORT" "$OTEL_HTTP_PORT"
-printf '\n'
+# An argument that is empty counts as none given: pixi task arguments always arrive as one
+# argument even when the developer typed nothing, so `pixi run urls` would otherwise ask
+# the generator for a Selection named "".
+argv=()
+for name in "$@"; do
+    if [[ -n "$name" ]]; then
+        argv+=("$name")
+    fi
+done
+
+# Two exec lines rather than one with `"${argv[@]}"`: expanding an empty array under
+# `set -u` is an error on bash 3.2, which is still what `env bash` finds on a stock macOS.
+if ((${#argv[@]} == 0)); then
+    exec "${DEVINFRA_PYTHON_ARGV[@]}" scripts/endpoints.py
+fi
+exec "${DEVINFRA_PYTHON_ARGV[@]}" scripts/endpoints.py "${argv[@]}"

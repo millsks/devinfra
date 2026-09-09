@@ -112,7 +112,7 @@ cmd = "./scripts/smoke-test.sh"
 env = { SMOKE_STRICT = "1" }
 
 [tasks.urls]
-description = "Print every service endpoint"
+description = "Print the endpoints the ambient Selection publishes"
 cmd = "./scripts/urls.sh"
 
 [tasks.help]
@@ -199,6 +199,19 @@ cmd = "python scripts/assert_renovate.py"
 description = "Assert every Module's gotchas.md carries entries in the checked four-field shape: symptom, cause, fix, affected versions"
 cmd = "python scripts/check_gotchas.py"
 
+# The generator and its drift check. `endpoints` rewrites the committed document;
+# `lint-endpoints` re-renders it from the tracked inputs and refuses on any divergence,
+# so a changed port or credential either changes docs/ENDPOINTS.md or fails the build.
+# Both read Markdown and YAML and need no container runtime, so the check joins the
+# pre-commit hook as well as `lint`. See docs/adr/0017.
+[tasks.lint-endpoints]
+description = "Assert docs/ENDPOINTS.md, .env.example and the README still agree with every Module's x-endpoints: block and the x-app-variables: registry"
+cmd = "python scripts/endpoints.py --check"
+
+[tasks.endpoints]
+description = "Regenerate docs/ENDPOINTS.md from module metadata"
+cmd = "python scripts/endpoints.py --format markdown --write docs/ENDPOINTS.md"
+
 [tasks.lint-shell]
 description = "shellcheck every shell script in the repository, the git hooks included"
 cmd = "shellcheck scripts/**/*.sh services/**/*.sh .githooks/*"
@@ -221,7 +234,7 @@ cmd = "python scripts/lint_selftest.py"
 
 [tasks.lint]
 description = "Run every validation check"
-depends-on = ["lint-compose", "lint-config", "lint-pins", "lint-renovate", "lint-gotchas", "lint-shell", "lint-yaml", "lint-json", "lint-python"]
+depends-on = ["lint-compose", "lint-config", "lint-pins", "lint-renovate", "lint-gotchas", "lint-endpoints", "lint-shell", "lint-yaml", "lint-json", "lint-python"]
 
 [tasks.ci]
 description = "The done-gate: every check this repository needs"
@@ -261,7 +274,7 @@ cmd = "./scripts/bootstrap.sh"
 
 [tasks.precommit]
 description = "The offline half of lint: what the pre-commit hook runs"
-depends-on = ["lint-shell", "lint-yaml", "lint-json", "lint-pins", "lint-renovate", "lint-gotchas", "lint-python"]
+depends-on = ["lint-shell", "lint-yaml", "lint-json", "lint-pins", "lint-renovate", "lint-gotchas", "lint-endpoints", "lint-python"]
 
 [tasks.commit-msg]
 description = "Check a commit message file against Conventional Commits"

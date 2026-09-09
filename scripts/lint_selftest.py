@@ -57,6 +57,31 @@ FORBIDDEN = ("command -v", "which ", "|| true", "skipping")
 #: Tools a contributor might not have. The lint surface must supply all of them.
 SUPPLIED_TOOLS = ("shellcheck", "yamllint", "python", "python3", "ruff", "mypy")
 
+#: Every name the root compose.yaml's `x-app-variables:` registry declares (ADR 0003's
+#: application tier, ADR 0017). Stated here rather than derived from the registry for the
+#: same reason MAKE_FORWARDS is stated rather than read out of the Makefile: every other
+#: assertion about the registry iterates whatever it happens to contain, so a *deleted*
+#: entry — a name an application's SDK actually reads, dropped by a bad merge — would
+#: satisfy all of them and vanish from docs/ENDPOINTS.md, `pixi run urls` and the
+#: repository with the whole gate green. Adding or removing one is a deliberate edit here.
+APP_VARIABLES = {
+    "AWS_ACCESS_KEY_ID",
+    "AWS_ENDPOINT_URL",
+    "AWS_SECRET_ACCESS_KEY",
+    "CELERY_BROKER_URL",
+    "CELERY_RESULT_BACKEND",
+    "DATABASE_URL",
+    "OIDC_CLIENT_ID",
+    "OIDC_CLIENT_SECRET",
+    "OIDC_DISCOVERY_URL",
+    "OIDC_ISSUER",
+    "OTEL_EXPORTER_OTLP_ENDPOINT",
+    "OTEL_EXPORTER_OTLP_PROTOCOL",
+    "REDIS_URL",
+    "SMTP_HOST",
+    "SMTP_PORT",
+}
+
 #: Suffix used to hide a file from a lint glob, then put it back.
 MOVED = ".selftest-moved"
 
@@ -432,11 +457,24 @@ def planted(path: Path, body: str) -> Iterator[None]:
     """
     if path.exists():
         raise FileExistsError(f"selftest fixture would overwrite {path}")
+    # A fixture may need a directory of its own — a planted Module is a directory holding a
+    # compose.yaml — so the missing parents are created here and exactly the ones this call
+    # created are removed again, deepest first. `rmdir` refuses a directory that is not
+    # empty, so a parent that turned out to hold anything else survives untouched.
+    created: list[Path] = []
+    parent = path.parent
+    while not parent.exists():
+        created.append(parent)
+        parent = parent.parent
+    path.parent.mkdir(parents=True, exist_ok=True)
     path.write_text(body, encoding="utf-8", newline="\n")
     try:
         yield
     finally:
         path.unlink(missing_ok=True)
+        for directory in created:
+            with contextlib.suppress(OSError):
+                directory.rmdir()
 
 
 @contextlib.contextmanager
@@ -797,9 +835,9 @@ def main() -> int:
     shared = base_model.get("services", {}).get("defaults")
     expect("common/base.yaml declares a 'defaults' service", isinstance(shared, dict), f"got {shared!r}")
     root_keys = set(root_model)
-    root_expected = {"name", "include", "volumes", "networks", "x-bundles"}
+    root_expected = {"name", "include", "volumes", "networks", "x-bundles", "x-app-variables"}
     expect(
-        "compose.yaml declares name, x-bundles, include, volumes and networks and nothing else",
+        "compose.yaml declares name, the two registries, include, volumes and networks and nothing else",
         root_keys == root_expected,
         f"unexpected {sorted(root_keys - root_expected)}, "
         f"missing {sorted(root_expected - root_keys)} — a service or a "
@@ -1132,6 +1170,16 @@ def main() -> int:
             REPO / "compose.override.yaml",
             "services:\n  zz-selftest-defect:\n    image: alpine\n    depends_on:\n      - zz-absent-service\n",
         ),
+        # A Module directory carrying no `x-endpoints:` block at all. `lint-config` refuses
+        # that too, but this is the generator's own refusal and it is the one that matters
+        # here: a Module the walk reached and could document nothing about must be a named
+        # failure, never a document that is quietly one section short. The fixture is a
+        # directory of its own, which planted() creates and removes again.
+        (
+            "lint-endpoints",
+            REPO / "services" / "zz-selftest-defect" / "compose.yaml",
+            "services:\n  zz-selftest-defect:\n    image: alpine:3\n    profiles: [zz-selftest-defect]\n",
+        ),
     ]
     for task, fixture, body_text in defects:
         with planted(fixture, body_text):
@@ -1181,6 +1229,10 @@ def main() -> int:
         # cannot silently stop matching, which is the only failure this mechanism
         # detects, and assert_renovate.py parses that file on every run anyway.
         ("lint-json", sorted((REPO / "services").rglob("*.json"))),
+        # The generator's own walk. With no module file there is no catalog to render from,
+        # and a document rendered over an empty walk would document nothing and say so at
+        # exit 0 — the pass-over-nothing every other entry here exists to prevent.
+        ("lint-endpoints", sorted((REPO / "services").glob("*/compose.yaml"))),
     ]
     for task, targets in empties:
         expect(f"{task} has a glob target to empty", bool(targets), "found no files to hide")
@@ -1376,6 +1428,423 @@ def main() -> int:
         not strays,
         f"{len(strays)} bolded bullet(s) back in the README: {strays[:3]} — they belong in the "
         f"affected Module's gotchas.md, where a second copy cannot drift from the first",
+    )
+
+    # --- The endpoint document cannot drift (ADR 0017). ---
+    #
+    # One case per row of the generator's contract. Every fixture is staged with
+    # moved_aside + planted — the tracked file is renamed, the mutation is written at its
+    # path, and the original comes back however the case ends — so nothing tracked is edited
+    # in place and planted() refuses a path that is still occupied.
+    app_root = REPO / "compose.yaml"
+    app_root_text = app_root.read_text(encoding="utf-8")
+    app_registry = root_model.get("x-app-variables")
+    # Asserted positively here as well as negatively below, for the same reason the Bundle
+    # registry is: every negative case plants a mutated root file, so if the shipped registry
+    # were itself absent or empty every one of them would still red for its own reason while
+    # the real file registered nothing.
+    expect(
+        "compose.yaml declares a non-empty x-app-variables registry",
+        isinstance(app_registry, dict) and bool(app_registry),
+        f"x-app-variables is {app_registry!r} — read as 'no application variables' the "
+        f"application tier ADR 0003 defines would silently cease to exist",
+    )
+    shipped_variables: dict[str, Any] = app_registry if isinstance(app_registry, dict) else {}
+    # Set equality, the same way MAKE_FORWARDS pins the Makefile's recipes. Every assertion
+    # below iterates `shipped_variables`, so all of them are satisfied by a registry that has
+    # quietly lost an entry — and the endpoint half cannot lose one (assert_config.py
+    # reconciles x-endpoints: against the ports the Module publishes) while this half was
+    # reconciled against nothing at all.
+    expect(
+        "the x-app-variables registry declares exactly the application variables it is meant to",
+        set(shipped_variables) == APP_VARIABLES,
+        f"registry declares {sorted(shipped_variables)}; APP_VARIABLES expects "
+        f"{sorted(APP_VARIABLES)} — added {sorted(set(shipped_variables) - APP_VARIABLES)}, "
+        f"lost {sorted(APP_VARIABLES - set(shipped_variables))}",
+    )
+    for variable_name, entry in sorted(shipped_variables.items()):
+        expect(
+            f"the {variable_name} registry entry names one Module, one endpoint, a value and a purpose",
+            isinstance(entry, dict) and set(entry) == {"module", "endpoint", "value", "description"},
+            f"x-app-variables.{variable_name} is {entry!r} — an entry names exactly one owning "
+            f"Module and one of that Module's endpoint keys, which is what makes the name "
+            f"unambiguous where names look alike (ADR 0003, ADR 0017)",
+        )
+
+    # The banner is the file's only defence against being hand-edited, and it is worth
+    # nothing if it names a task that does not exist. Every task it names is checked against
+    # the manifest rather than against a literal, so renaming the task reds this.
+    endpoint_document = REPO / "docs" / "ENDPOINTS.md"
+    expect(
+        "the generated endpoint document is committed",
+        endpoint_document.is_file(),
+        f"{endpoint_document} is absent, so `pixi run lint-endpoints` has nothing to compare against",
+    )
+    endpoint_text = endpoint_document.read_text(encoding="utf-8") if endpoint_document.is_file() else ""
+    banner_tasks = re.findall(r"`pixi run ([a-z-]+)`", endpoint_text.split("-->", 1)[0])
+    expect(
+        "the endpoint document's banner names tasks pixi.toml actually declares",
+        bool(banner_tasks) and all(name in tasks for name in banner_tasks),
+        f"banner names {banner_tasks}; pixi.toml declares {sorted(tasks)}",
+    )
+
+    # The writer itself, which nothing else here runs — and it is the task the do-not-edit
+    # banner and the stale-document diagnostic both tell a contributor to reach for. A
+    # generator that could no longer write would leave `pixi run ci` green while the one
+    # instruction every reader is given was broken.
+    # Staged with moved_aside like every other case here: asserted *after* the write, this
+    # would otherwise leave the tracked document rewritten on the one run where the render
+    # and the commit disagree — the failing run, when a clean tree matters most.
+    with moved_aside([endpoint_document]):
+        r = pixi("endpoints")
+        regenerated = endpoint_document.read_text(encoding="utf-8") if endpoint_document.is_file() else ""
+        endpoint_document.unlink(missing_ok=True)
+    expect("endpoints regenerates the document", r.returncode == 0, f"output: {(r.stdout + r.stderr)!r}")
+    expect(
+        "regenerating leaves the committed document byte-for-byte",
+        regenerated == endpoint_text,
+        "`pixi run endpoints` renders something other than what is committed, so what is "
+        "committed is not what the module metadata renders",
+    )
+
+    # The two combinations `settle()` refuses, both of which pixi makes reachable by
+    # accident: task arguments are appended to the task body, so a Selection typed after
+    # either task name arrives as an option the body never asked for. Untested, the guards
+    # can be dropped or inverted with the whole gate green — and the damage from the second
+    # is a truncated tracked file that only the *next* lint-endpoints run reports.
+    settled_refusals: list[tuple[str, tuple[str, ...], list[str]]] = [
+        (
+            "a Selection typed after `pixi run endpoints`",
+            ("endpoints", "postgres"),
+            ["docs/ENDPOINTS.md", "postgres"],
+        ),
+        (
+            "a Selection typed after `pixi run lint-endpoints`",
+            ("lint-endpoints", "postgres"),
+            ["--check", "SELECTION"],
+        ),
+    ]
+    for case, task_argv, needles in settled_refusals:
+        r = pixi(*task_argv)
+        expect(f"the generator refuses {case}", r.returncode != 0, f"exited 0; stdout: {r.stdout!r}")
+        unsaid = [needle for needle in needles if needle not in r.stderr]
+        expect(
+            f"the generator says why it refuses {case}",
+            not unsaid,
+            f"never said {unsaid}; stderr: {r.stderr!r}",
+        )
+        expect(
+            f"the committed document survives {case}",
+            endpoint_document.read_text(encoding="utf-8") == endpoint_text,
+            "the tracked document was rewritten by a call that should never have written",
+        )
+
+    # The clean direction over the real tree, and the number it walked. "OK" on its own is a
+    # sentence a check that walked one Module writes just as happily as one that walked
+    # thirteen, so the line count is asserted against the catalog.
+    r = pixi("lint-endpoints")
+    endpoint_reported = [line for line in r.stdout.splitlines() if ": OK " in line]
+    expect("lint-endpoints passes over the tracked tree", r.returncode == 0, f"output: {(r.stdout + r.stderr)!r}")
+    expect(
+        "lint-endpoints reports every Module and every application variable",
+        bool(module_dir_names)
+        and bool(shipped_variables)
+        and all(f"{module_name}: OK " in r.stdout for module_name in module_dir_names)
+        and all(f"{variable_name}: OK " in r.stdout for variable_name in shipped_variables)
+        and len(endpoint_reported) >= len(module_dir_names) + len(shipped_variables),
+        f"{len(endpoint_reported)} OK lines for {len(module_dir_names)} Modules and "
+        f"{len(shipped_variables)} application variables; stdout: {r.stdout!r}",
+    )
+
+    # The mutations are built by round-tripping the real model through YAML rather than by
+    # string surgery, so a case cannot accidentally take `include:` or `volumes:` with it and
+    # red for a reason that has nothing to do with the registry.
+    def root_with_variables(registry: Any) -> str:
+        mutated = dict(root_model)
+        if registry is None:
+            mutated.pop("x-app-variables", None)
+        else:
+            mutated["x-app-variables"] = registry
+        return str(yaml.safe_dump(mutated, sort_keys=False, default_flow_style=False))
+
+    dsn_entry: dict[str, Any] = dict(shipped_variables.get("DATABASE_URL") or {})
+    registry_defects: list[tuple[str, Any, list[str]]] = [
+        (
+            "a registry entry naming a Module that does not exist",
+            {**shipped_variables, "DATABASE_URL": {**dsn_entry, "module": "zz-nope"}},
+            ["DATABASE_URL", "zz-nope"],
+        ),
+        # The endpoint key is what ties the variable to one address rather than to a Module
+        # in general. A key the Module does not publish is a pointer at nothing.
+        (
+            "a registry entry naming an endpoint its Module does not publish",
+            {**shipped_variables, "DATABASE_URL": {**dsn_entry, "endpoint": "ZZ_NOPE_PORT"}},
+            ["DATABASE_URL", "ZZ_NOPE_PORT", "POSTGRES_PORT"],
+        ),
+        # `<MODULE>_<CONCERN>` belongs to the Module tier and is owned by the Module it is
+        # named for (ADR 0003). A name carrying one Module's prefix while another Module owns
+        # the entry is exactly the collision the two-tier split exists to prevent.
+        (
+            "a registry name that belongs to another Module's tier",
+            {**shipped_variables, "POSTGRES_URL": {**dsn_entry, "module": "redis", "endpoint": "REDIS_PORT"}},
+            ["POSTGRES_URL", "postgres"],
+        ),
+        # Compose substitutes nothing for an undeclared reference with no default and merely
+        # warns, which in a generated document is a connection string with a hole in it.
+        (
+            "a value referencing a variable nothing declares",
+            {**shipped_variables, "DATABASE_URL": {**dsn_entry, "value": "postgresql://${ZZ_NOPE}@localhost:5432/x"}},
+            ["ZZ_NOPE", "compose.yaml"],
+        ),
+        # The three unreadable shapes, each of which must read as "this registry is
+        # unreadable" and never as "there are no application variables": read the second way
+        # they would render a document with none and exit 0.
+        ("a registry that is a list", ["DATABASE_URL"], ["x-app-variables"]),
+        ("an empty registry", {}, ["x-app-variables"]),
+        ("no registry at all", None, ["x-app-variables"]),
+    ]
+    for case, registry, needles in registry_defects:
+        with moved_aside([app_root]), planted(app_root, root_with_variables(registry)):
+            r = pixi("lint-endpoints")
+            expect(f"lint-endpoints rejects {case}", r.returncode != 0, "exited 0")
+            unsaid = [needle for needle in needles if needle not in r.stderr]
+            expect(
+                f"lint-endpoints names the defect for {case}",
+                not unsaid,
+                f"never said {unsaid}; stderr: {r.stderr!r}",
+            )
+            expect(
+                f"lint-endpoints signs off on nothing for {case}",
+                ": OK " not in r.stdout,
+                f"stdout: {r.stdout!r}",
+            )
+    expect(
+        "the root compose.yaml is restored byte-for-byte after the registry cases",
+        app_root.read_text(encoding="utf-8") == app_root_text,
+        "the real root file did not come back unchanged",
+    )
+
+    # A hand-edited document. The whole point of committing a generated file is that the
+    # regeneration is diffed against it, so an edit that nothing regenerates must fail and
+    # must say which command puts it back.
+    stale_document = endpoint_text.replace("5432", "15432")
+    expect(
+        "the endpoint document carries a value the staleness case can change",
+        stale_document != endpoint_text,
+        "nothing to mutate, so the case below would be comparing a file with itself",
+    )
+    with moved_aside([endpoint_document]), planted(endpoint_document, stale_document):
+        r = pixi("lint-endpoints")
+        expect("lint-endpoints rejects a hand-edited document", r.returncode != 0, "exited 0")
+        unsaid = [needle for needle in ("docs/ENDPOINTS.md", "pixi run endpoints", "15432") if needle not in r.stderr]
+        expect(
+            "lint-endpoints names the document, the difference and the regenerate command",
+            not unsaid,
+            f"never said {unsaid}; stderr: {r.stderr!r}",
+        )
+
+    # …and an absent document is a Refusal rather than a pass: there is nothing to compare a
+    # regeneration against, which is not the same answer as "they agree".
+    with moved_aside([endpoint_document]):
+        r = pixi("lint-endpoints")
+        expect("lint-endpoints fails when the document is absent", r.returncode != 0, "an absent document passed")
+        unsaid = [needle for needle in ("docs/ENDPOINTS.md", "pixi run endpoints") if needle not in r.stderr]
+        expect(
+            "lint-endpoints says the document is not there to compare against",
+            not unsaid,
+            f"never said {unsaid}; stderr: {r.stderr!r}",
+        )
+
+    # The template-versus-default leg, which is required rather than extra. With the document
+    # rendered from .env.example, changing only one of the two sources would leave the
+    # document unchanged and the build green — the silent divergence this story closes.
+    template_source = REPO / ".env.example"
+    template_text = template_source.read_text(encoding="utf-8")
+    disagreeing_template = template_text.replace("GRAFANA_PORT=3000", "GRAFANA_PORT=39999")
+    expect(
+        "the template declares the port the disagreement case changes",
+        disagreeing_template != template_text,
+        "GRAFANA_PORT=3000 is not in .env.example, so the case below would change nothing",
+    )
+    with moved_aside([template_source]), planted(template_source, disagreeing_template):
+        r = pixi("lint-endpoints")
+        expect("lint-endpoints rejects a template that disagrees with a compose default", r.returncode != 0, "exited 0")
+        unsaid = [
+            needle
+            for needle in ("GRAFANA_PORT", ".env.example", "services/grafana/compose.yaml")
+            if needle not in r.stderr
+        ]
+        expect(
+            "lint-endpoints names the variable and both files it disagrees between",
+            not unsaid,
+            f"never said {unsaid}; stderr: {r.stderr!r}",
+        )
+
+    # …and the same pin outside the two registries. The port and the password are stated
+    # again in a module's `environment:`, in scripts/lib/common.sh's four defaults and in
+    # scripts/token.sh; pinning only the strings the document is rendered from would leave
+    # every one of those free to drift from .env.example with the build green.
+    restated_defaults: list[tuple[str, Path, str, list[str]]] = [
+        (
+            'a shell script whose `: "${VAR:=default}"` disagrees with the template',
+            REPO / "scripts" / "token.sh",
+            (REPO / "scripts" / "token.sh")
+            .read_text(encoding="utf-8")
+            .replace(': "${KEYCLOAK_PORT:=8080}"', ': "${KEYCLOAK_PORT:=9999}"'),
+            ["KEYCLOAK_PORT", "scripts/token.sh", ".env.example"],
+        ),
+        (
+            "a module `environment:` default that disagrees with the template",
+            REPO / "services" / "postgres" / "compose.yaml",
+            (REPO / "services" / "postgres" / "compose.yaml")
+            .read_text(encoding="utf-8")
+            .replace(
+                "POSTGRES_PASSWORD: ${POSTGRES_PASSWORD:-devinfra}", "POSTGRES_PASSWORD: ${POSTGRES_PASSWORD:-zz}"
+            ),
+            ["POSTGRES_PASSWORD", "services/postgres/compose.yaml", ".env.example"],
+        ),
+    ]
+    for case, restated_path, body_text, needles in restated_defaults:
+        expect(
+            f"the fixture for {case} actually differs from the tracked file",
+            body_text != restated_path.read_text(encoding="utf-8"),
+            "the mutation matched nothing, so this case would assert on the real file",
+        )
+        with moved_aside([restated_path]), planted(restated_path, body_text):
+            r = pixi("lint-endpoints")
+            expect(f"lint-endpoints rejects {case}", r.returncode != 0, "exited 0")
+            unsaid = [needle for needle in needles if needle not in r.stderr]
+            expect(
+                f"lint-endpoints names the variable and the file for {case}",
+                not unsaid,
+                f"never said {unsaid}; stderr: {r.stderr!r}",
+            )
+
+    # The three per-entry shapes read_endpoints reports on. `lint-config` refuses a Module
+    # for carrying no `x-endpoints:` block at all, and the case above covers that; a block
+    # that is *present* but states an entry the generator cannot render is refused nowhere
+    # else, and an entry silently skipped is an endpoint a developer is never told about.
+    grafana_module = REPO / "services" / "grafana" / "compose.yaml"
+    grafana_text = grafana_module.read_text(encoding="utf-8")
+    endpoint_entry_defects: list[tuple[str, str, str, list[str]]] = [
+        (
+            "an x-endpoints entry that is not a mapping",
+            "  GRAFANA_PORT:\n    url: http://localhost:${GRAFANA_PORT:-3000}\n"
+            "    description: Grafana UI and HTTP API over Prometheus, Loki and Tempo.\n",
+            "  GRAFANA_PORT: 3000\n",
+            ["GRAFANA_PORT", "mapping"],
+        ),
+        (
+            "an x-endpoints entry declaring an empty url",
+            "    url: http://localhost:${GRAFANA_PORT:-3000}\n",
+            '    url: ""\n',
+            ["GRAFANA_PORT", "url"],
+        ),
+        (
+            "an x-endpoints entry declaring an empty description",
+            "    description: Grafana UI and HTTP API over Prometheus, Loki and Tempo.\n",
+            '    description: ""\n',
+            ["GRAFANA_PORT", "description"],
+        ),
+    ]
+    for case, original_block, replacement, needles in endpoint_entry_defects:
+        body_text = grafana_text.replace(original_block, replacement, 1)
+        expect(
+            f"the grafana fixture for {case} actually differs from the tracked file",
+            body_text != grafana_text,
+            "the mutation matched nothing, so this case would assert on the real Module file",
+        )
+        with moved_aside([grafana_module]), planted(grafana_module, body_text):
+            r = pixi("lint-endpoints")
+            expect(f"lint-endpoints rejects {case}", r.returncode != 0, "exited 0")
+            unsaid = [needle for needle in ("services/grafana/compose.yaml", *needles) if needle not in r.stderr]
+            expect(
+                f"lint-endpoints names the Module and the entry for {case}",
+                not unsaid,
+                f"never said {unsaid}; stderr: {r.stderr!r}",
+            )
+    expect(
+        "services/grafana/compose.yaml is restored byte-for-byte after the entry-shape cases",
+        grafana_module.read_text(encoding="utf-8") == grafana_text,
+        "the real Module file did not come back unchanged",
+    )
+
+    # The README legs. The Contents table keeps its Endpoint column, so what is pinned is
+    # that every port literal in it is a port some Module actually publishes — and that the
+    # rest of the file carries no connection string at all.
+    readme_source = REPO / "README.md"
+    readme_original = readme_source.read_text(encoding="utf-8")
+    readme_defects: list[tuple[str, str, list[str]]] = [
+        (
+            "a Contents row stating a port no Module publishes",
+            readme_original.replace("http://localhost:9090", "http://localhost:9999"),
+            ["README.md", "9999"],
+        ),
+        # A parse that matched nothing must blame the parse, not the content: a reshaped
+        # table would otherwise silently turn the port pin into a check over zero rows.
+        (
+            "a Contents table this check can no longer read",
+            readme_original.replace("| Service | Version | Purpose | Endpoint |", "| Service | Version | Purpose |"),
+            ["README.md", "Contents"],
+        ),
+        # The dotenv block this story removed, grown back. This is the AC in negative form.
+        (
+            "a connection string back in the README prose",
+            readme_original.replace(
+                "## Requirements",
+                "DATABASE_URL=postgresql://devinfra:devinfra@localhost:5432/devinfra\n\n## Requirements",
+                1,
+            ),
+            ["README.md", "connection string", "docs/ENDPOINTS.md"],
+        ),
+        # The same block under the other host spelling this repository uses for the very same
+        # address — BIND_ADDRESS is 127.0.0.1, and the README says so — so a pin that knew
+        # only `localhost` would let the removed block grow straight back.
+        (
+            "a connection string back in the README under the loopback spelling",
+            readme_original.replace(
+                "## Requirements",
+                "AWS_ENDPOINT_URL=http://127.0.0.1:9100\n\n## Requirements",
+                1,
+            ),
+            ["README.md", "connection string", "127.0.0.1"],
+        ),
+        # A port moved out of the row that publishes it and into one that does not. "Is this
+        # some port the stack publishes" cannot see it — it is one — so what fails is that two
+        # rows now claim Prometheus and none claims Grafana.
+        (
+            "a Contents row stating another Module's port",
+            readme_original.replace("| http://localhost:3000 |", "| http://localhost:9090 |"),
+            ["README.md", "prometheus"],
+        ),
+        # The reverse direction. "Every port stated is a port some Module publishes" is
+        # satisfied by a table that states fewer and fewer of them, so a deleted row — or a
+        # new Module nobody added one for — drops out of the at-a-glance index in silence.
+        (
+            "a Contents table naming no port for a Module the catalog publishes",
+            readme_original.replace("| http://localhost:3000 |", "| n/a |"),
+            ["README.md", "grafana"],
+        ),
+    ]
+    for case, body_text, needles in readme_defects:
+        expect(
+            f"the README fixture for {case} actually differs from the tracked file",
+            body_text != readme_original,
+            "the mutation matched nothing, so this case would assert on the real README",
+        )
+        with moved_aside([readme_source]), planted(readme_source, body_text):
+            r = pixi("lint-endpoints")
+            expect(f"lint-endpoints rejects {case}", r.returncode != 0, "exited 0")
+            unsaid = [needle for needle in needles if needle not in r.stderr]
+            expect(
+                f"lint-endpoints names the README defect for {case}",
+                not unsaid,
+                f"never said {unsaid}; stderr: {r.stderr!r}",
+            )
+    expect(
+        "README.md is restored byte-for-byte after the endpoint cases",
+        readme_source.read_text(encoding="utf-8") == readme_original,
+        "the real README did not come back unchanged",
     )
 
     # --- The headline criterion: the tools need not be on the contributor's PATH. ---
@@ -1693,43 +2162,72 @@ def main() -> int:
         finally:
             (REPO / ".env").unlink(missing_ok=True)
 
-        # urls: complete without .env, using the defaults compose.yaml interpolates.
-        r = pixi("urls", env=fresh())
-        services = (
-            "PostgreSQL",
-            "Redis",
-            "Keycloak",
-            "OIDC discovery",
-            "MinIO console",
-            "Mailpit",
-            "pgAdmin",
-            "RedisInsight",
-            "Flower",
-            "Grafana",
-            "Prometheus",
-            "OTLP ingest",
+        # urls: complete on a fresh clone — no .env, no COMPOSE_PROFILES — at the defaults
+        # compose.yaml interpolates. The expectation is derived from the module files, never
+        # restated as a tuple: the hard-coded list of twelve display names and fourteen ports
+        # this replaces *was* the drift it was supposed to catch, having silently lost
+        # LOKI_PORT, TEMPO_PORT and KEYCLOAK_MGMT_PORT while its own header claimed that a
+        # service missing from it is a service a developer cannot find.
+        endpoint_defaults: dict[str, str] = {}
+        declared_endpoint_keys: set[str] = set()
+        for module_path in sorted((REPO / "services").glob("*/compose.yaml")):
+            published = (yaml.safe_load(module_path.read_text(encoding="utf-8")) or {}).get("x-endpoints") or {}
+            for key, entry in published.items():
+                declared_endpoint_keys.add(str(key))
+                url = str(entry.get("url", "")) if isinstance(entry, dict) else ""
+                fallback = re.search(rf"\$\{{{re.escape(str(key))}:-([^}}]*)\}}", url)
+                if fallback is not None:
+                    endpoint_defaults[str(key)] = fallback.group(1)
+        # The derivation, before anything is asserted with it: a walk that found no key, or
+        # a key whose own url does not carry its default, would make every expectation below
+        # pass over nothing.
+        expect(
+            "every x-endpoints: key names its own default in its url",
+            bool(endpoint_defaults) and set(endpoint_defaults) == declared_endpoint_keys,
+            f"derived defaults for {sorted(endpoint_defaults)} out of {sorted(declared_endpoint_keys)}",
         )
+        r = pixi("urls", env=fresh(request=None))
         expect("urls exits 0 without .env", r.returncode == 0, f"exit {r.returncode}: {r.stderr!r}")
-        for service in services:
-            expect(f"urls prints {service} without .env", service in r.stdout, f"stdout: {r.stdout!r}")
-        defaults = (
-            "5432",
-            "6379",
-            "8080",
-            "9101",
-            "9100",
-            "8025",
-            "1025",
-            "5050",
-            "5540",
-            "5555",
-            "3000",
-            "9090",
-            "4317",
-            "4318",
+        for key, fallback_value in sorted(endpoint_defaults.items()):
+            expect(
+                f"urls prints {key} at compose's {fallback_value} without .env",
+                key in r.stdout and fallback_value in r.stdout,
+                f"stdout: {r.stdout!r}",
+            )
+
+        # An explicit Selection argument — the other way all three entry points are invoked,
+        # and the only thing here that proves an argument reaches the generator at all.
+        r = pixi("urls", "postgres", env=fresh(request=None))
+        expect("urls with an explicit Selection exits 0", r.returncode == 0, f"exit {r.returncode}: {r.stderr!r}")
+        expect(
+            "urls with an explicit Selection prints only that Module's endpoints",
+            "POSTGRES_PORT" in r.stdout and "GRAFANA_PORT" not in r.stdout,
+            f"stdout: {r.stdout!r}",
         )
-        for default in defaults:
-            expect(f"urls falls back to compose's {default}", default in r.stdout, f"stdout: {r.stdout!r}")
+        # The Application variables section renders at all. Every other assertion here is
+        # satisfied by the endpoint half alone — `zzuser` and every port reach stdout through
+        # an endpoint URL — so that whole branch could be deleted with the suite still green.
+        expect(
+            "urls renders the application variables the Selection's Modules own",
+            "DATABASE_URL=" in r.stdout,
+            f"stdout: {r.stdout!r}",
+        )
+        # …and renders none for a Selection whose closure owns none. `grafana` pulls in
+        # Prometheus, Loki and Tempo and nothing that the registry names.
+        r = pixi("urls", "grafana", env=fresh(request=None))
+        expect("urls exits 0 for a Selection that owns no application variable", r.returncode == 0, f"{r.stderr!r}")
+        expect(
+            "urls renders no application variable a Selection does not reach",
+            "DATABASE_URL=" not in r.stdout and "Application variables" not in r.stdout,
+            f"stdout: {r.stdout!r}",
+        )
+
+        # …and a name nothing answers to is the resolver's own refusal, with nothing at all on
+        # stdout: a caller reading this listing must never receive a partial one (AD-18).
+        r = pixi("urls", "zz-nope", env=fresh(request=None))
+        expect("urls refuses an unknown Selection name", r.returncode != 0, "exited 0")
+        expect("urls prints no endpoint when it refuses", "_PORT" not in r.stdout, f"stdout: {r.stdout!r}")
+        expect("urls names the unknown Selection", "zz-nope" in r.stderr, f"stderr: {r.stderr!r}")
 
         # --- Task arguments reach the command, and omitting one applies the default. ---
         r = pixi("psql", "keycloak", env=fresh())
@@ -1837,10 +2335,30 @@ def main() -> int:
                 recorded(record) == ["exec", "redis", "redis-cli", "-a", "zzpass", "--no-auth-warning"],
                 f"recorded {recorded(record)}",
             )
+            # The listing is generated and Selection-scoped now, so this case proves both
+            # halves at once. The planted .env asks for `admin,observability`, whose closure
+            # holds Grafana and Postgres but not Keycloak: the Grafana port and the Postgres
+            # user .env declares must reach stdout, and Keycloak's realm and port must not.
+            # A listing that ignored .env would print none of the four; one that ignored the
+            # Selection would print all four.
             r = pixi("urls", env=fresh(request=None))
+            expect("urls exits 0 with a .env present", r.returncode == 0, f"exit {r.returncode}: {r.stderr!r}")
             expect("urls prints the port .env declares", "31337" in r.stdout, f"stdout: {r.stdout!r}")
             expect("urls prints the user .env declares", "zzuser" in r.stdout, f"stdout: {r.stdout!r}")
-            expect("urls prints the realm .env declares", "zzrealm" in r.stdout, f"stdout: {r.stdout!r}")
+            expect(
+                "urls leaves out a Module the ambient Selection excludes",
+                "KEYCLOAK_PORT" not in r.stdout and "zzrealm" not in r.stdout and "8080" not in r.stdout,
+                f"Keycloak is outside the admin,observability closure; stdout: {r.stdout!r}",
+            )
+            # …and `--all`, which the wrapper's header and CHANGELOG.md both document, escapes
+            # that Selection: the Module the case above proved absent must be back.
+            r = pixi("urls", "--all", env=fresh(request=None))
+            expect("urls --all exits 0", r.returncode == 0, f"exit {r.returncode}: {r.stderr!r}")
+            expect(
+                "urls --all prints a Module the ambient Selection excludes",
+                "KEYCLOAK_PORT" in r.stdout and "zzrealm" in r.stdout,
+                f"stdout: {r.stdout!r}",
+            )
 
             # The stub is a child process, so what it observes is what .env
             # actually exported. Without `set -a` around the source these values
@@ -1983,6 +2501,32 @@ def main() -> int:
             "select.sh runs the interpreter DEVINFRA_PYTHON names",
             r.stdout.strip() == "zz-stub-interpreter scripts/resolve_selection.py",
             f"exit {r.returncode}: {r.stdout!r} {r.stderr!r}",
+        )
+
+        # urls.sh reaches the same seam, and it is now the script whose failure mode outside
+        # pixi is exactly the missing-PyYAML refusal above: it used to be pure bash.
+        env = fresh()
+        env["DEVINFRA_PYTHON"] = str(python_stub)
+        r = run_script("urls.sh", "postgres", env=env)
+        expect(
+            "urls.sh runs the interpreter DEVINFRA_PYTHON names",
+            r.stdout.strip() == "zz-stub-interpreter scripts/endpoints.py",
+            f"exit {r.returncode}: {r.stdout!r} {r.stderr!r}",
+        )
+
+        # …and the same entry point producing an actual listing. README.md promises
+        # `./scripts/urls.sh` runs standalone, and every other assertion about it goes
+        # through `pixi run urls` or through the stub above — both of which would stay green
+        # if the wrapper stopped printing anything at all. The interpreter is named rather
+        # than inherited from PATH so the case says nothing about the developer's python3.
+        env = fresh(request=None)
+        env["DEVINFRA_PYTHON"] = sys.executable
+        r = run_script("urls.sh", "postgres", env=env)
+        expect("urls.sh standalone exits 0", r.returncode == 0, f"exit {r.returncode}: {r.stderr!r}")
+        expect(
+            "urls.sh standalone prints the Selection's endpoints",
+            "POSTGRES_PORT" in r.stdout and "GRAFANA_PORT" not in r.stdout,
+            f"stdout: {r.stdout!r}",
         )
 
         # An interpreter that cannot import PyYAML, expressed as a shim ahead of it on
@@ -2720,8 +3264,8 @@ def main() -> int:
                 complete_siblings,
                 ["zz-selftest-contract", "x-endpoints"],
             ),
-            # The urls.sh drift, stated where it can be checked: a port the module
-            # publishes but no endpoint names.
+            # The drift urls.sh had accumulated before ADR 0017 generated it, stated where
+            # it can be checked: a port the module publishes but no endpoint names.
             (
                 "a published port no x-endpoints entry names",
                 endpoints_block + primary_block + '      - "127.0.0.1:${ZZ_OTHER_PORT:-19992}:2"\n',
@@ -2749,7 +3293,7 @@ def main() -> int:
             ),
             # The reverse direction of the endpoint rule. Without it, deleting a ports:
             # line leaves the endpoint declared forever and the block starts lying in
-            # exactly the way scripts/urls.sh already does.
+            # exactly the way scripts/urls.sh did before ADR 0017 generated it.
             (
                 "an x-endpoints entry naming a port the Module does not publish",
                 endpoints_block + probe_no_ports_block,
@@ -5413,6 +5957,13 @@ def main() -> int:
         "the checks that need a container runtime stay in the gate",
         set(RUNTIME_BOUND) <= lint_members,
         f"lint runs {sorted(lint_members)}",
+    )
+    expect(
+        "the pre-commit hook runs the endpoint drift check",
+        "lint-endpoints" in precommit_members,
+        f"precommit runs {sorted(precommit_members)} — ADR 0017 and the README both say the "
+        f"hook is where a drifted docs/ENDPOINTS.md is caught, and precommit <= lint alone "
+        f"would let it be dropped from the hook with every other assertion green",
     )
     expect(
         "the pre-commit hook reaches no check that needs a container runtime",

@@ -730,7 +730,8 @@ def module_contract(paths: list[Path], bundles: frozenset[str]) -> list[str]:
             )
 
         # 5. Endpoints, reconciled against the ports in both directions. This is the drift
-        #    scripts/urls.sh has already accumulated, stated where it can be checked — and a
+        #    scripts/urls.sh had accumulated before ADR 0017 generated it, stated where it
+        #    can be checked — and a
         #    one-way check would only relocate it: a port deleted from ports: would leave its
         #    endpoint declared forever, which is the same lie in the newer file.
         variables, literal_ports = published_ports(services)
