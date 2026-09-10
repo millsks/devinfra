@@ -186,6 +186,14 @@ this README disagree with those two registries.
 `pixi run urls` prints the same listing at *your* values, scoped to the Selection
 you are actually running, so a narrowed `COMPOSE_PROFILES` prints only what is up.
 
+[`examples/worked-example/`](examples/worked-example/README.md) is a runnable
+application that connects to all six Modules using nothing but those variables —
+`pixi run example` exports them straight from the generator and round-trips a token,
+a row, a key, an object, a message and three telemetry signals. It states no
+connection detail of its own, which is what makes it evidence that the published
+ones are right rather than merely self-consistent (ADR 0019). It is a worked
+example and says so; it is not a production application template.
+
 Default credentials are in `.env.example`. They are deliberately trivial; this
 stack is for local development and binds to loopback only.
 
@@ -306,8 +314,10 @@ scripts/wait-healthy.sh         blocks until healthy; non-zero on timeout
 scripts/urls.sh                 the endpoint listing for the ambient Selection; a
                                 wrapper over scripts/endpoints.py, holding no list
 scripts/endpoints.py            the generator: x-endpoints: plus x-app-variables:,
-                                rendered as that listing and as docs/ENDPOINTS.md, and
-                                --check'd against both (ADR 0017)
+                                rendered as that listing, as docs/ENDPOINTS.md, and as the
+                                NAME=value lines `--format env` emits for the worked
+                                example to export; --check'd against the first two
+                                (ADR 0017, ADR 0019)
 scripts/init-env.sh             .env from the template, never overwriting
 scripts/bootstrap.sh            points core.hooksPath at .githooks/, then reads it back
 scripts/up-core.sh              the core Bundle, requested by name
@@ -324,6 +334,10 @@ scripts/keycloak-reimport.sh    replaces the realm from the JSON and restarts
                                 Keycloak; requires typing `reimport`
 scripts/keycloak-export.sh      live realm back over the JSON
 scripts/token.sh                mint an access token via the CLI client
+scripts/example.sh              runs the worked example: resolves the Selection, exports
+                                the generated application variables, runs the
+                                application, then proves the mail and the three signals
+                                arrived (ADR 0019)
 scripts/smoke-test.sh           the smoke driver: preflights, counters, helpers, then a
                                 glob over services/*/smoke.sh; SMOKE_STRICT=1 forbids skips
 scripts/lint-compose.sh         `config -q` for every Selection: each Module, each Bundle,
@@ -346,6 +360,17 @@ scripts/check_gotchas.py        every Module's gotchas.md, entry by entry: the f
 scripts/podman-socket.sh        stops Docker and enables Podman's API socket (CI)
 scripts/assert-podman.sh        proves Podman itself reports the running containers
 scripts/lint_selftest.py        proves the lint surface and the scripts hold
+examples/                       runnable examples, run on the host from the one pixi
+                                environment. Not Modules: no compose fragment, no
+                                profile, no image, no smoke.sh (ADR 0019)
+  worked-example/main.py        the application: six round trips against the six
+                                Modules, each in its own span, under one
+                                service.name marker, reading only the generated
+                                application variables and stating no connection
+                                detail of its own
+  worked-example/README.md      what it proves, how to run it, what it leaves
+                                behind, and that it is not a production
+                                application template
 services/                       one directory per Module, listed in the order
                                 compose.yaml's `include:` reads them; every service
                                 is extracted, so this is the whole stack. Every Module
@@ -416,6 +441,7 @@ services/                       one directory per Module, listed in the order
 | `pixi run smoke-strict` | The same suite with a skip scored as a failure | — |
 | `pixi run urls` | Print the endpoints the ambient Selection publishes | `make urls` |
 | `pixi run endpoints` | Regenerate `docs/ENDPOINTS.md` from module metadata | — |
+| `pixi run example` | Run the worked example against the running stack: six integrations, then the two arrivals it cannot see itself | — |
 | `pixi run psql keycloak` | psql shell against any database | `make psql DB=keycloak` |
 | `pixi run redis-cli 1` | redis-cli against the broker db | `make redis-cli N=1` |
 | `pixi run mc` | Shell with the S3 client (`mc`) configured | `make mc` |
@@ -458,15 +484,22 @@ Three jobs, in parallel:
 | Job | Runs | Bound |
 |---|---|---|
 | `validate` | `pixi run ci` — compose config for every Selection, the rendered-config assertions, shell, YAML, JSON and Python lint, and the self-test | 10 minutes |
-| `stack` | `pixi run ci-stack` — starts a Selection resolving to every Module, blocks until every healthcheck passes, then runs the smoke suite in strict mode; then `ci-stack-cycle` and `ci-stack-restore` over the same stack | 15 minutes |
+| `stack` | `pixi run ci-stack` — starts a Selection resolving to every Module, blocks until every healthcheck passes, then runs the smoke suite in strict mode; then `pixi run example`, `ci-stack-cycle` and `ci-stack-restore` over the same stack | 15 minutes |
 | `stack-podman` | `pixi run ci-stack-podman` — the same tasks over the same Selection against Podman, then asserts Podman itself is running the containers | 15 minutes |
 
-`stack-podman` runs `ci-stack` alone, where `stack` follows it with `ci-stack-cycle` and
-`ci-stack-restore`: the Podman job's question is which runtime the stack came up under, and
-it is answered by the first task list the two share. Only the API the Compose client talks
-to differs between them. `stack-podman` pins `ubuntu-24.04` rather than `ubuntu-latest`,
-because the label moves to a release with a different Podman and a different
-Compose major, which would silently change what the job proves.
+`pixi run example` is a step of `stack`, not a fourth job, for the same reason the cycle and
+the restore round trip are steps: it is only meaningful against a stack that is already up,
+and it shares that job's 15-minute budget. It runs first of the three follow-on steps, so a
+connection detail that no longer connects fails the build having spent the least of that
+budget — and, unlike the three smoke runs around it, it reaches the services the way an
+application does, over the published host addresses, with an SDK.
+
+`stack-podman` runs `ci-stack` alone, where `stack` follows it with the worked example,
+`ci-stack-cycle` and `ci-stack-restore`: the Podman job's question is which runtime the
+stack came up under, and it is answered by the first task list the two share. Only the
+API the Compose client talks to differs between them. `stack-podman` pins `ubuntu-24.04`
+rather than `ubuntu-latest`, because the label moves to a release with a different Podman
+and a different Compose major, which would silently change what the job proves.
 
 The time bound is enforced, not measured: `timeout-minutes` cancels a job that
 overruns and turns the run red. If a stack job ever breaches it, split it into

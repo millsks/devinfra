@@ -16,8 +16,21 @@ mypy = "2.3.*"
 pyyaml = "6.0.*"
 types-pyyaml = "6.0.*"
 
+# The worked example's client libraries, pinned from conda-forge exactly as the validation
+# tools above are. A second table rather than more entries in the first, so "the tools this
+# repository's checks run" and "the SDKs the published contract is written for" stay two
+# statements: nothing under examples/ is a validation tool, and nothing above is imported by
+# an application. Both features join the one environment, so a missing client library is as
+# impossible as a missing linter and no code branches on availability (NFR-5).
+[feature.example.dependencies]
+psycopg = "3.3.*"
+redis-py = "8.1.*"
+boto3 = "1.43.*"
+opentelemetry-sdk = "1.44.*"
+opentelemetry-exporter-otlp-proto-http = "1.44.*"
+
 [environments]
-default = ["dev"]
+default = ["dev", "example"]
 
 # ---------------------------------------------------------------------------
 # Lifecycle. Every target the Makefile exposed has an equivalent here; the
@@ -177,6 +190,20 @@ cmd = "./scripts/compose.sh config"
 env = { DEVINFRA_SELECT_ALL = "1" }
 
 # ---------------------------------------------------------------------------
+# The worked example. One runnable application under examples/, run on the host,
+# reading only the application variables the root compose.yaml's x-app-variables:
+# registry declares — exported into its environment from scripts/endpoints.py
+# itself, so nothing under examples/ states a connection detail (ADR 0017, 0019).
+#
+# A runtime task, not a validation one: it needs a healthy stack, so it joins
+# neither `lint` nor `precommit`. CI runs this same task as a step of the `stack`
+# job, against the stack that job has already brought up.
+# ---------------------------------------------------------------------------
+[tasks.example]
+description = "Run the worked example against the running stack: six integrations, then the two arrivals it cannot see itself"
+cmd = "./scripts/example.sh"
+
+# ---------------------------------------------------------------------------
 # Validation
 # ---------------------------------------------------------------------------
 [tasks.lint-compose]
@@ -225,8 +252,8 @@ description = "Validate every JSON config parses"
 cmd = "python scripts/lint_json.py renovate.json services/**/*.json"
 
 [tasks.lint-python]
-description = "ruff and mypy over the repository's own Python"
-cmd = "ruff format --check scripts && ruff check scripts && mypy scripts"
+description = "ruff and mypy over the repository's own Python, the worked example included"
+cmd = "ruff format --check scripts examples && ruff check scripts examples && mypy scripts examples"
 
 [tasks.test]
 description = "Prove every lint check fails on a real defect and passes on a clean file"

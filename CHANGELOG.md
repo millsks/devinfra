@@ -189,6 +189,31 @@ reported as a success that this change exists to remove (NFR-5).
 
 ### Added
 
+- **A worked example that proves the connection details** — `pixi run example` runs one
+  application under `examples/worked-example/` that connects to all six Modules using
+  nothing but the application variables `x-app-variables:` publishes, exported straight
+  from `scripts/endpoints.py --format env`. It round-trips a token the realm introspects as
+  active, a Postgres row, a Redis key, an S3 object, an SMTP message and traces, logs and
+  metrics through the OpenTelemetry SDK, each under one `service.name` marker; the runner
+  then proves the two arrivals the application cannot see — the message in Mailpit, and the
+  shipped dashboard's three panels answering for that marker in Grafana. No address literal
+  appears under `examples/` — a `host:port` pair in any spelling, bare, loopback, inside a
+  URL or inside a DSN, is a self-test failure — and the set of names it reads is pinned
+  against the registry by the self-test, so renaming an `x-app-variables:` key fails
+  `pixi run test` with no container runtime involved. CI runs the same task as a step of the
+  `stack` job. The example says in its own README that it is not a production application
+  template (ADR 0019).
+- **`scripts/endpoints.py --format env`** — a third output format, emitting the application
+  variables the resolved Selection's Modules own as `NAME=value` lines and nothing else: no
+  heading, no indent, no endpoint rows. It is what a shell exports, and it is the only way
+  the worked example learns an address (ADR 0019).
+- **`examples/` joins the linted surface** — `pixi run lint-python` now runs `ruff format
+  --check`, `ruff check` and `mypy --strict` over `examples` as well as `scripts`, with one
+  per-distribution mypy override for boto3, which ships no `py.typed`. A planted defect
+  fixture in the self-test proves the coverage. The client libraries are pinned conda-forge
+  dependencies in a new `example` feature that joins the one environment, so a missing one
+  is impossible — and, like every conda pin here, they are outside Renovate's watch by
+  design (ADR 0010, ADR 0019).
 - **Backup covers everything stateful in the Selection** — `pixi run backup` now captures
   the Postgres databases, the object-storage bucket contents and the Keycloak realm into one
   timestamped directory with a `manifest.txt`, and records each of those three that the

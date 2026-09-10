@@ -18,6 +18,7 @@ dotenv, and renders two surfaces from them:
     python scripts/endpoints.py                                    # the ambient Selection, as text
     python scripts/endpoints.py postgres redis                     # an explicit Selection
     python scripts/endpoints.py --format markdown --write docs/ENDPOINTS.md
+    python scripts/endpoints.py --format env                        # NAME=value, for `export`
     python scripts/endpoints.py --check
 
 The text listing resolves against the process environment, which `scripts/lib/common.sh`
@@ -461,6 +462,48 @@ def render_text(catalog: Catalog, modules: tuple[str, ...], environment: dict[st
     return "\n".join(lines) + "\n", problems
 
 
+def render_env(catalog: Catalog, modules: tuple[str, ...], environment: dict[str, str]) -> tuple[str, list[str]]:
+    """Render the application variables one Selection owns, as assignments and nothing else.
+
+    The same content `render_text()` puts under its `Application variables` heading, minus
+    the heading and the indent. That difference is the whole point: this format is read by
+    `export`, so a heading, a blank line or two leading spaces would each become part of a
+    variable's name or value. It carries no endpoint rows either — a `*_PORT` is a Module-tier
+    name (ADR 0003), and an application that read one would be reading something other than
+    the contract.
+
+    Args:
+        catalog: The whole catalog.
+        modules: The Modules the Selection resolved to.
+        environment: The values to interpolate against.
+
+    Returns:
+        One `NAME=value` line per application variable the Selection's Modules own, and one
+        message per value that could not be resolved or resolved to nothing.
+    """
+    problems: list[str] = []
+    lines: list[str] = []
+    for variable in catalog.variables.values():
+        if variable.module not in modules:
+            continue
+        value, trouble = interpolate(variable.value, environment, f"compose.yaml: {APP_VARIABLES_KEY}")
+        problems.extend(trouble)
+        # An empty resolution is a failure here where it is merely an empty cell in the other
+        # two formats. `NAME=` and an absent NAME are the same thing to `export` and to
+        # `os.environ.get(name, "")`, so a blanked credential in .env would reach the
+        # consumer as "that Module is outside your Selection" — a true sentence about the
+        # wrong subject, and the one thing a generated contract must never say.
+        if not value:
+            problems.append(
+                f"compose.yaml: {APP_VARIABLES_KEY}.{variable.name} resolves to the empty string, "
+                f"and `export {variable.name}=` is indistinguishable from never setting it — a "
+                f"consumer would report {variable.name} as absent and blame the Selection for a "
+                f"blanked value. Give it a value, or stop declaring it"
+            )
+        lines.append(f"{variable.name}={value}")
+    return "".join(f"{line}\n" for line in lines), problems
+
+
 def cell(text: str) -> str:
     """Escape the three characters a generated Markdown table cell cannot carry raw.
 
@@ -841,9 +884,12 @@ def build_parser() -> argparse.ArgumentParser:
     # would be doing something other than what it was asked for.
     parser.add_argument(
         "--format",
-        choices=("text", "markdown"),
+        choices=("text", "markdown", "env"),
         default=None,
-        help="text for the terminal listing, markdown for the committed document (default: text)",
+        help=(
+            "text for the terminal listing, markdown for the committed document, env for the "
+            "application variables alone as NAME=value lines a shell can export (default: text)"
+        ),
     )
     parser.add_argument(
         "--env-file",
@@ -1076,14 +1122,18 @@ def main(argv: list[str]) -> int:
         if args.check:
             return run_check(catalog, environment)
         request = [ALL_MODULES_REQUEST] if args.all_modules else parse_request(args.selection)
-        if not request and args.format == "text":
+        if not request and args.format in ("text", "env"):
             # The ambient Selection, and every Module when there is none. A listing that
             # refuses to document is worse than one that documents everything, and
             # `pixi run urls` has to keep working on a fresh clone that has no .env at all.
+            # `env` reads the same fallback for the same reason one level down: the runner
+            # resolves the Selection through select_ambient and exports it before asking,
+            # so the two agree, and a caller that reached this script directly with an
+            # ambient Selection gets that Selection rather than every Module.
             request = parse_request([os.environ.get("COMPOSE_PROFILES", "")])
         modules = select(catalog, request)
-        render = render_markdown if args.format == "markdown" else render_text
-        text, problems = render(catalog, modules, environment)
+        renderers = {"markdown": render_markdown, "env": render_env, "text": render_text}
+        text, problems = renderers[args.format](catalog, modules, environment)
     except (Refusal, RuntimeError) as exc:
         sys.stderr.write(f"endpoints: {exc}\n")
         return 1

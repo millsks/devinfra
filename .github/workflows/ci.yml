@@ -83,6 +83,16 @@ jobs:
       - name: Start the stack, wait for health, run the strict smoke suite
         run: pixi run ci-stack
 
+      # One runnable application, on the host, against the stack the step above left
+      # running: it reads only the application variables the generator publishes and
+      # round-trips all six integrations, then proves the mail and the three signals
+      # arrived. A step rather than a fourth job for the same reason the two below are
+      # steps — it is only meaningful against a healthy stack, and it shares this job's
+      # 15-minute budget. Placed before the cycle and restore steps so a broken contract
+      # fails the build having spent the least of that budget.
+      - name: Run the worked example against the stack
+        run: pixi run example
+
       # The same suite again over a stack that has been taken down and brought back.
       # Containers go, volumes stay, so anything that passed above only because it was
       # written into a volume on first init fails here — which is the difference between
