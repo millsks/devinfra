@@ -54,12 +54,12 @@ development_status:
   2-6-bundles-and-a-safe-path-through-the-breaking-change: done
   epic-2-retrospective: optional
 
-  epic-3: backlog
+  epic-3: done
   3-1-grafana-opens-on-working-dashboards: done
   3-2-gotchas-become-a-maintained-register: done
   3-3-connection-details-generated-not-hand-maintained: done
   3-4-backup-covers-everything-stateful: done
-  3-5-a-worked-example-that-proves-the-contracts: backlog
+  3-5-a-worked-example-that-proves-the-contracts: done
   epic-3-retrospective: optional
 
   epic-4: backlog
