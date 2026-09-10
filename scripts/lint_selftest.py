@@ -82,6 +82,91 @@ APP_VARIABLES = {
     "SMTP_PORT",
 }
 
+#: Exactly the application variables the worked example reads, written out name by name for
+#: the same reason APP_VARIABLES is written out rather than derived: every other assertion
+#: about the example iterates whatever its own table happens to hold, so a *deleted* read —
+#: the object-storage integration quietly dropped by a bad merge — would satisfy all of them
+#: while the contract it exists to prove went untested. Deriving this from APP_VARIABLES
+#: would reintroduce exactly that: the two sets would move together and a name lost from
+#: both would still compare equal.
+#:
+#: This set must stay a subset of APP_VARIABLES, which is the property that makes a renamed
+#: registry key fail `pixi run test` with no container runtime anywhere near it (ADR 0019).
+#: CELERY_BROKER_URL and CELERY_RESULT_BACKEND are the two registry names deliberately
+#: absent: the example ships no Celery worker, and reading a variable it does not use would
+#: make its refusal fire for a Module it does not need.
+EXAMPLE_VARIABLES = {
+    "AWS_ACCESS_KEY_ID",
+    "AWS_ENDPOINT_URL",
+    "AWS_SECRET_ACCESS_KEY",
+    "DATABASE_URL",
+    "OIDC_CLIENT_ID",
+    "OIDC_CLIENT_SECRET",
+    "OIDC_DISCOVERY_URL",
+    "OIDC_ISSUER",
+    "OTEL_EXPORTER_OTLP_ENDPOINT",
+    "OTEL_EXPORTER_OTLP_PROTOCOL",
+    "REDIS_URL",
+    "SMTP_HOST",
+    "SMTP_PORT",
+}
+
+#: The example's own directory, and the one module the name-set pin names. The directory is
+#: asserted to hold exactly that module, so a second one cannot arrive reading whatever it
+#: likes with the pin still agreeing with itself.
+EXAMPLE_DIR = "examples"
+EXAMPLE_APP = "examples/worked-example/main.py"
+
+#: One `"NAME": "integration",` row of the example's REQUIRED table — a four-space-indented
+#: dict key. Matched rather than imported: importing the module would need every client
+#: library resolvable at self-test time and would run its imports, and what is being pinned
+#: is the text a reviewer reads. Applied to every Python file under `examples/`, not to the
+#: one module alone, so the union of what the directory declares is what the pin compares.
+EXAMPLE_READ = re.compile(r'^ {4}"([A-Z][A-Z0-9_]*)": ', re.MULTILINE)
+
+#: An environment read that names its variable inline, in all four spellings Python offers:
+#: `os.environ["X"]`, `os.environ.get("X")`, `os.getenv("X")`, and either of the bare forms
+#: reached through `from os import environ, getenv`. Every read under `examples/` must go
+#: through the REQUIRED table instead, or the table stops being the whole list and the set
+#: equality above stops meaning anything. A read whose argument is a *variable* —
+#: `os.environ.get(name, "")`, which is how the table is walked — is not one of these.
+INLINE_ENV_READ = re.compile(r"(?:os\.)?(?:environ(?:\.get)?[(\[]|getenv\()\s*[\"'][A-Za-z_]")
+
+#: An address literal: a `host:port` pair, in every spelling one can be written. Four
+#: alternatives, because a DSN, an endpoint URL and a bare container address are the same
+#: defect wearing different clothes:
+#:
+#:   scheme://[user[:password]@]host:port   `postgresql://devinfra:devinfra@postgres:5432/db`
+#:   [user[:password]@]host:port            the same DSN with the scheme cut off
+#:   <loopback>:port                        `localhost:5432`, `127.0.0.1:9100`, `[::1]:6379`
+#:   <single-label host>:port               `minio:9000`, `postgres:5432`
+#:
+#: The last one is deliberately restricted to a host with no dot in it, and to one not
+#: preceded by a word character, a dot or a slash. This repository cites code as
+#: `scripts/endpoints.py:714`, and a rule that read a dotted label as a hostname would fail
+#: every file that follows the house citation convention — which is a check nobody could
+#: keep, and the surest way to have this one deleted. A quote or a backtick before the host
+#: is emphatically *not* excluded: `"minio:9000"` in Python and a markdown code span in a
+#: README are the two most likely places for an address to be written down, and excluding
+#: them to dodge a hypothetical minified `{"timeout":30}` would gut the rule to protect a
+#: file that does not exist.
+#:
+#: What that leaves unenforced, and what the prose in ADR 0019, CHANGELOG.md and the
+#: example's own README therefore says: a bare hostname with no port, and a bare credential,
+#: are not detectable as literals and are not claimed to be. The enforced promise is that no
+#: `host:port` pair appears under `examples/` in any form.
+CONNECTION_STRING = re.compile(
+    r"[a-z][a-z0-9+.\-]*://[^\s\"'`/]*?[A-Za-z0-9._\-\[\]]+:\d{1,5}(?![\d.])"
+    r"|@[A-Za-z0-9._\-\[\]]+:\d{1,5}(?![\d.])"
+    r"|(?<![\w.])(?:localhost|127\.0\.0\.1|0\.0\.0\.0|\[::1\]|\[::\]):\d"
+    r"|(?<![\w./\-])[a-z][a-z0-9\-]*:\d{2,5}(?![\d.])"
+)
+
+#: One line of `endpoints.py --format env` output, and the only shape it may emit: no
+#: heading, no indent, no blank line, no endpoint row. The format is read by `export`, where
+#: any of those would become part of a name or a value.
+ENV_LINE = re.compile(r"^[A-Z][A-Z0-9_]*=.+$")
+
 #: Suffix used to hide a file from a lint glob, then put it back.
 MOVED = ".selftest-moved"
 
@@ -629,6 +714,84 @@ def stub_grafana(mode: str) -> Iterator[tuple[str, list[str]]]:
     thread.start()
     try:
         yield f"http://127.0.0.1:{server.server_port}", authorizations
+    finally:
+        server.shutdown()
+        server.server_close()
+        thread.join(timeout=10)
+
+
+#: The three paths the OpenTelemetry HTTP exporters post to, under the base
+#: `OTEL_EXPORTER_OTLP_ENDPOINT` publishes. Written out rather than accepted from whatever
+#: the exporter happens to ask for: the whole point of the collector stub is to say which
+#: signals actually left the process, and a handler that answered 200 to any path at all
+#: would report three arrivals for a run that flushed one.
+OTLP_PATHS = ("/v1/traces", "/v1/logs", "/v1/metrics")
+
+#: A `<integration>: OK` or `<integration>: FAIL <Type>: <detail>` line from the worked
+#: example, which is the whole per-integration report it writes.
+VERDICT = re.compile(r"^(?P<integration>[a-z-]+): (?P<outcome>OK|FAIL)(?: (?P<detail>.+))?$")
+
+#: The shape a client's own diagnostic reaches a FAIL line in: the exception class it raised,
+#: then its message. What this exists to reject is the example paraphrasing — one wording
+#: written here and applied to all five clients, which would read the same whether the
+#: address was refused, resolved to the wrong host or authenticated badly.
+CLIENT_ERROR = re.compile(r"^[A-Za-z_][A-Za-z0-9_]*: \S.*$")
+
+#: Loopback ports nothing ever listens on, one per integration the "a service is down" case
+#: takes away. Ports 1-5 are chosen rather than an ephemeral port allocated and closed
+#: again: allocating one leaves a window in which something else can bind it, and this case
+#: must never be the flaky one. Distinct per integration deliberately, so each client's own
+#: diagnostic names its own address and two of them cannot coincidentally match.
+CLOSED_PORTS = {"keycloak": 1, "postgres": 2, "redis": 3, "object-storage": 4, "mailpit": 5}
+
+
+@contextlib.contextmanager
+def stub_collector() -> Iterator[tuple[str, set[str]]]:
+    """Serve a stand-in for the collector's OTLP/HTTP ingest, yielding its base URL.
+
+    A stub rather than a running collector for the same reason `stub_grafana` is one: the
+    property under test is the example's own contract — that it reports every integration,
+    that a failing one does not abandon the rest, and that all three signal providers are
+    flushed before it exits — and that must be provable in the `validate` job, with no
+    container runtime anywhere in the run.
+
+    The whole protocol it has to speak is "200, empty body": the exporters read the status
+    and nothing else on success, so there is no wire format to emulate.
+
+    Yields:
+        The base URL to hand `OTEL_EXPORTER_OTLP_ENDPOINT`, and the set of paths the
+        exporters posted to, which is what says the flush really happened rather than
+        merely being reported.
+    """
+    seen: set[str] = set()
+    recording = threading.Lock()
+
+    class Handler(http.server.BaseHTTPRequestHandler):
+        """Accept any OTLP/HTTP export and record which signal it carried."""
+
+        def do_POST(self) -> None:
+            """Accept one export, draining the body so the client sees a clean response."""
+            # Drained before replying: an exporter whose request body is never read gets a
+            # broken pipe rather than the 200 this stub is trying to give it.
+            length = int(self.headers.get("Content-Length") or 0)
+            if length:
+                self.rfile.read(length)
+            with recording:
+                seen.add(self.path)
+            self.send_response(200)
+            self.send_header("Content-Type", "application/x-protobuf")
+            self.send_header("Content-Length", "0")
+            self.end_headers()
+
+        def log_message(self, format: str, *args: Any) -> None:
+            """Swallow the default request log, which would bury the case output."""
+            return
+
+    server = http.server.ThreadingHTTPServer(("127.0.0.1", 0), Handler)
+    thread = threading.Thread(target=server.serve_forever, daemon=True)
+    thread.start()
+    try:
+        yield f"http://127.0.0.1:{server.server_port}", seen
     finally:
         server.shutdown()
         server.server_close()
@@ -1195,6 +1358,28 @@ def main() -> int:
             REPO / "services" / "redisinsight" / "zz_selftest_defect.sh",
             '#!/usr/bin/env bash\nv="$1"\necho $v\n',
         ),
+        # One entry per term of the lint-python body, the way the sibling glob terms are
+        # pinned one entry each. `lint-python` names two literal directories, and a single
+        # fixture under either one keeps the task red while the *other* term is deleted —
+        # so dropping `scripts` from the body would leave ruff and mypy seeing none of this
+        # repository's own Python with the whole gate green.
+        (
+            "lint-python",
+            REPO / "scripts" / "zz_selftest_defect.py",
+            "import os\n\n\ndef undocumented(unannotated):\n    return os\n",
+        ),
+        # Below the example's own directory, not beside it: `lint-python` names the literal
+        # directory `examples`, and a fixture at examples/ would pass even if the walk had
+        # stopped descending. This is the term that stops `examples` being deleted
+        # from the lint-python body — every other assertion about the example reads its
+        # source directly and would agree with itself whether or not ruff and mypy ever saw
+        # it. Format-clean on purpose, so `ruff format --check` passes it through to
+        # `ruff check`, which is the term being pinned.
+        (
+            "lint-python",
+            REPO / EXAMPLE_DIR / "worked-example" / "zz_selftest_defect.py",
+            "import os\n\n\ndef undocumented(unannotated):\n    return os\n",
+        ),
         (
             "lint-compose",
             REPO / "compose.override.yaml",
@@ -1567,6 +1752,589 @@ def main() -> int:
             f"the committed document survives {case}",
             endpoint_document.read_text(encoding="utf-8") == endpoint_text,
             "the tracked document was rewritten by a call that should never have written",
+        )
+
+    # --- The `env` format, which is how the worked example learns an address (ADR 0019). ---
+    #
+    # Driven through the script rather than a task, because no task declares it: `pixi run
+    # endpoints` fixes --format markdown --write, and appending `--format env` to that body
+    # is one of the narrowing refusals asserted just above. scripts/example.sh calls the
+    # generator directly, and this is that call.
+    def generate(*argv: str, env: dict[str, str] | None = None) -> subprocess.CompletedProcess[str]:
+        return tool([sys.executable, str(REPO / "scripts" / "endpoints.py"), *argv], cwd=REPO, env=env)
+
+    r = generate("--all", "--format", "env")
+    env_lines = r.stdout.splitlines()
+    expect("the generator renders --format env over the whole catalog", r.returncode == 0, f"stderr: {r.stderr!r}")
+    malformed = [line for line in env_lines if not ENV_LINE.match(line)]
+    expect(
+        "--format env emits NAME=value lines and nothing else",
+        bool(env_lines) and not malformed,
+        f"{len(env_lines)} line(s), {malformed} of them not assignments — this format is read by "
+        f"`export`, where a heading, a blank line or an indent becomes part of a name or a value",
+    )
+    expect(
+        "--format env emits every application variable and no endpoint row",
+        {line.split("=", 1)[0] for line in env_lines} == APP_VARIABLES,
+        f"emitted {sorted({line.split('=', 1)[0] for line in env_lines})}; the registry declares "
+        f"{sorted(APP_VARIABLES)}. A `*_PORT` here would be a Module-tier name in an application's "
+        f"environment (ADR 0003)",
+    )
+
+    # …and it narrows with the Selection, which is the property that makes the example's own
+    # refusal reachable: a Selection without object storage must publish no AWS_ENDPOINT_URL,
+    # or the application would be handed an address for a Module that is not running.
+    r = generate("postgres", "--format", "env")
+    expect("--format env narrows to one Module's variables", r.returncode == 0, f"stderr: {r.stderr!r}")
+    expect(
+        "--format env for postgres alone publishes DATABASE_URL and nothing else",
+        bool(r.stdout.splitlines()) and {line.split("=", 1)[0] for line in r.stdout.splitlines()} == {"DATABASE_URL"},
+        f"stdout: {r.stdout!r}",
+    )
+    r = generate("postgres", "redis", "--format", "env")
+    narrowed = {line.split("=", 1)[0] for line in r.stdout.splitlines()}
+    expect(
+        "--format env for a Selection without object storage publishes no AWS_ENDPOINT_URL",
+        r.returncode == 0 and "AWS_ENDPOINT_URL" not in narrowed and "DATABASE_URL" in narrowed,
+        f"exit {r.returncode}; emitted {sorted(narrowed)}",
+    )
+
+    # …and it narrows the same way with *no* Selection argument at all, which is the call
+    # scripts/example.sh actually makes: the runner resolves the ambient Selection into
+    # COMPOSE_PROFILES and then asks the generator for "whatever that is". Every case above
+    # passes a Selection explicitly, so all of them stay green if `env` is dropped from the
+    # fallback tuple in main() — and a narrowed run would then be handed every Module's
+    # variables and connect to Modules it never started.
+    ambient = dict(os.environ)
+    ambient["COMPOSE_PROFILES"] = "postgres,redis"
+    r = generate("--format", "env", env=ambient)
+    ambient_names = {line.split("=", 1)[0] for line in r.stdout.splitlines()}
+    expect(
+        "--format env reads the ambient Selection when it is given none",
+        r.returncode == 0
+        and ambient_names == {"DATABASE_URL", "REDIS_URL", "CELERY_BROKER_URL", "CELERY_RESULT_BACKEND"},
+        f"exit {r.returncode}; COMPOSE_PROFILES=postgres,redis emitted {sorted(ambient_names)} — "
+        f"the whole registry here means the fallback stopped admitting this format, and the "
+        f"runner would export addresses for Modules the Selection never started",
+    )
+    expect(
+        "--format env with no Selection publishes nothing for a Module outside COMPOSE_PROFILES",
+        "AWS_ENDPOINT_URL" not in ambient_names,
+        f"emitted {sorted(ambient_names)}",
+    )
+
+    # The refusal pixi makes reachable by accident, for the new format too: task arguments
+    # are appended to the task body, so `pixi run endpoints --format env` arrives after the
+    # body's own `--format markdown --write docs/ENDPOINTS.md` and wins. Untested, the guard
+    # can be dropped or inverted and the damage is a tracked document silently replaced by a
+    # dotenv that only the *next* lint-endpoints run reports.
+    r = pixi("endpoints", "--format", "env")
+    expect("the generator refuses --format env against the committed document", r.returncode != 0, "exited 0")
+    unsaid = [needle for needle in ("docs/ENDPOINTS.md", "env") if needle not in r.stderr]
+    expect(
+        "the generator names the format and the document when it refuses",
+        not unsaid,
+        f"never said {unsaid}; stderr: {r.stderr!r}",
+    )
+    expect(
+        "the committed document survives --format env --write",
+        endpoint_document.read_text(encoding="utf-8") == endpoint_text,
+        "the tracked document was replaced by a dotenv render",
+    )
+
+    # --- The worked example reads the contract and nothing else (ADR 0019). ---
+    #
+    # Static, and that is the whole point: this is the half of the story that runs in the
+    # `validate` job. A renamed or deleted `x-app-variables:` key fails here, naming the
+    # example's read of it, with no container runtime anywhere in the run.
+    example_app = REPO / EXAMPLE_APP
+    expect("the worked example is committed", example_app.is_file(), f"{EXAMPLE_APP} is absent")
+    example_python = sorted((REPO / EXAMPLE_DIR).rglob("*.py"))
+    expect(f"there is Python under {EXAMPLE_DIR}/ to scan", bool(example_python), "found none")
+    # Exactly one module, and it is the one the pin names. Without this the union below is a
+    # guarantee about a directory, and a second module arriving with a REQUIRED table of its
+    # own would either move the union — failing loudly, which is fine — or, far worse, read
+    # nothing through a table at all and be covered only by the inline-read scan. Adding a
+    # second example is a deliberate act that has to revisit this pin.
+    expect(
+        f"{EXAMPLE_DIR}/ holds exactly the one module the name pin names",
+        [str(path.relative_to(REPO)) for path in example_python] == [EXAMPLE_APP],
+        f"found {[str(path.relative_to(REPO)) for path in example_python]}; the pin covers "
+        f"{EXAMPLE_APP} alone — a second module here needs its own entry in this pin",
+    )
+    # The union across every Python file under examples/, not the one module's table: what
+    # the spec, ADR 0019 and the comment on EXAMPLE_READ all describe is a guarantee about
+    # the directory, and reading a single file would be a guarantee about a file.
+    example_reads: set[str] = set()
+    for path in example_python:
+        example_reads |= set(EXAMPLE_READ.findall(path.read_text(encoding="utf-8")))
+    expect(
+        "the worked example declares exactly the application variables it is meant to read",
+        example_reads == EXAMPLE_VARIABLES,
+        f"{EXAMPLE_DIR}/ reads {sorted(example_reads)}; EXAMPLE_VARIABLES expects "
+        f"{sorted(EXAMPLE_VARIABLES)} — added {sorted(example_reads - EXAMPLE_VARIABLES)}, "
+        f"lost {sorted(EXAMPLE_VARIABLES - example_reads)}",
+    )
+    expect(
+        "every name the worked example reads is a key of the x-app-variables registry",
+        bool(example_reads) and example_reads <= set(shipped_variables),
+        f"reads {sorted(example_reads - set(shipped_variables))} which the registry does not "
+        f"declare — the example consumes the contract, it does not extend it",
+    )
+
+    # Every tracked file under examples/, Python or not: a README or a shell helper added
+    # later carrying a `postgresql://…@postgres:5432/…` is the same second copy of the
+    # contract as a DSN in the application would be. Driven off what git tracks rather than
+    # off the glob, so the transient __pycache__ a mypy or a test run leaves behind is not a
+    # subject — it is ignored, untracked, and not something a reviewer can act on.
+    ignored = subprocess.run(
+        ["git", "check-ignore", "--stdin"],
+        input="\n".join(
+            str(path.relative_to(REPO)) for path in sorted(REPO.glob(f"{EXAMPLE_DIR}/**/*")) if path.is_file()
+        ),
+        capture_output=True,
+        text=True,
+        check=False,
+        cwd=REPO,
+    )
+    skipped = {line.strip() for line in ignored.stdout.splitlines() if line.strip()}
+    example_files = [
+        path
+        for path in sorted(REPO.glob(f"{EXAMPLE_DIR}/**/*"))
+        if path.is_file() and str(path.relative_to(REPO)) not in skipped
+    ]
+    expect(f"there are tracked files under {EXAMPLE_DIR}/ to scan", bool(example_files), "found none")
+    for path in example_files:
+        subject = path.relative_to(REPO)
+        # Read inside a guard, the way scripts/endpoints.py guards its own reads: a binary
+        # dropped in here would otherwise end the whole self-test in a UnicodeDecodeError
+        # traceback, abandoning every case after it — the silent-shape failure a named
+        # refusal exists to replace.
+        try:
+            text = path.read_text(encoding="utf-8")
+        except (OSError, UnicodeDecodeError) as exc:
+            expect(f"{subject} can be read as text", False, f"unreadable: {exc}")
+            continue
+        # Every read goes through the declared table. An `os.environ["SOMETHING"]` written
+        # inline would be a name outside it, and the set equality above would keep agreeing
+        # with a list that was no longer the whole list.
+        expect(
+            f"{subject} reads no environment variable outside its declared table",
+            not INLINE_ENV_READ.search(text),
+            f"{subject} names a variable inline at os.environ or os.getenv; every read belongs in REQUIRED",
+        )
+        # The headline rule. A hand-written address here is the second copy ADR 0017 exists
+        # to forbid, and it would keep working for exactly as long as nobody changed a port.
+        literals = sorted({match.group(0) for match in CONNECTION_STRING.finditer(text)})
+        expect(
+            f"{subject} states no address literal of its own",
+            not literals,
+            f"{subject} writes {literals} — every address the example uses is exported by "
+            f"scripts/example.sh from `endpoints.py --format env`, so a literal here is a copy "
+            f"free to drift from the registry that publishes it",
+        )
+    # The pattern itself, pinned from both sides. A widened rule that stopped matching a DSN,
+    # or a narrowed one that started matching this repository's own `file.py:120` citations,
+    # would leave every case above green while the rule said something else entirely.
+    caught = [
+        "http://minio:9000",
+        "postgresql://devinfra:devinfra@postgres:5432/devinfra",
+        "redis://:devinfra@redis:6379/0",
+        "localhost:5432",
+        "127.0.0.1:9100",
+        "[::1]:6379",
+        "minio:9000",
+        "@postgres:5432",
+        '"minio:9000"',
+        "`postgres:5432`",
+    ]
+    missed = [
+        "scripts/endpoints.py:714",
+        "compose.yaml:115-196",
+        "https://keepachangelog.com/en/1.1.0/",
+        "service.name",
+        "x-app-variables:",
+        '"timeout": 30',
+        "Args:",
+    ]
+    expect(
+        "the address-literal pattern catches every spelling of a host and port",
+        all(CONNECTION_STRING.search(sample) for sample in caught),
+        f"missed {[sample for sample in caught if not CONNECTION_STRING.search(sample)]}",
+    )
+    expect(
+        "the address-literal pattern leaves this repository's own citations alone",
+        not any(CONNECTION_STRING.search(sample) for sample in missed),
+        f"flagged {[sample for sample in missed if CONNECTION_STRING.search(sample)]} — a check "
+        f"that fails a file for citing a line number is a check that gets deleted",
+    )
+
+    # The example's own refusal, driven with the generator's real output for a Selection that
+    # leaves object storage out. It must name the variable *and* the integration it serves,
+    # and it must do so before anything is connected to: a run that opened five connections
+    # and then discovered the sixth address was missing would spend its whole timeout budget
+    # finding out what it already knew. No container runtime is involved — this is the
+    # `validate` job's half of the story (ADR 0019).
+    narrowed_render = generate("postgres", "redis", "--format", "env")
+    expect(
+        "the generator renders a Selection the example cannot satisfy",
+        narrowed_render.returncode == 0 and bool(narrowed_render.stdout.strip()),
+        f"exit {narrowed_render.returncode}: {narrowed_render.stderr!r}",
+    )
+    partial_env = {name: value for name, value in os.environ.items() if name not in APP_VARIABLES}
+    for assignment in narrowed_render.stdout.splitlines():
+        assigned_name, _, assigned_value = assignment.partition("=")
+        partial_env[assigned_name] = assigned_value
+    r = tool([sys.executable, str(example_app)], cwd=REPO, env=partial_env)
+    expect("the worked example refuses a Selection that omits a Module", r.returncode != 0, "exited 0")
+    unsaid = [needle for needle in ("AWS_ENDPOINT_URL", "object storage") if needle not in r.stderr]
+    expect(
+        "the refusal names the absent variable and the integration it serves",
+        not unsaid,
+        f"never said {unsaid}; stderr: {r.stderr!r}",
+    )
+    expect(
+        "the worked example connects to nothing when it refuses",
+        ": OK" not in r.stdout and ": FAIL" not in r.stdout,
+        f"stdout: {r.stdout!r} — the refusal is stated before the first connection is opened",
+    )
+
+    # The second refusal, and the one a Selection cannot produce: every variable is present
+    # and one of them says the collector speaks a protocol these exporters do not. The
+    # message is carefully worded and, untested, could be inverted — `!=` to `==` — with the
+    # whole gate green and every run posting protobuf at a port that answers gRPC.
+    full_render = generate("--all", "--format", "env")
+    expect(
+        "the generator renders the whole registry for the protocol case",
+        full_render.returncode == 0 and bool(full_render.stdout.strip()),
+        f"exit {full_render.returncode}: {full_render.stderr!r}",
+    )
+    grpc_env = {name: value for name, value in os.environ.items() if name not in APP_VARIABLES}
+    for assignment in full_render.stdout.splitlines():
+        assigned_name, _, assigned_value = assignment.partition("=")
+        grpc_env[assigned_name] = assigned_value
+    grpc_env["OTEL_EXPORTER_OTLP_PROTOCOL"] = "grpc"
+    r = tool([sys.executable, str(example_app)], cwd=REPO, env=grpc_env)
+    expect("the worked example refuses a protocol it does not speak", r.returncode != 0, "exited 0")
+    unsaid = [needle for needle in ("OTEL_EXPORTER_OTLP_PROTOCOL", "grpc", "http/protobuf") if needle not in r.stderr]
+    expect(
+        "the protocol refusal names the value it got and the one it speaks",
+        not unsaid,
+        f"never said {unsaid}; stderr: {r.stderr!r}",
+    )
+    expect(
+        "the worked example connects to nothing when the protocol is wrong",
+        ": OK" not in r.stdout and ": FAIL" not in r.stdout,
+        f"stdout: {r.stdout!r} — a wrong protocol is settled before the first connection too",
+    )
+
+    # --- A service is down: the rest still run, and the telemetry still leaves (ADR 0019). ---
+    #
+    # The other half of the refusal above, and the harder half. A *missing* variable is a
+    # refusal before anything opens; a variable that names an address nothing answers on is
+    # a failure five integrations have to survive. The example exists to say which
+    # connection detail is wrong, so abandoning the run at the first one — the shape a bare
+    # `except` around the whole loop, or a `raise` inside it, would produce — would report
+    # one defect per run over a stack with three.
+    #
+    # Every address is a closed loopback port except the collector's, which is a stub in
+    # this process. That is what makes the last assertion possible: `telemetry: OK` is the
+    # example's own claim that it flushed, and the set of paths the stub actually saw is the
+    # independent answer. A flush that silently dropped logs would satisfy the first and
+    # fail the second, and the arrival checks in scripts/example.sh would then be waiting
+    # their whole budget on a signal that never left this process.
+    with stub_collector() as (collector, exported_paths):
+        down_env = {name: value for name, value in os.environ.items() if name not in APP_VARIABLES}
+        down_env.update(
+            {
+                "OIDC_ISSUER": f"http://127.0.0.1:{CLOSED_PORTS['keycloak']}/realms/zz-selftest",
+                "OIDC_DISCOVERY_URL": (
+                    f"http://127.0.0.1:{CLOSED_PORTS['keycloak']}/realms/zz-selftest/.well-known/openid-configuration"
+                ),
+                "OIDC_CLIENT_ID": "zz-selftest",
+                "OIDC_CLIENT_SECRET": "zz-selftest",
+                "DATABASE_URL": f"postgresql://zz:zz@127.0.0.1:{CLOSED_PORTS['postgres']}/zz",
+                "REDIS_URL": f"redis://:zz@127.0.0.1:{CLOSED_PORTS['redis']}/0",
+                "AWS_ENDPOINT_URL": f"http://127.0.0.1:{CLOSED_PORTS['object-storage']}",
+                "AWS_ACCESS_KEY_ID": "zz-selftest",
+                "AWS_SECRET_ACCESS_KEY": "zz-selftest",
+                "SMTP_HOST": "127.0.0.1",
+                "SMTP_PORT": str(CLOSED_PORTS["mailpit"]),
+                "OTEL_EXPORTER_OTLP_ENDPOINT": collector,
+                "OTEL_EXPORTER_OTLP_PROTOCOL": "http/protobuf",
+                # A proxied machine would otherwise send urllib and botocore to the proxy
+                # rather than to the closed port, and the case would hang or report the
+                # proxy's refusal instead of the service's. Both spellings, because the
+                # standard library reads the lowercase one and botocore the uppercase.
+                "no_proxy": "*",
+                "NO_PROXY": "*",
+                # botocore's own retry budget, capped in the *child's* environment and
+                # nowhere else. A refused connection is retryable, so the default five
+                # attempts with exponential backoff would make this the slowest case in the
+                # file for no extra signal — and capping it inside main.py would be the
+                # example reading a name that is not in its declared table.
+                "AWS_MAX_ATTEMPTS": "1",
+                "AWS_RETRY_MODE": "standard",
+            }
+        )
+        down = tool([sys.executable, str(example_app)], cwd=REPO, env=down_env)
+        verdicts = {
+            parsed.group("integration"): parsed
+            for parsed in (VERDICT.match(line) for line in down.stdout.splitlines())
+            if parsed is not None
+        }
+    unreachable = sorted(CLOSED_PORTS)
+    expect(
+        "the worked example reports every integration when one is down",
+        set(verdicts) == set(unreachable) | {"telemetry"},
+        f"reported {sorted(verdicts)}; expected {sorted(set(unreachable) | {'telemetry'})} — a run "
+        f"that stopped at the first failure names one broken connection detail per run",
+    )
+    for integration in unreachable:
+        verdict = verdicts.get(integration)
+        expect(
+            f"the {integration} integration reports FAIL against a closed port",
+            verdict is not None and verdict.group("outcome") == "FAIL",
+            f"reported {verdict.group(0)!r}" if verdict is not None else "reported no verdict at all",
+        )
+    # The clients' own words, not a uniform wrapper. Asserted by *distinctness* rather than
+    # by a substring: five clients word a refused connection five different ways and spell
+    # the errno differently per platform, so pinning any one phrase would pin the platform
+    # instead. A `FAIL could not connect` written by the example itself would collapse these
+    # five to one, which is the regression this catches.
+    details = [
+        found.group("detail") or "" for integration, found in sorted(verdicts.items()) if integration in CLOSED_PORTS
+    ]
+    expect(
+        "each failing integration reports its own client's error",
+        len(details) == len(unreachable) and len(set(details)) == len(unreachable) and all(details),
+        f"reported {details} — five clients cannot word a refused connection identically unless "
+        f"the example is wording it for them",
+    )
+    # …and each one is a named exception carrying a message, which is the shape a client's
+    # own diagnostic has and a sentence the example wrote for it does not.
+    #
+    # The *address* is deliberately not asserted: three of the five clients name it and two
+    # do not — urllib raises `URLError: <urlopen error [Errno 61] Connection refused>` and
+    # smtplib re-raises the bare `ConnectionRefusedError` — and that is the price of
+    # reporting what the client actually said. The integration name on the same line is what
+    # maps the failure back to a variable in docs/ENDPOINTS.md, and it is pinned by the set
+    # equality above.
+    expect(
+        "each failing integration names the exception its client raised",
+        all(CLIENT_ERROR.match(detail) for detail in details),
+        f"reported {details} — a FAIL line with no exception type is the example paraphrasing "
+        f"its clients rather than quoting them",
+    )
+    telemetry_verdict = verdicts.get("telemetry")
+    expect(
+        "the telemetry still flushes after five integrations failed",
+        telemetry_verdict is not None and telemetry_verdict.group("outcome") == "OK",
+        f"telemetry reported {telemetry_verdict.group(0)!r}"
+        if telemetry_verdict is not None
+        else "telemetry reported no verdict at all",
+    )
+    expect(
+        "all three signals really left the process before it exited",
+        exported_paths == set(OTLP_PATHS),
+        f"the collector saw {sorted(exported_paths)}, not {sorted(OTLP_PATHS)} — `telemetry: OK` is "
+        f"the example's own claim, and this is the independent answer",
+    )
+    expect(
+        "the worked example exits non-zero when an integration failed",
+        down.returncode != 0,
+        f"exited {down.returncode} with {len(unreachable)} integration(s) reporting FAIL",
+    )
+    expect(
+        "the worked example names the failed integrations on stderr",
+        all(integration in down.stderr for integration in unreachable),
+        f"stderr: {down.stderr!r}",
+    )
+
+    # --- The runner's shape, with every seam stubbed (ADR 0019). ---
+    #
+    # The order is the contract, and it is not observable from a healthy run: the
+    # application has to have finished and flushed before either arrival check runs, or both
+    # are racing telemetry that is still in a batch processor. Driven through
+    # DEVINFRA_PYTHON and DEVINFRA_CURL so the whole sequence is provable with no stack.
+    example_stub = r"""#!/bin/sh
+for a in "$@"; do printf '%s\n' "$a"; done >> "$STUB_RECORD"
+case "${1:-}" in
+  -c) printf '%s' "${3:-}"; exit 0 ;;
+  scripts/resolve_selection.py) printf '%s' "${STUB_SELECTION:-}"; exit "${STUB_SELECT_EXIT:-0}" ;;
+  scripts/endpoints.py) printf '%s\n' "${STUB_ENV_OUTPUT:-}"; exit "${STUB_ENDPOINTS_EXIT:-0}" ;;
+  examples/worked-example/main.py)
+    printf 'ENV:DATABASE_URL=%s\n' "${DATABASE_URL-<unset>}" >> "$STUB_RECORD"
+    exit "${STUB_APP_EXIT:-0}" ;;
+  scripts/check_dashboards.py) exit "${STUB_DASHBOARDS_EXIT:-0}" ;;
+esac
+exit 0
+"""
+    # Echoes its own arguments back by default, which is what makes the marker search
+    # assertable: the URL the runner built carries the marker, so a stub that answers with
+    # its argv answers the way a Mailpit holding the message would, without this case having
+    # to know a marker the runner mints for itself.
+    #
+    # STUB_CURL_BODY overrides that with a fixed answer, which is the *other* Mailpit
+    # failure — the API answered, and what came back holds no marker. Exiting non-zero and
+    # answering with the wrong thing are two different branches of the runner, and a stub
+    # that could only do the first would leave the second untested.
+    example_curl = r"""#!/bin/sh
+for a in "$@"; do printf '%s\n' "$a"; done >> "$STUB_RECORD"
+if [ -n "${STUB_CURL_BODY:-}" ]; then
+  printf '%s\n' "$STUB_CURL_BODY"
+else
+  printf '%s\n' "$@"
+fi
+exit "${STUB_CURL_EXIT:-0}"
+"""
+    with tempfile.TemporaryDirectory() as tmp:
+        example_stubs = Path(tmp)
+        python_stub = example_stubs / "zz-stub-python"
+        python_stub.write_text(example_stub, encoding="utf-8", newline="\n")
+        python_stub.chmod(0o755)
+        curl_stub = example_stubs / "zz-stub-curl"
+        curl_stub.write_text(example_curl, encoding="utf-8", newline="\n")
+        curl_stub.chmod(0o755)
+
+        def example_run(**overrides: str) -> tuple[subprocess.CompletedProcess[str], list[str]]:
+            record = example_stubs / f"record-{len(list(example_stubs.glob('record-*')))}"
+            env = dict(os.environ)
+            env["DEVINFRA_PYTHON"] = str(python_stub)
+            env["DEVINFRA_CURL"] = str(curl_stub)
+            env["STUB_RECORD"] = str(record)
+            env["COMPOSE_PROFILES"] = "core,observability"
+            env["STUB_SELECTION"] = "keycloak,mailpit,minio,otel-collector,postgres,redis"
+            env["STUB_ENV_OUTPUT"] = "DATABASE_URL=zz-selftest-dsn\nSMTP_HOST=zz-selftest-host"
+            # Defined-but-empty rather than absent, so a value in this process's own
+            # environment cannot change what a case is driving.
+            for name in (
+                "STUB_APP_EXIT",
+                "STUB_CURL_EXIT",
+                "STUB_CURL_BODY",
+                "STUB_DASHBOARDS_EXIT",
+                "STUB_ENDPOINTS_EXIT",
+            ):
+                env[name] = ""
+            env.update(overrides)
+            return run_script("example.sh", env=env), recorded(record)
+
+        example_clean, example_trace = example_run()
+        expect(
+            "the example runner exits 0 when every step answers",
+            example_clean.returncode == 0,
+            f"exit {example_clean.returncode}: {(example_clean.stdout + example_clean.stderr)!r}",
+        )
+
+        # Ordering by first occurrence, not by presence: every one of these appears in a run
+        # that called them in any order at all.
+        def first_index(needle: str) -> int:
+            return next((i for i, entry in enumerate(example_trace) if needle in entry), -1)
+
+        example_order = {
+            "the resolver": first_index("scripts/resolve_selection.py"),
+            "the generator": first_index("scripts/endpoints.py"),
+            "the application": first_index(EXAMPLE_APP),
+            "the Mailpit search": first_index("/api/v1/search"),
+            "the dashboard check": first_index("scripts/check_dashboards.py"),
+        }
+        expect(
+            "the runner reaches the resolver, the generator, the application and both arrival checks",
+            all(index >= 0 for index in example_order.values()),
+            f"never reached {[name for name, index in example_order.items() if index < 0]}; recorded {example_trace}",
+        )
+        expect(
+            "the runner runs the application, then Mailpit, then the dashboard check",
+            list(example_order.values()) == sorted(example_order.values()),
+            f"reached them in the order {sorted(example_order, key=lambda label: example_order[label])} — the arrival "
+            f"checks race the application's own flush unless they follow it",
+        )
+        expect(
+            "the runner exports the generator's own output into the application's environment",
+            "ENV:DATABASE_URL=zz-selftest-dsn" in example_trace,
+            f"the application saw {[entry for entry in example_trace if entry.startswith('ENV:')]} — the "
+            f"values must come from `endpoints.py --format env` and from nowhere else (ADR 0017)",
+        )
+        expect(
+            "the runner searches Mailpit for the marker it minted",
+            any("/api/v1/search?query=devinfra-example-" in entry for entry in example_trace),
+            f"recorded {example_trace}",
+        )
+        expect(
+            "the runner asks the dashboard check about that same marker",
+            "--service" in example_trace
+            and example_trace[example_trace.index("--service") + 1 : example_trace.index("--service") + 2]
+            == [next(entry for entry in example_trace if entry.startswith("devinfra-example-"))],
+            f"recorded {example_trace}",
+        )
+
+        # Each arrival check failing on its own. Both must fail the run: an example whose
+        # telemetry never arrived proved the client constructed, which is the thing this
+        # story exists not to settle for.
+        example_failed, example_trace = example_run(STUB_CURL_EXIT="1")
+        expect("the runner fails when Mailpit does not answer", example_failed.returncode != 0, "exited 0")
+        expect(
+            "the runner names the marker it searched Mailpit for",
+            "devinfra-example-" in example_failed.stderr,
+            f"stderr: {example_failed.stderr!r}",
+        )
+        expect(
+            "the runner does not check the dashboards after the mail check failed",
+            first_index("scripts/check_dashboards.py") < 0,
+            f"recorded {example_trace}",
+        )
+
+        # The other Mailpit branch, and the one the story's matrix actually names: the API
+        # answered, and what came back holds no marker. This is what a message the SMTP
+        # server accepted and then did not store looks like from outside — Mailpit is
+        # healthy, `curl -sf` succeeds, and the search result is empty. A runner that only
+        # checked the exit status would call that a pass and hand a green build to a
+        # developer whose mail never arrived.
+        example_failed, example_trace = example_run(
+            STUB_CURL_BODY='{"messages_count":0,"messages":[],"total":0}',
+        )
+        expect(
+            "the runner fails when Mailpit answers with no message carrying the marker",
+            example_failed.returncode != 0,
+            f"exited 0 over {example_failed.stdout!r} — a search that found nothing is not a pass",
+        )
+        expect(
+            "the runner reports the marker it searched Mailpit for when nothing came back",
+            "devinfra-example-" in example_failed.stderr,
+            f"stderr: {example_failed.stderr!r} — the marker is the only thing a developer can "
+            f"search the mailbox for themselves",
+        )
+        expect(
+            "the runner checks no dashboard after Mailpit answered without the marker",
+            first_index("scripts/check_dashboards.py") < 0,
+            f"recorded {example_trace}",
+        )
+
+        example_failed, _ = example_run(STUB_DASHBOARDS_EXIT="1")
+        expect("the runner fails when a signal never arrived", example_failed.returncode != 0, "exited 0")
+
+        # …and the application's own failure ends the run before either arrival check, which
+        # is what stops a broken integration being reported as a missing message.
+        example_failed, example_trace = example_run(STUB_APP_EXIT="1")
+        expect("the runner fails when an integration failed", example_failed.returncode != 0, "exited 0")
+        expect(
+            "the runner checks no arrival after the application failed",
+            first_index("/api/v1/search") < 0 and first_index("scripts/check_dashboards.py") < 0,
+            f"recorded {example_trace}",
+        )
+
+        # A Selection whose Modules own no application variable at all. The generator answers
+        # with nothing and exits 0 — correct for the generator, and fatal here: an example
+        # run with an empty environment would refuse one variable at a time rather than
+        # saying the Selection is the problem.
+        example_failed, example_trace = example_run(STUB_ENV_OUTPUT="")
+        expect(
+            "the runner refuses a Selection that publishes no application variable", example_failed.returncode != 0, "0"
+        )
+        expect(
+            "the runner does not run the application over an empty environment",
+            first_index(EXAMPLE_APP) < 0,
+            f"recorded {example_trace}",
         )
 
     # The clean direction over the real tree, and the number it walked. "OK" on its own is a
@@ -6173,8 +6941,21 @@ def main() -> int:
     # The hooks are checked the same way: a clone whose .githooks/ arrived ignored
     # has no hooks at all, and `pixi run bootstrap` would point core.hooksPath at
     # a directory that is not there.
-    sources = sorted((REPO / "scripts").rglob("*.sh")) + sorted((REPO / "scripts").rglob("*.py")) + hook_sources
+    # examples/ joins the walk for the same reason .githooks/ did: it is checked-in Python
+    # that `pixi run lint-python` and `pixi run example` both reach, so a clone whose
+    # examples/ arrived ignored has an example that lints locally and is not there at all.
+    sources = (
+        sorted((REPO / "scripts").rglob("*.sh"))
+        + sorted((REPO / "scripts").rglob("*.py"))
+        + sorted((REPO / EXAMPLE_DIR).rglob("*.py"))
+        + hook_sources
+    )
     expect("scripts/ has files to check for tracking", bool(sources), "no scripts found")
+    expect(
+        f"{EXAMPLE_DIR}/ has Python to check for tracking",
+        bool(sorted((REPO / EXAMPLE_DIR).rglob("*.py"))),
+        f"nothing under {EXAMPLE_DIR}/ — the coverage widening above would check nothing",
+    )
     ignored = subprocess.run(
         ["git", "check-ignore", "--stdin"],
         input="\n".join(str(path.relative_to(REPO)) for path in sources),
@@ -6228,6 +7009,21 @@ def main() -> int:
         "both resolver exemptions are scripts that actually reach Compose",
         resolver_exempt <= set(reaches_compose),
         f"exempt but not reaching Compose: {sorted(resolver_exempt - set(reaches_compose))}",
+    )
+    # The example's runner reaches no container runtime at all — it talks to the published
+    # host ports the way an application does — so the rule above never sees it. It still has
+    # to resolve first, and for a sharper reason: the Selection decides which application
+    # variables exist, so asking the generator before resolving would export a set that does
+    # not describe the stack that is running (ADR 0019).
+    runner_code = "\n".join(
+        line
+        for line in (REPO / "scripts" / "example.sh").read_text(encoding="utf-8").splitlines()
+        if not line.lstrip().startswith("#")
+    )
+    expect(
+        "the example runner resolves its Selection before asking the generator anything",
+        "select_ambient" in runner_code and runner_code.index("select_ambient") < runner_code.index("endpoints.py"),
+        "scripts/example.sh reaches scripts/endpoints.py without calling select_ambient first",
     )
 
     # --- The CI workflow is a gate, not a suggestion. ---
@@ -6324,10 +7120,18 @@ def main() -> int:
     ci_jobs = workflows.get("ci.yml", {}).get("jobs", {})
     # The stack job runs the suite twice, and the order is the contract: `ci-stack-cycle`
     # takes the stack down and brings it back, so it proves nothing at all unless the run
-    # that started it came first.
+    # that started it came first. `example` sits between the two for the same kind of
+    # reason — it needs the stack the first step left running, and running it before the
+    # cycle and the restore spends the least of the job's 15-minute budget on a contract
+    # that no longer connects (ADR 0019).
     expected_work = {
         "validate": ["pixi run ci"],
-        "stack": ["pixi run ci-stack", "pixi run ci-stack-cycle", "pixi run ci-stack-restore"],
+        "stack": [
+            "pixi run ci-stack",
+            "pixi run example",
+            "pixi run ci-stack-cycle",
+            "pixi run ci-stack-restore",
+        ],
         "stack-podman": ["pixi run ci-stack-podman"],
     }
     expect("ci.yml declares exactly the three CI jobs", set(ci_jobs) == set(expected_work), f"{set(ci_jobs)}")
@@ -6399,7 +7203,7 @@ def main() -> int:
 
     # Every task CI invokes must exist, or the workflow fails on the runner for a
     # reason no local check would have surfaced.
-    for task_name in ("ci", "ci-stack", "ci-stack-cycle", "ci-stack-podman", "ps", "dump-logs"):
+    for task_name in ("ci", "ci-stack", "ci-stack-cycle", "ci-stack-podman", "example", "ps", "dump-logs"):
         expect(f"pixi declares the {task_name} task CI invokes", task_name in tasks, "no such task")
 
     # --- The gate must actually reach every check. ---
@@ -6437,6 +7241,17 @@ def main() -> int:
         "`pixi run ci-stack-restore` runs the backup round trip",
         restore_cmd.strip() == "./scripts/verify-restore.sh",
         f"ci-stack-restore runs {restore_cmd!r}",
+    )
+    # The same pin for the worked example, and for the same reason. The workflow step is
+    # asserted to be `pixi run example` a few lines above, which says nothing at all about
+    # what that task does: rewiring the body to `echo ok` would keep the step green, keep
+    # the chain assertions green, and stop the example ever running in CI.
+    example_task = tasks.get("example")
+    example_cmd = str(example_task.get("cmd", "")) if isinstance(example_task, dict) else str(example_task)
+    expect(
+        "`pixi run example` runs the worked example's runner",
+        example_cmd.strip() == "./scripts/example.sh",
+        f"example runs {example_cmd!r}",
     )
     # The same tasks, in the same order, plus the socket setup that puts the Docker
     # API at Podman and the gate that proves the containers ended up there. Order is

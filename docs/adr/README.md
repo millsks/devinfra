@@ -27,6 +27,7 @@ a superseding ADR, never by editing a decided one.
 | [0016](0016-gotcha-entries-carry-a-checked-shape.md) | Gotcha entries carry a checked shape | Accepted |
 | [0017](0017-endpoint-documentation-is-generated.md) | Endpoint documentation is generated, not hand-maintained | Accepted |
 | [0018](0018-backup-follows-the-selection.md) | Backup follows the Selection, and restore is ordered and fail-loud | Accepted |
+| [0019](0019-the-worked-example-consumes-the-generated-contract.md) | The worked example consumes the generated contract | Accepted |
 
 ## Supersessions
 

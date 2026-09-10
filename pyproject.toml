@@ -1,9 +1,10 @@
-# Tool configuration only. This repository ships no Python package — the two scripts
-# under scripts/ are lint tooling — so there is no [project] table and nothing to build.
+# Tool configuration only. This repository ships no Python package — the scripts under
+# scripts/ are lint tooling and examples/ is a worked example run from the pixi environment —
+# so there is no [project] table and nothing to build.
 
 [tool.ruff]
 line-length = 120
-src = ["scripts"]
+src = ["scripts", "examples"]
 # The matrix floor, matching [tool.mypy]. Without it ruff assumes py39 and
 # misfiles stdlib tomllib as a third-party import.
 target-version = "py312"
@@ -20,3 +21,13 @@ python_version = "3.12"
 strict = true
 warn_return_any = true
 warn_unused_configs = true
+
+# The one exemption, and it names one distribution rather than a directory: `strict = true`
+# has no blanket escape here and must not gain one. The boto3 distribution ships no
+# `py.typed` marker, so `import boto3` is an error under strict on its own. Everything else
+# the worked example imports — psycopg, redis, and every opentelemetry package — is typed and
+# is checked as strictly as scripts/ is. Narrow, never widen: `warn_unused_configs` above
+# reports an entry that stopped being needed, which is how this list shrinks again.
+[[tool.mypy.overrides]]
+module = ["boto3"]
+ignore_missing_imports = true
