@@ -23,7 +23,7 @@ services:
     extends:
       file: ../../common/base.yaml
       service: defaults
-    image: dpage/pgadmin4:${PGADMIN_VERSION:-9.17}
+    image: dpage/pgadmin4:${PGADMIN_VERSION:-9.18}
     container_name: devinfra-pgadmin
     profiles: [pgadmin, admin]
     depends_on:
