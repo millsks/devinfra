@@ -18,7 +18,7 @@ services:
     extends:
       file: ../../common/base.yaml
       service: defaults
-    image: grafana/loki:${LOKI_VERSION:-3.7.7}
+    image: grafana/loki:${LOKI_VERSION:-3.7.8}
     container_name: devinfra-loki
     profiles: [loki, observability]
     ports:
