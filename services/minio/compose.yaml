@@ -46,7 +46,7 @@ services:
     extends:
       file: ../../common/base.yaml
       service: defaults
-    image: pgsty/silo:${SILO_VERSION:-RELEASE.2026-09-03T13-18-01Z}
+    image: pgsty/silo:${SILO_VERSION:-RELEASE.2026-09-16T00-00-00Z-distroless}
     container_name: devinfra-minio
     profiles: [minio, core]
     ports:
@@ -75,7 +75,7 @@ services:
       service: defaults
     # Same image as the server: it ships `mc`, so the archived minio/mc is
     # no longer needed. Overriding the entrypoint runs the client.
-    image: pgsty/silo:${SILO_VERSION:-RELEASE.2026-09-03T13-18-01Z}
+    image: pgsty/silo:${SILO_VERSION:-RELEASE.2026-09-16T00-00-00Z-distroless}
     container_name: devinfra-minio-init
     profiles: [minio, core]
     depends_on:
