@@ -19,7 +19,7 @@ services:
     extends:
       file: ../../common/base.yaml
       service: defaults
-    image: grafana/tempo:${TEMPO_VERSION:-3.0.3}
+    image: grafana/tempo:${TEMPO_VERSION:-3.1.0}
     container_name: devinfra-tempo
     profiles: [tempo, observability]
     ports:
