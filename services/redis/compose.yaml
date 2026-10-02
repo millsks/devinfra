@@ -34,7 +34,7 @@ services:
     extends:
       file: ../../common/base.yaml
       service: defaults
-    image: redis:${REDIS_VERSION:-8.10.1-alpine}
+    image: redis:${REDIS_VERSION:-8.10.2-alpine}
     container_name: devinfra-redis
     profiles: [redis, minimal, core, admin]
     ports:
