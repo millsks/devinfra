@@ -25,7 +25,7 @@ services:
     extends:
       file: ../../common/base.yaml
       service: defaults
-    image: mher/flower:${FLOWER_VERSION:-2.1.0}
+    image: mher/flower:${FLOWER_VERSION:-2.2.0}
     container_name: devinfra-flower
     profiles: [flower, admin]
     depends_on:
