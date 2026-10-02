@@ -50,7 +50,7 @@ services:
     extends:
       file: ../../common/base.yaml
       service: defaults
-    image: quay.io/keycloak/keycloak:${KEYCLOAK_VERSION:-26.7.3}
+    image: quay.io/keycloak/keycloak:${KEYCLOAK_VERSION:-26.8.0}
     container_name: devinfra-keycloak
     profiles: [keycloak, core]
     depends_on:
