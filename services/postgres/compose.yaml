@@ -40,7 +40,7 @@ services:
     extends:
       file: ../../common/base.yaml
       service: defaults
-    image: pgvector/pgvector:${POSTGRES_VERSION:-0.8.6-pg17}
+    image: pgvector/pgvector:${POSTGRES_VERSION:-0.8.7-pg17}
     container_name: devinfra-postgres
     profiles: [postgres, minimal, core, admin]
     ports:
