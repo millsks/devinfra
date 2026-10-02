@@ -18,7 +18,7 @@ services:
     extends:
       file: ../../common/base.yaml
       service: defaults
-    image: prom/prometheus:${PROMETHEUS_VERSION:-v3.14.0}
+    image: prom/prometheus:${PROMETHEUS_VERSION:-v3.15.0}
     container_name: devinfra-prometheus
     profiles: [prometheus, observability]
     ports:
