@@ -32,7 +32,7 @@ services:
     extends:
       file: ../../common/base.yaml
       service: defaults
-    image: grafana/grafana:${GRAFANA_VERSION:-13.2.1}
+    image: grafana/grafana:${GRAFANA_VERSION:-13.2.3}
     container_name: devinfra-grafana
     profiles: [grafana, observability]
     depends_on:
