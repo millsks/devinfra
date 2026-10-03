@@ -37,7 +37,7 @@ services:
     extends:
       file: ../../common/base.yaml
       service: defaults
-    image: axllent/mailpit:${MAILPIT_VERSION:-v1.31.1}
+    image: axllent/mailpit:${MAILPIT_VERSION:-v1.31.4}
     container_name: devinfra-mailpit
     profiles: [mailpit, core]
     ports:
