@@ -32,7 +32,7 @@ services:
     extends:
       file: ../../common/base.yaml
       service: defaults
-    image: otel/opentelemetry-collector-contrib:${OTEL_COLLECTOR_VERSION:-0.160.0}
+    image: otel/opentelemetry-collector-contrib:${OTEL_COLLECTOR_VERSION:-0.162.0}
     container_name: devinfra-otel-collector
     profiles: [otel-collector, observability]
     depends_on:
