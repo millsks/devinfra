@@ -25,7 +25,7 @@ services:
     extends:
       file: ../../common/base.yaml
       service: defaults
-    image: redis/redisinsight:${REDISINSIGHT_VERSION:-3.8.0}
+    image: redis/redisinsight:${REDISINSIGHT_VERSION:-3.10.1}
     container_name: devinfra-redisinsight
     profiles: [redisinsight, admin]
     depends_on:
